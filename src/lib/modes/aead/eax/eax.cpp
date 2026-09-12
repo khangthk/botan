@@ -8,10 +8,13 @@
 
 #include <botan/internal/eax.h>
 
+#include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/cmac.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/ctr.h>
 #include <botan/internal/fmt.h>
+#include <botan/internal/int_utils.h>
 
 namespace Botan {
 
@@ -49,11 +52,11 @@ void EAX_Mode::clear() {
    m_cipher->clear();
    m_ctr->clear();
    m_cmac->clear();
+   m_ad_mac.clear();
    reset();
 }
 
 void EAX_Mode::reset() {
-   m_ad_mac.clear();
    m_nonce_mac.clear();
 
    // Clear out any data added to the CMAC calculation
@@ -92,6 +95,13 @@ void EAX_Mode::key_schedule(std::span<const uint8_t> key) {
    */
    m_ctr->set_key(key);
    m_cmac->set_key(key);
+
+   // m_ad_mac was precomputed under the previous CMAC key (if any).
+   // Re-keying invalidates it; AD must be re-set after set_key.
+   m_ad_mac.clear();
+
+   // Also drop any per-message state.
+   reset();
 }
 
 /*
@@ -99,13 +109,15 @@ void EAX_Mode::key_schedule(std::span<const uint8_t> key) {
 */
 void EAX_Mode::set_associated_data_n(size_t idx, std::span<const uint8_t> ad) {
    BOTAN_ARG_CHECK(idx == 0, "EAX: cannot handle non-zero index in set_associated_data_n");
-   if(m_nonce_mac.empty() == false) {
+   if(!m_nonce_mac.empty()) {
       throw Invalid_State("Cannot set AD for EAX while processing a message");
    }
    m_ad_mac = eax_prf(1, block_size(), *m_cmac, ad.data(), ad.size());
 }
 
 void EAX_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
+   BOTAN_STATE_CHECK(m_nonce_mac.empty());
+
    if(!valid_nonce_length(nonce_len)) {
       throw Invalid_IV_Length(name(), nonce_len);
    }
@@ -120,6 +132,10 @@ void EAX_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
    m_cmac->update(2);
 }
 
+size_t EAX_Encryption::output_length(size_t input_length) const {
+   return add_or_throw(input_length, tag_size(), "EAX input too large");
+}
+
 size_t EAX_Encryption::process_msg(uint8_t buf[], size_t sz) {
    BOTAN_STATE_CHECK(!m_nonce_mac.empty());
    m_ctr->cipher(buf, buf, sz);
@@ -129,6 +145,7 @@ size_t EAX_Encryption::process_msg(uint8_t buf[], size_t sz) {
 
 void EAX_Encryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
    BOTAN_STATE_CHECK(!m_nonce_mac.empty());
+   BOTAN_ARG_CHECK(buffer.size() >= offset, "Offset is out of range");
    update(buffer, offset);
 
    secure_vector<uint8_t> data_mac = m_cmac->final();
@@ -145,6 +162,11 @@ void EAX_Encryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
    m_nonce_mac.clear();
 }
 
+size_t EAX_Decryption::output_length(size_t input_length) const {
+   BOTAN_ARG_CHECK(input_length >= tag_size(), "Message too short to be valid");
+   return input_length - tag_size();
+}
+
 size_t EAX_Decryption::process_msg(uint8_t buf[], size_t sz) {
    BOTAN_STATE_CHECK(!m_nonce_mac.empty());
    m_cmac->update(buf, sz);
@@ -153,6 +175,7 @@ size_t EAX_Decryption::process_msg(uint8_t buf[], size_t sz) {
 }
 
 void EAX_Decryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
+   BOTAN_STATE_CHECK(!m_nonce_mac.empty());
    BOTAN_ARG_CHECK(buffer.size() >= offset, "Offset is out of range");
    const size_t sz = buffer.size() - offset;
    uint8_t* buf = buffer.data() + offset;
@@ -161,7 +184,7 @@ void EAX_Decryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
 
    const size_t remaining = sz - tag_size();
 
-   if(remaining) {
+   if(remaining > 0) {
       m_cmac->update(buf, remaining);
       m_ctr->cipher(buf, buf, remaining);
    }
@@ -184,6 +207,7 @@ void EAX_Decryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
    m_nonce_mac.clear();
 
    if(!accept_mac) {
+      clear_mem(std::span{buffer}.subspan(offset, remaining));
       throw Invalid_Authentication_Tag("EAX tag check failed");
    }
 }

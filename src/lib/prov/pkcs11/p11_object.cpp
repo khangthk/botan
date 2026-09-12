@@ -7,6 +7,7 @@
 */
 
 #include <botan/p11_object.h>
+
 #include <map>
 
 namespace Botan::PKCS11 {
@@ -24,12 +25,12 @@ void AttributeContainer::add_class(ObjectClass object_class) {
 void AttributeContainer::add_string(AttributeType attribute, std::string_view value) {
    m_strings.push_back(std::string(value));
    add_attribute(
-      attribute, reinterpret_cast<const uint8_t*>(m_strings.back().data()), static_cast<Ulong>(value.size()));
+      attribute, reinterpret_cast<const uint8_t*>(m_strings.back().data()), checked_ulong_cast(value.size()));
 }
 
 void AttributeContainer::add_binary(AttributeType attribute, const uint8_t* value, size_t length) {
    m_vectors.push_back(secure_vector<uint8_t>(value, value + length));
-   add_attribute(attribute, reinterpret_cast<const uint8_t*>(m_vectors.back().data()), static_cast<Ulong>(length));
+   add_attribute(attribute, reinterpret_cast<const uint8_t*>(m_vectors.back().data()), checked_ulong_cast(length));
 }
 
 void AttributeContainer::add_bool(AttributeType attribute, bool value) {
@@ -71,12 +72,12 @@ ObjectFinder::ObjectFinder(Session& session, const std::vector<Attribute>& searc
       m_session(session), m_search_terminated(false) {
    module()->C_FindObjectsInit(m_session.get().handle(),
                                const_cast<Attribute*>(search_template.data()),
-                               static_cast<Ulong>(search_template.size()));
+                               checked_ulong_cast(search_template.size()));
 }
 
 ObjectFinder::~ObjectFinder() noexcept {
    try {
-      if(m_search_terminated == false) {
+      if(!m_search_terminated) {
          module()->C_FindObjectsFinal(m_session.get().handle(), nullptr);
       }
    } catch(...) {
@@ -151,7 +152,7 @@ Object::Object(Session& session, ObjectHandle handle) : m_session(session), m_ha
 
 Object::Object(Session& session, const ObjectProperties& obj_props) : m_session(session), m_handle(0) {
    m_session.get().module()->C_CreateObject(
-      m_session.get().handle(), obj_props.data(), static_cast<Ulong>(obj_props.count()), &m_handle);
+      m_session.get().handle(), obj_props.data(), checked_ulong_cast(obj_props.count()), &m_handle);
 }
 
 secure_vector<uint8_t> Object::get_attribute_value(AttributeType attribute) const {
@@ -170,11 +171,11 @@ void Object::destroy() const {
 }
 
 ObjectHandle Object::copy(const AttributeContainer& modified_attributes) const {
-   ObjectHandle copied_handle;
+   ObjectHandle copied_handle = {};
    module()->C_CopyObject(m_session.get().handle(),
                           m_handle,
                           modified_attributes.data(),
-                          static_cast<Ulong>(modified_attributes.count()),
+                          checked_ulong_cast(modified_attributes.count()),
                           &copied_handle);
    return copied_handle;
 }

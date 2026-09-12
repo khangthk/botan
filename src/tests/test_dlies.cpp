@@ -12,6 +12,7 @@
    #include <botan/dh.h>
    #include <botan/dl_group.h>
    #include <botan/dlies.h>
+   #include <botan/rng.h>
 #endif
 
 namespace Botan_Tests {
@@ -42,13 +43,13 @@ class DLIES_KAT_Tests final : public Text_Based_Test {
 
          auto kdf = Botan::KDF::create(kdf_algo);
          if(!kdf) {
-            result.test_note("Skipping due to missing KDF:  " + kdf_algo);
+            result.test_note("Skipping due to missing KDF", kdf_algo);
             return result;
          }
 
          auto mac = Botan::MAC::create(mac_algo);
          if(!mac) {
-            result.test_note("Skipping due to missing MAC:  " + mac_algo);
+            result.test_note("Skipping due to missing MAC", mac_algo);
             return result;
          }
 
@@ -61,17 +62,17 @@ class DLIES_KAT_Tests final : public Text_Based_Test {
             dec = Botan::Cipher_Mode::create(cipher_algo, Botan::Cipher_Dir::Decryption);
 
             if(!enc || !dec) {
-               result.test_note("Skipping due to missing cipher:  " + mac_algo);
+               result.test_note("Skipping due to missing cipher", cipher_algo);
                return result;
             }
 
             cipher_key_len = enc->key_spec().maximum_keylength();
          }
 
-         Botan::DL_Group domain(group_name);
+         auto group = Botan::DL_Group::from_name(group_name);
 
-         Botan::DH_PrivateKey from(domain, x1);
-         Botan::DH_PrivateKey to(domain, x2);
+         const Botan::DH_PrivateKey from(group, x1);
+         const Botan::DH_PrivateKey to(group, x2);
 
          Botan::DLIES_Encryptor encryptor(
             from, this->rng(), kdf->new_object(), std::move(enc), cipher_key_len, mac->new_object(), mac_key_len);
@@ -85,8 +86,15 @@ class DLIES_KAT_Tests final : public Text_Based_Test {
 
          encryptor.set_other_key(to.public_value());
 
-         result.test_eq("encryption", encryptor.encrypt(input, this->rng()), expected);
-         result.test_eq("decryption", decryptor.decrypt(expected), input);
+         const auto ct_len_bound_enc = static_cast<Botan::PK_Encryptor&>(encryptor).ciphertext_length(input.size());
+         const auto ct_len_bound_dec = static_cast<Botan::PK_Decryptor&>(decryptor).ciphertext_length(input.size());
+         result.test_sz_eq("ciphertext length bounds match", ct_len_bound_enc, ct_len_bound_dec);
+
+         result.test_bin_eq("encryption", encryptor.encrypt(input, this->rng()), expected);
+         result.test_bin_eq("decryption", decryptor.decrypt(expected), input);
+         result.test_sz_lte("ciphertext length within bound",
+                            expected.size(),
+                            static_cast<Botan::PK_Decryptor&>(decryptor).ciphertext_length(input.size()));
 
          check_invalid_ciphertexts(result, decryptor, input, expected, this->rng());
 
@@ -99,8 +107,8 @@ BOTAN_REGISTER_TEST("pubkey", "dlies", DLIES_KAT_Tests);
 Test::Result test_xor() {
    Test::Result result("DLIES XOR");
 
-   std::vector<std::string> kdfs = {"KDF2(SHA-512)", "KDF1-18033(SHA-512)"};
-   std::vector<std::string> macs = {"HMAC(SHA-512)", "CMAC(AES-128)"};
+   const std::vector<std::string> kdfs = {"KDF2(SHA-512)", "KDF1-18033(SHA-512)"};
+   const std::vector<std::string> macs = {"HMAC(SHA-512)", "CMAC(AES-128)"};
 
    const size_t mac_key_len = 16;
 
@@ -109,14 +117,16 @@ Test::Result test_xor() {
 
    auto rng = Test::new_rng("dlies_xor");
 
-   Botan::DH_PrivateKey alice(*rng, Botan::DL_Group("modp/ietf/2048"));
-   Botan::DH_PrivateKey bob(*rng, Botan::DL_Group("modp/ietf/2048"));
+   auto group = Botan::DL_Group::from_name("modp/ietf/2048");
+
+   const Botan::DH_PrivateKey alice(*rng, group);
+   const Botan::DH_PrivateKey bob(*rng, group);
 
    for(const auto& kfunc : kdfs) {
       kdf = Botan::KDF::create(kfunc);
 
       if(!kdf) {
-         result.test_note("Skipping due to missing KDF: " + kfunc);
+         result.test_note("Skipping due to missing KDF", kfunc);
          continue;
       }
 
@@ -124,7 +134,7 @@ Test::Result test_xor() {
          mac = Botan::MAC::create(mfunc);
 
          if(!mac) {
-            result.test_note("Skipping due to missing MAC: " + mfunc);
+            result.test_note("Skipping due to missing MAC", mfunc);
             continue;
          }
 
@@ -144,7 +154,10 @@ Test::Result test_xor() {
          // negative test: ciphertext too short
          result.test_throws("ciphertext too short", [&decryptor]() { decryptor.decrypt(std::vector<uint8_t>(2)); });
 
-         result.test_eq("decryption", decryptor.decrypt(ciphertext), plaintext);
+         result.test_bin_eq("decryption", decryptor.decrypt(ciphertext), plaintext);
+         result.test_sz_lte("ciphertext length within bound",
+                            ciphertext.size(),
+                            static_cast<Botan::PK_Decryptor&>(decryptor).ciphertext_length(plaintext.size()));
 
          check_invalid_ciphertexts(result, decryptor, unlock(plaintext), ciphertext, *rng);
       }

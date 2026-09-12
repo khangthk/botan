@@ -9,13 +9,15 @@
 
 #include <botan/cipher_mode.h>
 #include <botan/data_src.h>
+#include <botan/exceptn.h>
 #include <botan/mac.h>
-#include <botan/mem_ops.h>
 #include <botan/pem.h>
 #include <botan/pwdhash.h>
 #include <botan/rng.h>
 #include <botan/internal/ct_utils.h>
+#include <botan/internal/int_utils.h>
 #include <botan/internal/loadstor.h>
+#include <botan/internal/mem_utils.h>
 
 namespace Botan::CryptoBox {
 
@@ -47,7 +49,8 @@ std::string encrypt(const uint8_t input[], size_t input_len, std::string_view pa
       mac (20 bytes)
       ciphertext
    */
-   secure_vector<uint8_t> out_buf(CRYPTOBOX_HEADER_LEN + input_len);
+   const size_t out_len = add_or_throw(CRYPTOBOX_HEADER_LEN, input_len, "CryptoBox input too large");
+   secure_vector<uint8_t> out_buf(out_len);
    store_be(CRYPTOBOX_VERSION_CODE, out_buf.data());
    rng.randomize(&out_buf[VERSION_CODE_LEN], PBKDF_SALT_LEN);
    // space left for MAC here
@@ -102,7 +105,7 @@ secure_vector<uint8_t> decrypt_bin(const uint8_t input[], size_t input_len, std:
    }
 
    for(size_t i = 0; i != VERSION_CODE_LEN; ++i) {
-      uint32_t version = load_be<uint32_t>(ciphertext.data(), 0);
+      const uint32_t version = load_be<uint32_t>(ciphertext.data(), 0);
       if(version != CRYPTOBOX_VERSION_CODE) {
          throw Decoding_Error("Bad CryptoBox version");
       }
@@ -149,18 +152,28 @@ secure_vector<uint8_t> decrypt_bin(const uint8_t input[], size_t input_len, std:
 BOTAN_DIAGNOSTIC_PUSH
 BOTAN_DIAGNOSTIC_IGNORE_DEPRECATED_DECLARATIONS
 
+namespace {
+
+secure_vector<uint8_t> decrypt_bin(std::span<const uint8_t> input, std::string_view passphrase) {
+   return CryptoBox::decrypt_bin(input.data(), input.size(), passphrase);
+}
+
+std::string decrypt(std::span<const uint8_t> input, std::string_view passphrase) {
+   return CryptoBox::decrypt(input.data(), input.size(), passphrase);
+}
+
+}  // namespace
+
 secure_vector<uint8_t> decrypt_bin(std::string_view input, std::string_view passphrase) {
-   return decrypt_bin(cast_char_ptr_to_uint8(input.data()), input.size(), passphrase);
+   return decrypt_bin(as_span_of_bytes(input), passphrase);
 }
 
 std::string decrypt(const uint8_t input[], size_t input_len, std::string_view passphrase) {
-   const secure_vector<uint8_t> bin = decrypt_bin(input, input_len, passphrase);
-
-   return std::string(cast_uint8_ptr_to_char(&bin[0]), bin.size());
+   return bytes_to_string(decrypt_bin(input, input_len, passphrase));
 }
 
 std::string decrypt(std::string_view input, std::string_view passphrase) {
-   return decrypt(cast_char_ptr_to_uint8(input.data()), input.size(), passphrase);
+   return decrypt(as_span_of_bytes(input), passphrase);
 }
 
 BOTAN_DIAGNOSTIC_POP

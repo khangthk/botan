@@ -11,13 +11,19 @@
 #ifndef BOTAN_TLS_CHANNEL_IMPL_H_
 #define BOTAN_TLS_CHANNEL_IMPL_H_
 
+#include <botan/assert.h>
 #include <botan/tls_channel.h>
 #include <botan/tls_magic.h>
+#include <botan/tls_session.h>  // TODO remove this dep
+#include <botan/tls_session_manager.h>
 #include <botan/tls_version.h>
-
 #include <memory>
 #include <utility>
 #include <vector>
+
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+   #include <botan/tls_messages_13.h>
+#endif
 
 namespace Botan {
 
@@ -29,20 +35,23 @@ namespace TLS {
 class Client;
 class Server;
 
-enum class Record_Type : uint8_t {
-   Invalid = 0,  // RFC 8446 (TLS 1.3)
+class Channel_Impl : public std::enable_shared_from_this<Channel_Impl> {
+   protected:
+      /**
+      * Sentinel object to make constructors of derived classes un-callable by
+      * other classes.
+      */
+      struct Private {
+            explicit Private() = default;
+      };
 
-   ChangeCipherSpec = 20,
-   Alert = 21,
-   Handshake = 22,
-   ApplicationData = 23,
-
-   Heartbeat = 24,  // RFC 6520 (TLS 1.3)
-};
-
-class Channel_Impl {
    public:
       virtual ~Channel_Impl() = default;
+
+      Channel_Impl(const Channel_Impl& other) = delete;
+      Channel_Impl(Channel_Impl&& other) = default;
+      Channel_Impl& operator=(const Channel_Impl& other) = delete;
+      Channel_Impl& operator=(Channel_Impl&& other) = delete;
 
       /**
       * Inject TLS traffic received from counterparty
@@ -88,6 +97,8 @@ class Channel_Impl {
       * @return true iff the connection is active for sending application data
       */
       virtual bool is_active() const = 0;
+
+      virtual std::optional<std::chrono::milliseconds> next_retransmission_timeout() const { return std::nullopt; }
 
       /**
       * @return true iff the connection has been definitely closed
@@ -171,10 +182,8 @@ class Channel_Impl {
       virtual bool secure_renegotiation_supported() const = 0;
 
       /**
-      * Perform a handshake timeout check. This does nothing unless
-      * this is a DTLS channel with a pending handshake state, in
-      * which case we check for timeout and potentially retransmit
-      * handshake packets.
+      * Perform a handshake timeout check. This does nothing unless this is a
+      * DTLS channel with a handshake in progress.
       */
       virtual bool timeout_check() = 0;
 
@@ -186,6 +195,10 @@ class Channel_Impl {
       virtual std::string application_protocol() const = 0;
 
    protected:
+      Channel_Impl() = default;
+
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+
       /**
        * This struct collect all information required to perform a downgrade from TLS 1.3 to TLS 1.2.
        *
@@ -198,7 +211,7 @@ class Channel_Impl {
        */
       struct Downgrade_Information {
             /// The client hello message including the handshake header bytes as transferred to the peer.
-            std::vector<uint8_t> client_hello_message;
+            std::optional<Client_Hello_13> client_hello;
 
             /// The full data transcript received from the peer. This will contain the server hello message that forced us to downgrade.
             std::vector<uint8_t> peer_transcript;
@@ -221,16 +234,16 @@ class Channel_Impl {
             bool will_downgrade;
       };
 
-      std::unique_ptr<Downgrade_Information> m_downgrade_info;
+      std::unique_ptr<Downgrade_Information> m_downgrade_info;  // NOLINT(*non-private-member-variable*)
 
       void preserve_peer_transcript(std::span<const uint8_t> input) {
          BOTAN_STATE_CHECK(m_downgrade_info);
          m_downgrade_info->peer_transcript.insert(m_downgrade_info->peer_transcript.end(), input.begin(), input.end());
       }
 
-      void preserve_client_hello(std::span<const uint8_t> msg) {
+      void preserve_client_hello(Client_Hello_13 client_hello) {
          BOTAN_STATE_CHECK(m_downgrade_info);
-         m_downgrade_info->client_hello_message.assign(msg.begin(), msg.end());
+         m_downgrade_info->client_hello.emplace(std::move(client_hello));
       }
 
       friend class Client;
@@ -244,7 +257,7 @@ class Channel_Impl {
       /**
        * Implementations use this to signal that the peer indicated a protocol
        * version downgrade. After calling `request_downgrade()` no further
-       * state changes must be perfomed by the implementation. Particularly, no
+       * state changes must be performed by the implementation. Particularly, no
        * further handshake messages must be emitted. Instead, they must yield
        * control flow back to the underlying Channel implementation to perform
        * the protocol version downgrade.
@@ -255,7 +268,7 @@ class Channel_Impl {
       }
 
       void request_downgrade_for_resumption(Session_with_Handle session) {
-         BOTAN_STATE_CHECK(m_downgrade_info && m_downgrade_info->client_hello_message.empty() &&
+         BOTAN_STATE_CHECK(m_downgrade_info && !m_downgrade_info->client_hello.has_value() &&
                            m_downgrade_info->peer_transcript.empty() && !m_downgrade_info->tls12_session.has_value());
          BOTAN_ASSERT_NOMSG(session.session.version().is_pre_tls_13());
          m_downgrade_info->tls12_session = std::move(session);
@@ -264,18 +277,32 @@ class Channel_Impl {
 
    public:
       /**
-       * Indicates whether a downgrade to TLS 1.2 or lower is in progress
-       *
-       * @sa Downgrade_Information
-       */
-      bool is_downgrading() const { return m_downgrade_info && m_downgrade_info->will_downgrade; }
-
-      /**
        * @sa Downgrade_Information
        */
       std::unique_ptr<Downgrade_Information> extract_downgrade_info() { return std::exchange(m_downgrade_info, {}); }
 
-      bool expects_downgrade() const { return m_downgrade_info != nullptr; }
+#endif
+
+      /**
+       * Indicates whether a downgrade to TLS 1.2 or lower is in progress
+       *
+       * @sa Downgrade_Information
+       */
+      bool is_downgrading() const {
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+         return m_downgrade_info && m_downgrade_info->will_downgrade;
+#else
+         return false;
+#endif
+      }
+
+      bool expects_downgrade() const {
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+         return m_downgrade_info != nullptr;
+#else
+         return false;
+#endif
+      }
 };
 
 }  // namespace TLS

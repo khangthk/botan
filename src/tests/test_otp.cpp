@@ -11,9 +11,12 @@
    #include <botan/hash.h>
    #include <botan/otp.h>
    #include <botan/internal/calendar.h>
+   #include <botan/internal/parsing.h>
 #endif
 
 namespace Botan_Tests {
+
+namespace {
 
 #if defined(BOTAN_HAS_HOTP) && defined(BOTAN_HAS_TOTP)
 
@@ -38,26 +41,27 @@ class HOTP_KAT_Tests final : public Text_Based_Test {
 
          Botan::HOTP hotp(key, hash_algo, digits);
 
-         result.test_int_eq("OTP", hotp.generate_hotp(counter), otp);
+         result.test_u32_eq("OTP", hotp.generate_hotp(counter), otp);
 
          std::pair<bool, uint64_t> otp_res = hotp.verify_hotp(otp, counter, 0);
-         result.test_eq("OTP verify result", otp_res.first, true);
-         result.confirm("OTP verify next counter", otp_res.second == counter + 1);
+         result.test_is_true("OTP verify result", otp_res.first);
+         result.test_u64_eq("OTP verify next counter", otp_res.second, counter + 1);
 
          // Test invalid OTP
          otp_res = hotp.verify_hotp(otp + 1, counter, 0);
-         result.test_eq("OTP verify result", otp_res.first, false);
-         result.confirm("OTP verify next counter", otp_res.second == counter);
+         result.test_is_false("OTP verify result", otp_res.first);
+         result.test_u64_eq("OTP verify next counter", otp_res.second, counter);
 
          // Test invalid OTP with long range
          otp_res = hotp.verify_hotp(otp + 1, counter, 100);
-         result.test_eq("OTP verify result", otp_res.first, false);
-         result.confirm("OTP verify next counter", otp_res.second == counter);
+         result.test_is_false("OTP verify result", otp_res.first);
+         result.test_u64_eq("OTP verify next counter", otp_res.second, counter);
 
          // Test valid OTP with long range
-         otp_res = hotp.verify_hotp(otp, counter - 90, 100);
-         result.test_eq("OTP verify result", otp_res.first, true);
-         result.confirm("OTP verify next counter", otp_res.second == counter + 1);
+         const uint64_t starting_counter = (counter >= 90) ? (counter - 90) : uint64_t(0);
+         otp_res = hotp.verify_hotp(otp, starting_counter, 100);
+         result.test_is_true("OTP verify result", otp_res.first);
+         result.test_u64_eq("OTP verify next counter", otp_res.second, counter + 1);
 
          return result;
       }
@@ -87,17 +91,17 @@ class TOTP_KAT_Tests final : public Text_Based_Test {
 
          Botan::TOTP totp(key, hash_algo, digits, timestep);
 
-         std::chrono::system_clock::time_point time = from_timestring(timestamp);
-         std::chrono::system_clock::time_point later_time = time + std::chrono::seconds(timestep);
-         std::chrono::system_clock::time_point too_late = time + std::chrono::seconds(2 * timestep);
+         const std::chrono::system_clock::time_point time = from_timestring(timestamp);
+         const std::chrono::system_clock::time_point later_time = time + std::chrono::seconds(timestep);
+         const std::chrono::system_clock::time_point too_late = time + std::chrono::seconds(2 * timestep);
 
-         result.test_int_eq("TOTP generate", totp.generate_totp(time), otp);
+         result.test_u32_eq("TOTP generate", totp.generate_totp(time), otp);
 
-         result.test_eq("TOTP verify valid", totp.verify_totp(otp, time, 0), true);
-         result.test_eq("TOTP verify invalid", totp.verify_totp(otp ^ 1, time, 0), false);
-         result.test_eq("TOTP verify time slip", totp.verify_totp(otp, later_time, 0), false);
-         result.test_eq("TOTP verify time slip allowed", totp.verify_totp(otp, later_time, 1), true);
-         result.test_eq("TOTP verify time slip out of range", totp.verify_totp(otp, too_late, 1), false);
+         result.test_is_true("TOTP verify valid", totp.verify_totp(otp, time, 0));
+         result.test_is_false("TOTP verify invalid", totp.verify_totp(otp ^ 1, time, 0));
+         result.test_is_false("TOTP verify time slip", totp.verify_totp(otp, later_time, 0));
+         result.test_is_true("TOTP verify time slip allowed", totp.verify_totp(otp, later_time, 1));
+         result.test_is_false("TOTP verify time slip out of range", totp.verify_totp(otp, too_late, 1));
 
          return result;
       }
@@ -109,18 +113,25 @@ class TOTP_KAT_Tests final : public Text_Based_Test {
          }
          // YYYY-MM-DDTHH:MM:SS
          // 0123456789012345678
-         const uint32_t year = static_cast<uint32_t>(std::stoi(time_str.substr(0, 4)));
-         const uint32_t month = static_cast<uint32_t>(std::stoi(time_str.substr(5, 2)));
-         const uint32_t day = static_cast<uint32_t>(std::stoi(time_str.substr(8, 2)));
-         const uint32_t hour = static_cast<uint32_t>(std::stoi(time_str.substr(11, 2)));
-         const uint32_t minute = static_cast<uint32_t>(std::stoi(time_str.substr(14, 2)));
-         const uint32_t second = static_cast<uint32_t>(std::stoi(time_str.substr(17, 2)));
-         return Botan::calendar_point(year, month, day, hour, minute, second).to_std_timepoint();
+         const auto year = Botan::parse_u32(time_str.substr(0, 4));
+         const auto month = Botan::parse_u32(time_str.substr(5, 2));
+         const auto day = Botan::parse_u32(time_str.substr(8, 2));
+         const auto hour = Botan::parse_u32(time_str.substr(11, 2));
+         const auto minute = Botan::parse_u32(time_str.substr(14, 2));
+         const auto second = Botan::parse_u32(time_str.substr(17, 2));
+
+         if(year && month && day && hour && minute && second) {
+            return Botan::calendar_point(*year, *month, *day, *hour, *minute, *second).to_std_timepoint();
+         } else {
+            throw Test_Error("Invalid TOTP timestamp string " + time_str);
+         }
       }
 };
 
 BOTAN_REGISTER_TEST("otp", "otp_totp", TOTP_KAT_Tests);
 
 #endif
+
+}  // namespace
 
 }  // namespace Botan_Tests

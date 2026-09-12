@@ -10,11 +10,10 @@
 #define BOTAN_HSS_H_
 
 #include <botan/asn1_obj.h>
-#include <botan/rng.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/int_utils.h>
 #include <botan/internal/lms.h>
-
+#include <botan/internal/stateful_key_index_registry.h>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -22,6 +21,8 @@
 #include <vector>
 
 namespace Botan {
+
+class RandomNumberGenerator;
 
 /**
  * @brief The index of a node within a specific LMS tree layer
@@ -43,7 +44,7 @@ class BOTAN_TEST_API HSS_LMS_Params final {
       /**
        * @brief Represents a pair of LMS and LMOTS parameters associated with one LMS tree layer.
        */
-      class LMS_LMOTS_Params_Pair {
+      class LMS_LMOTS_Params_Pair final {
          public:
             /**
              * @brief The LMS parameters.
@@ -75,7 +76,7 @@ class BOTAN_TEST_API HSS_LMS_Params final {
        * @brief Construct the HSS-LMS parameters form an algorithm parameter string.
        *
        * The HSS/LMS instance to use for creating new keys is defined using an algorithm parameter string,
-       * i.e. to define which hash function (hash), LMS tree hights (h)
+       * i.e. to define which hash function (hash), LMS tree height (h)
        * and OTS Winternitz coefficient widths (w) to use. The syntax is the following:
        *
        * HSS-LMS(<hash>,HW(<h>,<w>),HW(<h>,<w>),...)
@@ -123,7 +124,7 @@ class BOTAN_TEST_API HSS_LMS_Params final {
  * Note that the format is not specified in the RFC 8554,
  * and is Botan specific.
  */
-class BOTAN_TEST_API HSS_LMS_PrivateKeyInternal final {
+class HSS_LMS_PrivateKeyInternal final {
    public:
       /**
        * @brief Create an internal HSS-LMS private key.
@@ -153,17 +154,23 @@ class BOTAN_TEST_API HSS_LMS_PrivateKeyInternal final {
       secure_vector<uint8_t> to_bytes() const;
 
       /**
-       * @brief Get the idx of the next signature to generate.
+       * @brief Get the number of remaining signatures for this key.
        */
-      HSS_Sig_Idx get_idx() const { return m_current_idx; }
+      HSS_Sig_Idx remaining_operations() const;
 
       /**
        * @brief Set the idx of the next signature to generate.
        *
        * Note that creating two signatures with the same index is insecure.
-       * The index must be lower than hss_params().max_sig_count().
+       * The index must be lower than or equal to hss_params().max_sig_count(),
+       * with an index == max indicating the key is completely exhausted.
+       * The index will never go backward (highest value wins).
+       *
+       * The signing state lives in the process-wide
+       * Stateful_Key_Index_Registry keyed by the key identity, not in this
+       * object, so this leaves *this unchanged and is therefore const.
        */
-      void set_idx(HSS_Sig_Idx idx);
+      void set_idx(HSS_Sig_Idx idx) const;
 
       /**
        * @brief Create a HSS-LMS signature.
@@ -177,7 +184,7 @@ class BOTAN_TEST_API HSS_LMS_PrivateKeyInternal final {
        *
        * @param msg The message to sign.
        */
-      std::vector<uint8_t> sign(std::span<const uint8_t> msg);
+      std::vector<uint8_t> sign(std::span<const uint8_t> msg) const;
 
       /**
        * @brief Create the HSS root LMS tree's LMS_PrivateKey using the HSS-LMS private key.
@@ -205,7 +212,7 @@ class BOTAN_TEST_API HSS_LMS_PrivateKeyInternal final {
        * @brief Get the index of the next signature to generate and
        *        increase the counter by one.
        */
-      HSS_Sig_Idx reserve_next_idx();
+      HSS_Sig_Idx reserve_next_idx() const;
 
       /**
        * @brief Returns the size in bytes the key would have in its encoded format.
@@ -230,7 +237,7 @@ class BOTAN_TEST_API HSS_LMS_PrivateKeyInternal final {
       HSS_LMS_Params m_hss_params;
       LMS_Seed m_hss_seed;
       LMS_Identifier m_identifier;
-      HSS_Sig_Idx m_current_idx;
+      Stateful_Key_Index_Registry::KeyId m_keyid;
       const size_t m_sig_size;
 };
 
@@ -242,7 +249,7 @@ class HSS_Signature;
  * Format according to RFC 8554:
  * u32str(L) || pub[0]
  */
-class BOTAN_TEST_API HSS_LMS_PublicKeyInternal final {
+class HSS_LMS_PublicKeyInternal final {
    public:
       /**
        * @brief Create the public HSS-LMS key from its private key.
@@ -326,7 +333,7 @@ class BOTAN_TEST_API HSS_Signature final {
        * signed_pub_key[i] = sig[i] || pub[i+1],
        * for i between 0 and Nspk-1, inclusive.
        */
-      class Signed_Pub_Key {
+      class Signed_Pub_Key final {
          public:
             /**
              * @brief Constructor for a new sig-pubkey-pair

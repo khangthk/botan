@@ -11,6 +11,10 @@
 #include <botan/internal/loadstor.h>
 #include <botan/internal/rotate.h>
 
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
+
 namespace Botan {
 
 namespace {
@@ -29,9 +33,22 @@ inline void salsa20_quarter_round(uint32_t& x1, uint32_t& x2, uint32_t& x3, uint
 */
 //static
 void Salsa20::hsalsa20(uint32_t output[8], const uint32_t input[16]) {
-   uint32_t x00 = input[0], x01 = input[1], x02 = input[2], x03 = input[3], x04 = input[4], x05 = input[5],
-            x06 = input[6], x07 = input[7], x08 = input[8], x09 = input[9], x10 = input[10], x11 = input[11],
-            x12 = input[12], x13 = input[13], x14 = input[14], x15 = input[15];
+   uint32_t x00 = input[0];
+   uint32_t x01 = input[1];
+   uint32_t x02 = input[2];
+   uint32_t x03 = input[3];
+   uint32_t x04 = input[4];
+   uint32_t x05 = input[5];
+   uint32_t x06 = input[6];
+   uint32_t x07 = input[7];
+   uint32_t x08 = input[8];
+   uint32_t x09 = input[9];
+   uint32_t x10 = input[10];
+   uint32_t x11 = input[11];
+   uint32_t x12 = input[12];
+   uint32_t x13 = input[13];
+   uint32_t x14 = input[14];
+   uint32_t x15 = input[15];
 
    for(size_t i = 0; i != 10; ++i) {
       salsa20_quarter_round(x00, x04, x08, x12);
@@ -62,9 +79,22 @@ void Salsa20::hsalsa20(uint32_t output[8], const uint32_t input[16]) {
 void Salsa20::salsa_core(uint8_t output[64], const uint32_t input[16], size_t rounds) {
    BOTAN_ASSERT_NOMSG(rounds % 2 == 0);
 
-   uint32_t x00 = input[0], x01 = input[1], x02 = input[2], x03 = input[3], x04 = input[4], x05 = input[5],
-            x06 = input[6], x07 = input[7], x08 = input[8], x09 = input[9], x10 = input[10], x11 = input[11],
-            x12 = input[12], x13 = input[13], x14 = input[14], x15 = input[15];
+   uint32_t x00 = input[0];
+   uint32_t x01 = input[1];
+   uint32_t x02 = input[2];
+   uint32_t x03 = input[3];
+   uint32_t x04 = input[4];
+   uint32_t x05 = input[5];
+   uint32_t x06 = input[6];
+   uint32_t x07 = input[7];
+   uint32_t x08 = input[8];
+   uint32_t x09 = input[9];
+   uint32_t x10 = input[10];
+   uint32_t x11 = input[11];
+   uint32_t x12 = input[12];
+   uint32_t x13 = input[13];
+   uint32_t x14 = input[14];
+   uint32_t x15 = input[15];
 
    for(size_t i = 0; i != rounds / 2; ++i) {
       salsa20_quarter_round(x00, x04, x08, x12);
@@ -96,6 +126,88 @@ void Salsa20::salsa_core(uint8_t output[64], const uint32_t input[16], size_t ro
    store_le(x15 + input[15], output + 4 * 15);
 }
 
+size_t Salsa20::parallelism() {
+#if defined(BOTAN_HAS_SALSA20_AVX512)
+   if(CPUID::has(CPUID::Feature::AVX512)) {
+      return 16;
+   }
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_SIMD8X32)
+   if(CPUID::has(CPUID::Feature::SIMD_8X32)) {
+      return 8;
+   }
+#endif
+
+   return 4;
+}
+
+std::string Salsa20::provider() const {
+#if defined(BOTAN_HAS_SALSA20_AVX512)
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512)) {
+      return *feat;
+   }
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_SIMD8X32)
+   if(auto feat = CPUID::check(CPUID::Feature::SIMD_8X32)) {
+      return *feat;
+   }
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_SIMD32)
+   if(auto feat = CPUID::check(CPUID::Feature::SIMD_4X32)) {
+      return *feat;
+   }
+#endif
+
+   return "base";
+}
+
+//static
+void Salsa20::salsa20(uint8_t output[], size_t output_blocks, uint32_t state[16], size_t rounds) {
+   BOTAN_ASSERT(rounds % 2 == 0, "Valid rounds");
+
+#if defined(BOTAN_HAS_SALSA20_AVX512)
+   if(CPUID::has(CPUID::Feature::AVX512)) {
+      while(output_blocks >= 16) {
+         Salsa20::salsa20_avx512_x16(output, state, rounds);
+         output += 16 * 64;
+         output_blocks -= 16;
+      }
+   }
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_SIMD8X32)
+   if(CPUID::has(CPUID::Feature::SIMD_8X32)) {
+      while(output_blocks >= 8) {
+         Salsa20::salsa20_simd8x32_x8(output, state, rounds);
+         output += 8 * 64;
+         output_blocks -= 8;
+      }
+   }
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_SIMD32)
+   if(CPUID::has(CPUID::Feature::SIMD_4X32)) {
+      while(output_blocks >= 4) {
+         Salsa20::salsa20_simd32_x4(output, state, rounds);
+         output += 4 * 64;
+         output_blocks -= 4;
+      }
+   }
+#endif
+
+   for(size_t i = 0; i != output_blocks; ++i) {
+      salsa_core(output + 64 * i, state, rounds);
+
+      ++state[8];
+      if(state[8] == 0) {
+         state[9] += 1;
+      }
+   }
+}
+
 /*
 * Combine cipher stream with message
 */
@@ -106,10 +218,7 @@ void Salsa20::cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) {
       const size_t available = m_buffer.size() - m_position;
 
       xor_buf(out, in, &m_buffer[m_position], available);
-      salsa_core(m_buffer.data(), m_state.data(), 20);
-
-      ++m_state[8];
-      m_state[9] += (m_state[8] == 0);
+      salsa20(m_buffer.data(), m_buffer.size() / 64, m_state.data(), 20);
 
       length -= available;
       in += available;
@@ -119,6 +228,27 @@ void Salsa20::cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) {
    }
 
    xor_buf(out, in, &m_buffer[m_position], length);
+
+   m_position += length;
+}
+
+void Salsa20::generate_keystream(uint8_t out[], size_t length) {
+   assert_key_material_set();
+
+   while(length >= m_buffer.size() - m_position) {
+      const size_t available = m_buffer.size() - m_position;
+
+      // TODO: this could write directly to the output buffer
+      // instead of bouncing it through m_buffer first
+      copy_mem(out, &m_buffer[m_position], available);
+      salsa20(m_buffer.data(), m_buffer.size() / 64, m_state.data(), 20);
+
+      length -= available;
+      out += available;
+      m_position = 0;
+   }
+
+   copy_mem(out, &m_buffer[m_position], length);
 
    m_position += length;
 }
@@ -177,7 +307,9 @@ void Salsa20::key_schedule(std::span<const uint8_t> key) {
    load_le<uint32_t>(m_key.data(), key.data(), m_key.size());
 
    m_state.resize(16);
-   m_buffer.resize(64);
+
+   const size_t salsa_block = 64;
+   m_buffer.resize(parallelism() * salsa_block);
 
    set_iv(nullptr, 0);
 }
@@ -227,10 +359,7 @@ void Salsa20::set_iv_bytes(const uint8_t iv[], size_t length) {
    m_state[8] = 0;
    m_state[9] = 0;
 
-   salsa_core(m_buffer.data(), m_state.data(), 20);
-   ++m_state[8];
-   m_state[9] += (m_state[8] == 0);
-
+   salsa20(m_buffer.data(), m_buffer.size() / 64, m_state.data(), 20);
    m_position = 0;
 }
 
@@ -267,18 +396,12 @@ void Salsa20::clear() {
 void Salsa20::seek(uint64_t offset) {
    assert_key_material_set();
 
-   // Find the block offset
    const uint64_t counter = offset / 64;
-   uint8_t counter8[8];
-   store_le(counter, counter8);
 
-   m_state[8] = load_le<uint32_t>(counter8, 0);
-   m_state[9] += load_le<uint32_t>(counter8, 1);
+   m_state[8] = static_cast<uint32_t>(counter);
+   m_state[9] = static_cast<uint32_t>(counter >> 32);
 
-   salsa_core(m_buffer.data(), m_state.data(), 20);
-
-   ++m_state[8];
-   m_state[9] += (m_state[8] == 0);
+   salsa20(m_buffer.data(), m_buffer.size() / 64, m_state.data(), 20);
 
    m_position = offset % 64;
 }

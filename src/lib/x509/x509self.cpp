@@ -7,14 +7,12 @@
 
 #include <botan/x509self.h>
 
-#include <botan/der_enc.h>
-#include <botan/hash.h>
+#include <botan/assert.h>
 #include <botan/pubkey.h>
 #include <botan/x509_ca.h>
 #include <botan/x509_ext.h>
 #include <botan/x509_key.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/parsing.h>
 
 namespace Botan {
 
@@ -41,14 +39,14 @@ X509_DN load_dn_info(const X509_Cert_Options& opts) {
    return subject_dn;
 }
 
-auto create_alt_name_ext(const X509_Cert_Options& opts, Extensions& extensions) {
+auto create_alt_name_ext(const X509_Cert_Options& opts, const Extensions& extensions) {
    AlternativeName subject_alt;
 
    /*
    If the extension was already created in opts.extension we need to
-   merge the values provied in opts with the values set in the extension.
+   merge the values provided in opts with the values set in the extension.
    */
-   if(auto ext = extensions.get_extension_object_as<Cert_Extension::Subject_Alternative_Name>()) {
+   if(const auto* ext = extensions.get_extension_object_as<Cert_Extension::Subject_Alternative_Name>()) {
       subject_alt = ext->get_alt_name();
    }
 
@@ -59,7 +57,7 @@ auto create_alt_name_ext(const X509_Cert_Options& opts, Extensions& extensions) 
    subject_alt.add_uri(opts.uri);
    subject_alt.add_email(opts.email);
    if(!opts.ip.empty()) {
-      if(auto ipv4 = string_to_ipv4(opts.ip)) {
+      if(auto ipv4 = IPv4Address::from_string(opts.ip)) {
          subject_alt.add_ipv4_address(*ipv4);
       } else {
          throw Invalid_Argument(fmt("Invalid IPv4 address '{}'", opts.ip));
@@ -105,7 +103,7 @@ X509_Certificate create_self_signed_cert(const X509_Cert_Options& opts,
       extensions.add_new(std::make_unique<Cert_Extension::Key_Usage>(constraints), true);
    }
 
-   auto skid = std::make_unique<Cert_Extension::Subject_Key_ID>(pub_key, signer->hash_function());
+   auto skid = std::make_unique<Cert_Extension::Subject_Key_ID>(key);
 
    extensions.add_new(std::make_unique<Cert_Extension::Authority_Key_ID>(skid->get_key_id()));
    extensions.add_new(std::move(skid));
@@ -142,7 +140,9 @@ PKCS10_Request create_cert_req(const X509_Cert_Options& opts,
 
    extensions.replace(create_alt_name_ext(opts, extensions));
 
-   create_alt_name_ext(opts, extensions);
+   if(!opts.ex_constraints.empty()) {
+      extensions.add_new(std::make_unique<Cert_Extension::Extended_Key_Usage>(opts.ex_constraints));
+   }
 
    return PKCS10_Request::create(key, subject_dn, extensions, hash_fn, rng, opts.padding_scheme, opts.challenge);
 }

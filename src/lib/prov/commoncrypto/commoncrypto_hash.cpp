@@ -8,8 +8,7 @@
 #include <botan/internal/commoncrypto.h>
 
 #include <botan/hash.h>
-#include <botan/internal/stl_util.h>
-#include <unordered_map>
+#include <botan/internal/buffer_slicer.h>
 
 #include <CommonCrypto/CommonCrypto.h>
 
@@ -47,6 +46,15 @@ class CommonCrypto_HashFunction final : public HashFunction {
       }
 
       size_t output_length() const override { return m_info.digestLength; }
+
+      size_t security_level() const override {
+         if(m_info.name == "SHA-1") {
+            // Collision attacks with cost ~2^61 are known (Leurent and Peyrin, 2020)
+            return 61;
+         } else {
+            return HashFunction::security_level();
+         }
+      }
 
       size_t hash_block_size() const override { return m_info.blockSize; }
 

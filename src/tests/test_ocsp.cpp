@@ -8,14 +8,19 @@
 #include "tests.h"
 
 #if defined(BOTAN_HAS_OCSP)
+   #include "test_arb_eq.h"
+   #include <botan/ber_dec.h>
    #include <botan/certstor.h>
+   #include <botan/der_enc.h>
+   #include <botan/hex.h>
    #include <botan/ocsp.h>
    #include <botan/x509path.h>
    #include <botan/internal/calendar.h>
-   #include <fstream>
 #endif
 
 namespace Botan_Tests {
+
+namespace {
 
 #if defined(BOTAN_HAS_OCSP) && defined(BOTAN_HAS_RSA) && defined(BOTAN_HAS_EMSA_PKCS1) && \
    defined(BOTAN_TARGET_OS_HAS_FILESYSTEM)
@@ -30,6 +35,35 @@ class OCSP_Tests final : public Test {
          return Botan::OCSP::Response(Test::read_binary_data_file(path));
       }
 
+      static Test::Result test_certid_serial_sign() {
+         Test::Result result("OCSP CertID serial matching respects sign");
+
+         const std::string base = "x509/serial_numbers/";
+         const auto ca = load_test_X509_cert(base + "ca.pem");
+         const auto pos = load_test_X509_cert(base + "pos255.pem");
+         const auto neg = load_test_X509_cert(base + "neg255.pem");
+
+         const Botan::OCSP::CertID neg_id(ca, neg.serial());
+         result.test_is_true("CertID matches its own cert", neg_id.is_id_for(ca, neg));
+         result.test_is_false("CertID does not match same-magnitude positive serial", neg_id.is_id_for(ca, pos));
+
+         const Botan::OCSP::CertID pos_id(ca, pos.serial());
+         result.test_is_true("positive CertID matches its own cert", pos_id.is_id_for(ca, pos));
+         result.test_is_false("positive CertID does not match negative serial", pos_id.is_id_for(ca, neg));
+
+         // The sign survives an encode/decode round trip
+         std::vector<uint8_t> der;
+         Botan::DER_Encoder enc(der);
+         neg_id.encode_into(enc);
+         Botan::OCSP::CertID neg_id_rt;
+         Botan::BER_Decoder dec(der);
+         neg_id_rt.decode_from(dec);
+         result.test_is_true("round-tripped CertID matches its own cert", neg_id_rt.is_id_for(ca, neg));
+         result.test_is_false("round-tripped CertID does not match positive serial", neg_id_rt.is_id_for(ca, pos));
+
+         return result;
+      }
+
       static Test::Result test_response_parsing() {
          Test::Result result("OCSP response parsing");
 
@@ -39,18 +73,69 @@ class OCSP_Tests final : public Test {
 
          for(const std::string& ocsp_input_path : ocsp_input_paths) {
             try {
-               Botan::OCSP::Response resp(Test::read_binary_data_file(ocsp_input_path));
-               result.confirm("parsing was successful", resp.status() == Botan::OCSP::Response_Status_Code::Successful);
+               const Botan::OCSP::Response resp(Test::read_binary_data_file(ocsp_input_path));
+               result.test_enum_eq(
+                  "parsing was successful", resp.status(), Botan::OCSP::Response_Status_Code::Successful);
                result.test_success("Parsed input " + ocsp_input_path);
             } catch(Botan::Exception& e) {
                result.test_failure("Parsing failed", e.what());
             }
          }
 
-         Botan::OCSP::Response resp(
-            Test::read_binary_data_file("x509/ocsp/patrickschmidt_ocsp_try_later_wrong_sig.der"));
-         result.confirm("parsing exposes correct status code",
-                        resp.status() == Botan::OCSP::Response_Status_Code::Try_Later);
+         try {
+            // Contrary to RFC 6960 this response includes a responseBytes with a non-successful status code
+            const Botan::OCSP::Response resp(
+               Test::read_binary_data_file("x509/ocsp/patrickschmidt_ocsp_try_later_wrong_sig.der"));
+            result.test_failure("Accepted invalid encoding OCSP response");
+            result.test_enum_eq(
+               "parsing exposes correct status code", resp.status(), Botan::OCSP::Response_Status_Code::Try_Later);
+         } catch(Botan::Exception&) {
+            result.test_success("Rejected invalid encoding OCSP response");
+         }
+
+         // OCSPResponse SEQUENCE { ENUMERATED 0 }: successful status with no
+         // responseBytes. RFC 6960 4.2.1 requires responseBytes when successful.
+         const std::vector<uint8_t> successful_no_response_bytes = {0x30, 0x03, 0x0A, 0x01, 0x00};
+         result.test_throws<Botan::Decoding_Error>("Successful status without responseBytes is rejected", [&] {
+            const Botan::OCSP::Response resp(successful_no_response_bytes);
+         });
+
+         // OCSPResponse SEQUENCE { ENUMERATED 4 }: unknown response code
+         const std::vector<uint8_t> failed_unknown_code = {0x30, 0x03, 0x0A, 0x01, 0x04};
+         result.test_throws<Botan::Decoding_Error>("OCSPResponse with unknown response code is rejected",
+                                                   [&] { const Botan::OCSP::Response resp(failed_unknown_code); });
+
+         // SEQUENCE { ENUMERATED 3 }: bare tryLater with no trailer parses fine.
+         const std::vector<uint8_t> try_later_no_trailer = {0x30, 0x03, 0x0A, 0x01, 0x03};
+         result.test_no_throw("Bare non-successful status parses", [&] {
+            const Botan::OCSP::Response r(try_later_no_trailer);
+            result.test_enum_eq("parsed as Try_Later", r.status(), Botan::OCSP::Response_Status_Code::Try_Later);
+         });
+
+         return result;
+      }
+
+      static Test::Result test_response_with_bykey_responder_id() {
+         // RFC 6960's ASN.1 module is "DEFINITIONS EXPLICIT TAGS" and ResponderID's
+         // CHOICE alternatives are not marked IMPLICIT, so byKey is encoded as
+         // constructed [2] wrapping a primitive OCTET STRING. The data below
+         // was produced using `openssl ocsp ... -resp_key_id`
+         Test::Result result("OCSP response with byKey ResponderID");
+
+         const Botan::OCSP::Response resp(Test::read_binary_data_file("x509/ocsp/byKey_responderID.der"));
+         result.test_enum_eq(
+            "Successful response status", resp.status(), Botan::OCSP::Response_Status_Code::Successful);
+
+         const auto responder = load_test_X509_cert("x509/ocsp/byKey_responder.pem");
+
+         result.test_is_true("byKey response has empty signer_name", resp.signer_name().empty());
+         result.test_sz_eq("byKey hash is 20 bytes (SHA-1)", resp.signer_key_hash().size(), 20);
+         result.test_bin_eq("byKey hash matches responder pubkey SHA-1",
+                            resp.signer_key_hash(),
+                            responder.subject_public_key_bitstring_sha1());
+
+         test_arb_eq(
+            result, "Responder is found via byKey", resp.find_signing_certificate(responder), std::optional(responder));
 
          return result;
       }
@@ -59,22 +144,167 @@ class OCSP_Tests final : public Test {
          Test::Result result("OCSP response certificate access");
 
          try {
-            Botan::OCSP::Response resp1(Test::read_binary_data_file("x509/ocsp/resp1.der"));
+            const Botan::OCSP::Response resp1(Test::read_binary_data_file("x509/ocsp/resp1.der"));
             const auto& certs1 = resp1.certificates();
-            if(result.test_eq("Expected count of certificates", certs1.size(), 1)) {
+            if(result.test_sz_eq("Expected count of certificates", certs1.size(), 1)) {
                const auto& cert = certs1.front();
                const Botan::X509_DN expected_dn(
                   {std::make_pair("X520.CommonName", "Symantec Class 3 EV SSL CA - G3 OCSP Responder")});
                const bool matches = cert.subject_dn() == expected_dn;
-               result.test_eq("CN matches expected", matches, true);
+               result.test_is_true("CN matches expected", matches);
             }
 
-            Botan::OCSP::Response resp2(Test::read_binary_data_file("x509/ocsp/resp2.der"));
+            const Botan::OCSP::Response resp2(Test::read_binary_data_file("x509/ocsp/resp2.der"));
             const auto& certs2 = resp2.certificates();
-            result.test_eq("Expect no certificates", certs2.size(), 0);
+            result.test_sz_eq("Expect no certificates", certs2.size(), 0);
          } catch(Botan::Exception& e) {
             result.test_failure("Parsing failed", e.what());
          }
+
+         return result;
+      }
+
+      static Test::Result test_revoked_response_decoding() {
+         Test::Result result("OCSP revoked response decoding");
+
+         const auto resp = load_test_OCSP_resp("x509/ocsp/randombit_ocsp_forged_revoked.der");
+         result.test_enum_eq("response parses", resp.status(), Botan::OCSP::Response_Status_Code::Successful);
+
+         if(result.test_sz_eq("one SingleResponse", resp.responses().size(), 1)) {
+            const auto& sr = resp.responses()[0];
+
+            const auto ee = load_test_X509_cert("x509/ocsp/randombit.pem");
+            const auto ca = load_test_X509_cert("x509/ocsp/letsencrypt.pem");
+            result.test_is_true("certid matches the subject cert", sr.certid().is_id_for(ca, ee));
+
+            result.test_sz_eq("revoked cert status", sr.cert_status(), 1);
+            if(result.test_is_true("revocation time is set", sr.revocation_time().has_value())) {
+               result.test_str_eq("revocation time", sr.revocation_time()->to_string(), "20161118120000Z");
+            }
+            result.test_is_false("no revocation reason was provided", sr.revocation_reason().has_value());
+            result.test_str_eq("thisUpdate", sr.this_update().to_string(), "20161118110000Z");
+            result.test_str_eq("nextUpdate", sr.next_update().to_string(), "20161123110000Z");
+         }
+
+         return result;
+      }
+
+      static Test::Result test_single_response_encoding() {
+         Test::Result result("OCSP SingleResponse encoding");
+
+         // The CertID, times, and revoked encoding below appear verbatim in
+         // x509/ocsp/randombit_ocsp_forged_revoked.der, which was produced by OpenSSL
+         const std::string certid_hex =
+            "304B300906052B0E03021A050004147EE66AE7729AB3FCF8A220646C16A12D6071085D"
+            "0414A84A6A63047DDDBAE6D139B7A64565EFF3A8ECA1021203E89ED07A424B72A35FAD167F48A4F25AD2";
+
+         const std::string this_update_hex = "180F32303136313131383131303030305A";
+         const std::string next_update_hex = "A011180F32303136313132333131303030305A";
+         const std::string revocation_time_hex = "180F32303136313131383132303030305A";
+
+         Botan::OCSP::CertID certid;
+         Botan::BER_Decoder(Botan::hex_decode(certid_hex)).decode(certid);
+
+         const Botan::X509_Time this_update("20161118110000Z", Botan::ASN1_Type::GeneralizedTime);
+         const Botan::X509_Time next_update("20161123110000Z", Botan::ASN1_Type::GeneralizedTime);
+         const Botan::X509_Time revocation_time("20161118120000Z", Botan::ASN1_Type::GeneralizedTime);
+
+         auto decode_single_response = [](const std::string& hex) {
+            Botan::OCSP::SingleResponse sr;
+            Botan::BER_Decoder(Botan::hex_decode(hex)).decode(sr);
+            return sr;
+         };
+
+         {
+            const auto sr = Botan::OCSP::SingleResponse::good(certid, this_update, next_update);
+            const std::string expected = "3073" + certid_hex + "8000" + this_update_hex + next_update_hex;
+            result.test_str_eq("good encoding", Botan::hex_encode(sr.BER_encode()), expected);
+
+            const auto decoded = decode_single_response(expected);
+            result.test_sz_eq("good cert status", decoded.cert_status(), 0);
+            result.test_str_eq("good thisUpdate", decoded.this_update().to_string(), "20161118110000Z");
+            result.test_str_eq("good nextUpdate", decoded.next_update().to_string(), "20161123110000Z");
+            result.test_is_false("good has no revocation time", decoded.revocation_time().has_value());
+            result.test_is_false("good has no revocation reason", decoded.revocation_reason().has_value());
+         }
+
+         {
+            const auto sr = Botan::OCSP::SingleResponse::unknown(certid, this_update, Botan::X509_Time());
+            const std::string expected = "3060" + certid_hex + "8200" + this_update_hex;
+            result.test_str_eq("unknown encoding omits unset nextUpdate", Botan::hex_encode(sr.BER_encode()), expected);
+
+            const auto decoded = decode_single_response(expected);
+            result.test_sz_eq("unknown cert status", decoded.cert_status(), 2);
+            result.test_is_false("unknown nextUpdate is unset", decoded.next_update().time_is_set());
+         }
+
+         const std::string revoked_no_reason_hex =
+            "308184" + certid_hex + "A111" + revocation_time_hex + this_update_hex + next_update_hex;
+
+         {
+            const auto sr =
+               Botan::OCSP::SingleResponse::revoked(certid, revocation_time, std::nullopt, this_update, next_update);
+            result.test_str_eq("revoked encoding", Botan::hex_encode(sr.BER_encode()), revoked_no_reason_hex);
+
+            const auto ocsp_bits = Test::read_binary_data_file("x509/ocsp/randombit_ocsp_forged_revoked.der");
+            result.test_is_true("revoked encoding matches the OpenSSL-produced SingleResponse",
+                                Botan::hex_encode(ocsp_bits).find(revoked_no_reason_hex) != std::string::npos);
+
+            const auto decoded = decode_single_response(revoked_no_reason_hex);
+            result.test_sz_eq("revoked cert status", decoded.cert_status(), 1);
+            if(result.test_is_true("revoked has revocation time", decoded.revocation_time().has_value())) {
+               result.test_str_eq("revocation time", decoded.revocation_time()->to_string(), "20161118120000Z");
+            }
+            result.test_is_false("revoked has no revocation reason", decoded.revocation_reason().has_value());
+         }
+
+         {
+            const auto sr = Botan::OCSP::SingleResponse::revoked(
+               certid, revocation_time, Botan::CRL_Code::KeyCompromise, this_update, next_update);
+            const std::string expected =
+               "308189" + certid_hex + "A116" + revocation_time_hex + "A0030A0101" + this_update_hex + next_update_hex;
+            result.test_str_eq("revoked encoding with reason", Botan::hex_encode(sr.BER_encode()), expected);
+
+            const auto decoded = decode_single_response(expected);
+            result.test_sz_eq("revoked cert status", decoded.cert_status(), 1);
+            if(result.test_is_true("revoked has revocation reason", decoded.revocation_reason().has_value())) {
+               result.test_enum_eq(
+                  "reason is keyCompromise", *decoded.revocation_reason(), Botan::CRL_Code::KeyCompromise);
+            }
+         }
+
+         {
+            // CRLReason unspecified (0) is not encoded at all
+            const auto sr = Botan::OCSP::SingleResponse::revoked(
+               certid, revocation_time, Botan::CRL_Code::Unspecified, this_update, next_update);
+            result.test_str_eq(
+               "unspecified reason is omitted", Botan::hex_encode(sr.BER_encode()), revoked_no_reason_hex);
+         }
+
+         const Botan::X509_Time utc_time("161118110000Z", Botan::ASN1_Type::UtcTime);
+
+         result.test_throws<Botan::Invalid_Argument>("UTCTime thisUpdate is rejected", [&] {
+            const auto sr = Botan::OCSP::SingleResponse::good(certid, utc_time, next_update);
+         });
+
+         result.test_throws<Botan::Invalid_Argument>("UTCTime revocationTime is rejected", [&] {
+            const auto sr =
+               Botan::OCSP::SingleResponse::revoked(certid, utc_time, std::nullopt, this_update, next_update);
+         });
+
+         result.test_throws<Botan::Decoding_Error>("Unknown CRLReason enumeration is rejected", [&] {
+            decode_single_response("308189" + certid_hex + "A116" + revocation_time_hex + "A0030A0107" +
+                                   this_update_hex + next_update_hex);
+         });
+
+         result.test_throws<Botan::Decoding_Error>("UTCTime revocationTime is rejected when decoding", [&] {
+            decode_single_response("308182" + certid_hex + "A10F170D3136313131383132303030305A" + this_update_hex +
+                                   next_update_hex);
+         });
+
+         result.test_throws<Botan::Decoding_Error>("good status with contents is rejected", [&] {
+            decode_single_response("3075" + certid_hex + "80020500" + this_update_hex + next_update_hex);
+         });
 
          return result;
       }
@@ -96,18 +326,16 @@ class OCSP_Tests final : public Test {
             "ME4wTKADAgEAMEUwQzBBMAkGBSsOAwIaBQAEFPLgavmFih2NcJtJGSN6qbUaKH5kBBRK3QYWG7z2aLV29YG2u2IaulqBLwIIQkg+DF+RYMY=";
 
          const Botan::OCSP::Request req1(issuer, end_entity);
-         result.test_eq("Encoded OCSP request", req1.base64_encode(), expected_request);
+         result.test_str_eq("Encoded OCSP request", req1.base64_encode(), expected_request);
 
          const Botan::OCSP::Request req2(issuer, BigInt::from_bytes(end_entity.serial_number()));
-         result.test_eq("Encoded OCSP request", req2.base64_encode(), expected_request);
+         result.test_str_eq("Encoded OCSP request", req2.base64_encode(), expected_request);
 
          return result;
       }
 
       static Test::Result test_response_find_signing_certificate() {
          Test::Result result("OCSP response finding signature certificates");
-
-         const std::optional<Botan::X509_Certificate> nullopt_cert;
 
          // OCSP response is signed by the issuing CA itself
          auto randombit_ocsp = load_test_OCSP_resp("x509/ocsp/randombit_ocsp.der");
@@ -119,6 +347,16 @@ class OCSP_Tests final : public Test {
          auto bdr_responder = load_test_X509_cert("x509/ocsp/bdr-ocsp-responder.pem");
          auto bdr_ca = load_test_X509_cert("x509/ocsp/bdr-int.pem");
 
+         // The response in bdr_ocsp contains two certificates
+         if(result.test_sz_eq("both certificates found", bdr_ocsp.certificates().size(), 2)) {
+            result.test_str_eq("first cert in response",
+                               bdr_ocsp.certificates()[0].subject_dn().get_first_attribute("CN"),
+                               "D-TRUST OCSP 4 2-2 EV 2016");
+            result.test_str_eq("second cert in response",
+                               bdr_ocsp.certificates()[1].subject_dn().get_first_attribute("CN"),
+                               "D-TRUST CA 2-2 EV 2016");
+         }
+
          // Dummy OCSP response is not signed at all
          auto dummy_ocsp = Botan::OCSP::Response(Botan::Certificate_Status_Code::OCSP_SERVER_NOT_AVAILABLE);
 
@@ -128,28 +366,30 @@ class OCSP_Tests final : public Test {
          auto randombit_alt_resp_ocsp = load_test_OCSP_resp("x509/ocsp/randombit_ocsp_forged_valid_nocerts.der");
          auto randombit_alt_resp_cert = load_test_X509_cert("x509/ocsp/randombit_ocsp_forged_responder.pem");
 
-         result.test_is_eq("Dummy has no signing certificate",
-                           dummy_ocsp.find_signing_certificate(Botan::X509_Certificate()),
-                           nullopt_cert);
+         result.test_opt_is_null("Dummy has no signing certificate",
+                                 dummy_ocsp.find_signing_certificate(Botan::X509_Certificate()));
 
-         result.test_is_eq("CA is returned as signing certificate",
-                           randombit_ocsp.find_signing_certificate(randombit_ca),
-                           std::optional(randombit_ca));
-         result.test_is_eq("No signer certificate is returned when signer couldn't be determined",
-                           randombit_ocsp.find_signing_certificate(bdr_ca),
-                           nullopt_cert);
+         test_arb_eq(result,
+                     "CA is returned as signing certificate",
+                     randombit_ocsp.find_signing_certificate(randombit_ca),
+                     std::optional(randombit_ca));
+         result.test_opt_is_null("No signer certificate is returned when signer couldn't be determined",
+                                 randombit_ocsp.find_signing_certificate(bdr_ca));
 
-         result.test_is_eq("Delegated responder certificate is returned for further validation",
-                           bdr_ocsp.find_signing_certificate(bdr_ca),
-                           std::optional(bdr_responder));
+         test_arb_eq(result,
+                     "Delegated responder certificate is returned for further validation",
+                     bdr_ocsp.find_signing_certificate(bdr_ca),
+                     std::optional(bdr_responder));
 
-         result.test_is_eq("Delegated responder without stapled certs does not find signer without user-provided certs",
-                           randombit_alt_resp_ocsp.find_signing_certificate(randombit_ca),
-                           nullopt_cert);
+         result.test_opt_is_null(
+            "Delegated responder without stapled certs does not find signer without user-provided certs",
+            randombit_alt_resp_ocsp.find_signing_certificate(randombit_ca));
+
          auto trusted_responders = std::make_unique<Botan::Certificate_Store_In_Memory>(randombit_alt_resp_cert);
-         result.test_is_eq("Delegated responder returns user-provided cert",
-                           randombit_alt_resp_ocsp.find_signing_certificate(randombit_ca, trusted_responders.get()),
-                           std::optional(randombit_alt_resp_cert));
+         test_arb_eq(result,
+                     "Delegated responder returns user-provided cert",
+                     randombit_alt_resp_ocsp.find_signing_certificate(randombit_ca, trusted_responders.get()),
+                     std::optional(randombit_alt_resp_cert));
 
          return result;
       }
@@ -173,10 +413,10 @@ class OCSP_Tests final : public Test {
             const auto ocsp_status = Botan::PKIX::check_ocsp(
                cert_path, {ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
 
-            return result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1) &&
-                   result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
-                   result.confirm(std::string("Status: '") + Botan::to_string(expected) + "'",
-                                  ocsp_status[0].contains(expected));
+            return result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 2) &&
+                   result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
+                   result.test_is_true(std::string("Status: '") + Botan::to_string(expected) + "'",
+                                       ocsp_status[0].contains(expected));
          };
 
          check_ocsp(Botan::calendar_point(2016, 11, 11, 12, 30, 0).to_std_timepoint(),
@@ -210,13 +450,13 @@ class OCSP_Tests final : public Test {
 
          auto check_ocsp = [&](const std::chrono::system_clock::time_point valid_time,
                                const Botan::Certificate_Status_Code expected) {
-            Botan::Path_Validation_Restrictions pvr(false, 110, false, max_age);
+            const Botan::Path_Validation_Restrictions pvr(false, 110, false, max_age);
             const auto ocsp_status = Botan::PKIX::check_ocsp(cert_path, {ocsp}, {&certstore}, valid_time, pvr);
 
-            return result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1) &&
-                   result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
-                   result.confirm(std::string("Status: '") + Botan::to_string(expected) + "'",
-                                  ocsp_status[0].contains(expected));
+            return result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 2) &&
+                   result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
+                   result.test_is_true(std::string("Status: '") + Botan::to_string(expected) + "'",
+                                       ocsp_status[0].contains(expected));
          };
 
          check_ocsp(Botan::calendar_point(2016, 11, 11, 12, 30, 0).to_std_timepoint(),
@@ -250,13 +490,17 @@ class OCSP_Tests final : public Test {
 
          auto check_ocsp = [&](const std::chrono::system_clock::time_point valid_time,
                                const Botan::Certificate_Status_Code expected) {
-            Botan::Path_Validation_Restrictions pvr(false, 110, false, max_age);
+            const Botan::Path_Validation_Restrictions pvr(false, 110, false, max_age);
             const auto ocsp_status = Botan::PKIX::check_ocsp(cert_path, {ocsp}, {&certstore}, valid_time, pvr);
 
-            return result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1) &&
-                   result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
-                   result.confirm(std::string("Status: '") + Botan::to_string(expected) + "'",
-                                  ocsp_status[0].contains(expected));
+            result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 2);
+
+            if(!ocsp_status.empty()) {
+               result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1);
+
+               result.test_is_true(std::string("Status: '") + Botan::to_string(expected) + "'",
+                                   ocsp_status[0].contains(expected));
+            }
          };
 
          check_ocsp(Botan::calendar_point(2019, 5, 28, 7, 0, 0).to_std_timepoint(),
@@ -288,10 +532,13 @@ class OCSP_Tests final : public Test {
             const auto ocsp_status = Botan::PKIX::check_ocsp(
                cert_path, {ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
 
-            return result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1) &&
-                   result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1) &&
-                   result.confirm(std::string("Status: '") + Botan::to_string(expected) + "'",
-                                  ocsp_status[0].contains(expected));
+            result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 2);
+
+            if(!ocsp_status.empty()) {
+               result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1);
+               result.test_is_true(std::string("Status: '") + Botan::to_string(expected) + "'",
+                                   ocsp_status[0].contains(expected));
+            }
          };
 
          check_ocsp(Botan::calendar_point(2019, 5, 28, 7, 0, 0).to_std_timepoint(),
@@ -323,9 +570,9 @@ class OCSP_Tests final : public Test {
          const auto ocsp_status =
             Botan::PKIX::check_ocsp(cert_path, {ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
 
-         if(result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1)) {
-            if(result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1)) {
-               result.test_gt(
+         if(result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 2)) {
+            if(result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1)) {
+               result.test_sz_gt(
                   "Status warning", ocsp_status[0].count(Botan::Certificate_Status_Code::OCSP_NO_REVOCATION_URL), 0);
             }
          }
@@ -350,12 +597,12 @@ class OCSP_Tests final : public Test {
          auto ocsp_status = Botan::PKIX::check_ocsp_online(
             cert_path, {&certstore}, now, ocsp_timeout, Botan::Path_Validation_Restrictions());
 
-         if(result.test_eq("Expected size of ocsp_status", ocsp_status.size(), 1)) {
-            if(result.test_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1)) {
+         if(result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 1)) {
+            if(result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1)) {
                const bool status_good = ocsp_status[0].contains(Botan::Certificate_Status_Code::OCSP_RESPONSE_GOOD);
                const bool server_not_found =
                   ocsp_status[0].contains(Botan::Certificate_Status_Code::OCSP_SERVER_NOT_AVAILABLE);
-               result.confirm("Expected status", status_good || server_not_found);
+               result.test_is_true("Expected status", status_good || server_not_found);
             }
          }
 
@@ -373,31 +620,170 @@ class OCSP_Tests final : public Test {
          auto responder = load_test_X509_cert("x509/ocsp/randombit_ocsp_forged_responder.pem");
          auto ca = load_test_X509_cert("x509/ocsp/letsencrypt.pem");
 
-         std::optional<Botan::X509_Certificate> nullopt_cert;
-
          Botan::Certificate_Store_In_Memory trusted_responders;
 
          // without providing the 3rd party responder certificate no issuer will be found
-         result.test_is_eq("cannot find signing certificate without trusted responders",
-                           ocsp.find_signing_certificate(ca),
-                           nullopt_cert);
-         result.test_is_eq("cannot find signing certificate without additional help",
-                           ocsp.find_signing_certificate(ca, &trusted_responders),
-                           nullopt_cert);
+         result.test_opt_is_null("cannot find signing certificate without trusted responders",
+                                 ocsp.find_signing_certificate(ca));
+         result.test_opt_is_null("cannot find signing certificate without additional help",
+                                 ocsp.find_signing_certificate(ca, &trusted_responders));
 
          // add the 3rd party responder certificate to the list of trusted OCSP responder certs
          // to find the issuer certificate of this response
          trusted_responders.add_certificate(responder);
-         result.test_is_eq("the responder certificate is returned when it is trusted",
-                           ocsp.find_signing_certificate(ca, &trusted_responders),
-                           std::optional(responder));
+         test_arb_eq(result,
+                     "the responder certificate is returned when it is trusted",
+                     ocsp.find_signing_certificate(ca, &trusted_responders),
+                     std::optional(responder));
 
-         result.test_is_eq("the responder's signature checks out",
-                           ocsp.verify_signature(responder),
-                           Botan::Certificate_Status_Code::OCSP_SIGNATURE_OK);
+         result.test_enum_eq("the responder's signature checks out",
+                             ocsp.verify_signature(responder),
+                             Botan::Certificate_Status_Code::OCSP_SIGNATURE_OK);
 
          return result;
       }
+
+      static Test::Result test_forged_ocsp_signature_is_rejected() {
+         Test::Result result("OCSP response with forged signature is rejected by path validation");
+
+         auto ee = load_test_X509_cert("x509/ocsp/randombit.pem");
+         auto ca = load_test_X509_cert("x509/ocsp/letsencrypt.pem");
+         auto trust_root = load_test_X509_cert("x509/ocsp/geotrust.pem");
+
+         const std::vector<Botan::X509_Certificate> cert_path = {ee, ca, trust_root};
+
+         Botan::Certificate_Store_In_Memory certstore;
+         certstore.add_certificate(trust_root);
+
+         const auto valid_time = Botan::calendar_point(2016, 11, 18, 12, 30, 0).to_std_timepoint();
+
+         // Verify the unmodified response is accepted
+         {
+            auto ocsp = load_test_OCSP_resp("x509/ocsp/randombit_ocsp.der");
+            const auto ocsp_status = Botan::PKIX::check_ocsp(
+               cert_path, {ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
+
+            if(result.test_sz_eq("Legitimate: expected result count", ocsp_status.size(), 2) &&
+               result.test_sz_eq("Legitimate: expected status count", ocsp_status[0].size(), 1)) {
+               result.test_is_true("Legitimate response is accepted",
+                                   ocsp_status[0].contains(Botan::Certificate_Status_Code::OCSP_RESPONSE_GOOD));
+            }
+         }
+
+         // Tamper with the signature and verify check_ocsp rejects it
+         {
+            auto ocsp_bytes = Test::read_binary_data_file("x509/ocsp/randombit_ocsp.der");
+            ocsp_bytes.back() ^= 0x01;
+            Botan::OCSP::Response forged_ocsp(ocsp_bytes.data(), ocsp_bytes.size());
+
+            const auto ocsp_status = Botan::PKIX::check_ocsp(
+               cert_path, {forged_ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
+
+            if(result.test_sz_eq("Forged: expected result count", ocsp_status.size(), 2) &&
+               result.test_sz_eq("Forged: expected status count", ocsp_status[0].size(), 1)) {
+               result.test_is_true("Forged signature is rejected",
+                                   ocsp_status[0].contains(Botan::Certificate_Status_Code::OCSP_SIGNATURE_ERROR));
+            }
+         }
+
+         return result;
+      }
+
+      static Test::Result test_partial_stapling_preserves_per_slot_gap() {
+         Test::Result result("OCSP partial stapling preserves per-slot gap for online fallback");
+
+         auto ee = load_test_X509_cert("x509/ocsp/mychain_ee.pem");
+         auto ca = load_test_X509_cert("x509/ocsp/mychain_int.pem");
+         auto trust_root = load_test_X509_cert("x509/ocsp/mychain_root.pem");
+
+         auto ocsp_for_ee = load_test_OCSP_resp("x509/ocsp/mychain_ocsp_for_ee.der");
+         auto ocsp_for_int = load_test_OCSP_resp("x509/ocsp/mychain_ocsp_for_int_self_signed.der");
+
+         Botan::Certificate_Store_In_Memory certstore;
+         certstore.add_certificate(trust_root);
+
+         const std::vector<Botan::X509_Certificate> cert_path = {ee, ca, trust_root};
+         const auto valid_time = Botan::calendar_point(2022, 9, 22, 22, 30, 0).to_std_timepoint();
+         const auto restrictions = Botan::Path_Validation_Restrictions();
+
+         // Here the intermediate has a stapled OCSP but the leaf does not
+         {
+            const std::vector<std::optional<Botan::OCSP::Response>> staples = {std::nullopt, ocsp_for_int};
+            const auto ocsp_status =
+               Botan::PKIX::check_ocsp(cert_path, staples, {&certstore}, valid_time, restrictions);
+
+            result.test_sz_eq("missing-leaf: ocsp_status sized to non-root certs", ocsp_status.size(), 2);
+            if(ocsp_status.size() == 2) {
+               result.test_is_true("missing-leaf: leaf slot is empty", ocsp_status[0].empty());
+               result.test_is_false("missing-leaf: intermediate slot is filled", ocsp_status[1].empty());
+            }
+         }
+
+         // Here the leaf has a stapled OCSP but the intermediate does not
+         {
+            const std::vector<std::optional<Botan::OCSP::Response>> staples = {ocsp_for_ee, std::nullopt};
+            const auto ocsp_status =
+               Botan::PKIX::check_ocsp(cert_path, staples, {&certstore}, valid_time, restrictions);
+
+            result.test_sz_eq("missing-intermediate: ocsp_status sized to non-root certs", ocsp_status.size(), 2);
+            if(ocsp_status.size() == 2) {
+               result.test_is_false("missing-intermediate: leaf slot is filled", ocsp_status[0].empty());
+               result.test_is_true("missing-intermediate: intermediate slot is empty", ocsp_status[1].empty());
+            }
+         }
+
+         return result;
+      }
+
+   #if defined(BOTAN_HAS_ML_DSA) || defined(BOTAN_HAS_SLH_DSA_WITH_SHA2)
+      static Test::Result test_pqc_signed_ocsp_response(const std::string& algo, const std::string& prefix) {
+         Test::Result result("OCSP response signed with " + algo);
+
+         // The response is signed by the issuing CA itself. See
+         // `src/scripts/dev_tools/gen_pqc_ocsp_testdata.sh` for a helper script
+         // to recreate the test data.
+         auto ee = load_test_X509_cert("x509/ocsp/" + prefix + "_ee.pem");
+         auto trust_root = load_test_X509_cert("x509/ocsp/" + prefix + "_root.pem");
+
+         auto ocsp = load_test_OCSP_resp("x509/ocsp/" + prefix + "_ocsp.der");
+         result.test_enum_eq("response parses", ocsp.status(), Botan::OCSP::Response_Status_Code::Successful);
+
+         test_arb_eq(result,
+                     "CA is returned as signing certificate",
+                     ocsp.find_signing_certificate(trust_root),
+                     std::optional(trust_root));
+
+         result.test_enum_eq("signature of the response verifies",
+                             ocsp.verify_signature(trust_root),
+                             Botan::Certificate_Status_Code::OCSP_SIGNATURE_OK);
+
+         // The signature BIT STRING is the last element of the response encoding
+         auto tampered_bytes = Test::read_binary_data_file("x509/ocsp/" + prefix + "_ocsp.der");
+         tampered_bytes.back() ^= 0x01;
+         const Botan::OCSP::Response tampered_ocsp(tampered_bytes);
+         result.test_enum_eq("tampered signature is rejected",
+                             tampered_ocsp.verify_signature(trust_root),
+                             Botan::Certificate_Status_Code::OCSP_SIGNATURE_ERROR);
+
+         const std::vector<Botan::X509_Certificate> cert_path = {ee, trust_root};
+
+         Botan::Certificate_Store_In_Memory certstore;
+         certstore.add_certificate(trust_root);
+
+         // Some arbitrary time within the validity period of the OCSP response
+         const auto valid_time = Botan::calendar_point(2026, 8, 13, 12, 0, 0).to_std_timepoint();
+         const auto ocsp_status =
+            Botan::PKIX::check_ocsp(cert_path, {ocsp}, {&certstore}, valid_time, Botan::Path_Validation_Restrictions());
+
+         if(result.test_sz_eq("Expected size of ocsp_status", ocsp_status.size(), 1) &&
+            result.test_sz_eq("Expected size of ocsp_status[0]", ocsp_status[0].size(), 1)) {
+            result.test_is_true("Status good",
+                                ocsp_status[0].contains(Botan::Certificate_Status_Code::OCSP_RESPONSE_GOOD));
+         }
+
+         return result;
+      }
+   #endif
 
       static Test::Result test_responder_cert_with_nocheck_extension() {
          Test::Result result("BDr's OCSP response contains certificate featuring NoCheck extension");
@@ -408,7 +794,7 @@ class OCSP_Tests final : public Test {
                return cert.v3_extensions().extension_set(Botan::OID::from_string("PKIX.OCSP.NoCheck"));
             }) != ocsp.certificates().end();
 
-         result.confirm("Contains NoCheck extension", contains_cert_with_nocheck);
+         result.test_is_true("Contains NoCheck extension", contains_cert_with_nocheck);
 
          return result;
       }
@@ -418,7 +804,11 @@ class OCSP_Tests final : public Test {
          std::vector<Test::Result> results;
 
          results.push_back(test_request_encoding());
+         results.push_back(test_certid_serial_sign());
          results.push_back(test_response_parsing());
+         results.push_back(test_revoked_response_decoding());
+         results.push_back(test_single_response_encoding());
+         results.push_back(test_response_with_bykey_responder_id());
          results.push_back(test_response_certificate_access());
          results.push_back(test_response_find_signing_certificate());
          results.push_back(test_response_verification_with_next_update_without_max_age());
@@ -427,7 +817,16 @@ class OCSP_Tests final : public Test {
          results.push_back(test_response_verification_without_next_update_without_max_age());
          results.push_back(test_response_verification_softfail());
          results.push_back(test_response_verification_with_additionally_trusted_responder());
+         results.push_back(test_forged_ocsp_signature_is_rejected());
+         results.push_back(test_partial_stapling_preserves_per_slot_gap());
          results.push_back(test_responder_cert_with_nocheck_extension());
+
+   #if defined(BOTAN_HAS_ML_DSA)
+         results.push_back(test_pqc_signed_ocsp_response("ML-DSA", "mldsa"));
+   #endif
+   #if defined(BOTAN_HAS_SLH_DSA_WITH_SHA2)
+         results.push_back(test_pqc_signed_ocsp_response("SLH-DSA", "slhdsa"));
+   #endif
 
    #if defined(BOTAN_HAS_ONLINE_REVOCATION_CHECKS)
          if(Test::options().run_online_tests()) {
@@ -442,5 +841,7 @@ class OCSP_Tests final : public Test {
 BOTAN_REGISTER_TEST("x509", "ocsp", OCSP_Tests);
 
 #endif
+
+}  // namespace
 
 }  // namespace Botan_Tests

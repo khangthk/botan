@@ -31,7 +31,6 @@
    #include <boost/asio.hpp>
    #include <boost/beast/core.hpp>
 
-   #include <algorithm>
    #include <memory>
    #include <type_traits>
 
@@ -57,14 +56,14 @@ class Stream;
  */
 class StreamCallbacks : public Callbacks {
    public:
-      StreamCallbacks() {}
+      StreamCallbacks() = default;
 
       void tls_emit_data(std::span<const uint8_t> data) final {
          m_send_buffer.commit(boost::asio::buffer_copy(m_send_buffer.prepare(data.size()),
                                                        boost::asio::buffer(data.data(), data.size())));
       }
 
-      void tls_record_received(uint64_t, std::span<const uint8_t> data) final {
+      void tls_record_received(uint64_t /*record_number*/, std::span<const uint8_t> data) final {
          m_receive_buffer.commit(boost::asio::buffer_copy(m_receive_buffer.prepare(data.size()),
                                                           boost::asio::const_buffer(data.data(), data.size())));
       }
@@ -106,6 +105,29 @@ class StreamCallbacks : public Callbacks {
          } else {
             Callbacks::tls_verify_cert_chain(cert_chain, ocsp_responses, trusted_roots, usage, hostname, policy);
          }
+      }
+
+      std::string tls_server_choose_app_protocol(const std::vector<std::string>& client_protos) override {
+         if(client_protos.empty()) {
+            return "";
+         }
+         auto ctx = m_context.lock();
+
+         if(!ctx || ctx->m_app_protocols.empty()) {
+            return "";
+         }
+         // Priority is to the server.
+         for(const auto& server_proto : ctx->m_app_protocols) {
+            for(const auto& client_proto : client_protos) {
+               if(server_proto == client_proto) {
+                  return server_proto;
+               }
+            }
+         }
+         // No match.
+         throw TLS_Exception(
+            Alert::NoApplicationProtocol,
+            "Rejecting ALPN request: no overlap between client-offered and server-configured application protocols");
       }
 
    private:
@@ -214,7 +236,7 @@ class Stream {
                       std::shared_ptr<StreamCallbacks> callbacks = std::make_shared<StreamCallbacks>()) :
             Stream(std::move(context), std::move(callbacks), std::forward<Arg>(arg)) {}
 
-   #if defined(BOTAN_HAS_AUTO_SEEDING_RNG)
+   #if defined(BOTAN_HAS_DEFAULT_TLS_CONTEXT)
       /**
        * @brief Conveniently construct a new Stream with default settings
        *
@@ -242,7 +264,7 @@ class Stream {
       //! \name boost::asio accessor methods
       //! @{
 
-      using next_layer_type = typename std::remove_reference<StreamLayer>::type;
+      using next_layer_type = std::remove_reference_t<StreamLayer>;
 
       const next_layer_type& next_layer() const { return m_nextLayer; }
 
@@ -258,10 +280,12 @@ class Stream {
 
       executor_type get_executor() noexcept { return m_nextLayer.get_executor(); }
 
-      using native_handle_type = typename std::add_pointer<ChannelT>::type;
+      using native_handle_type = std::add_pointer_t<ChannelT>;
 
       native_handle_type native_handle() {
-         BOTAN_STATE_CHECK(m_native_handle != nullptr);
+         if(m_native_handle == nullptr) {
+            throw Botan::Invalid_State("ASIO native handle unexpectedly null");
+         }
          return m_native_handle.get();
       }
 
@@ -288,14 +312,16 @@ class Stream {
        * @param callback the callback implementation
        * @param ec This parameter is unused.
        */
-      void set_verify_callback(Context::Verify_Callback callback, boost::system::error_code& ec) {
-         BOTAN_UNUSED(ec);
+      void set_verify_callback(Context::Verify_Callback callback, [[maybe_unused]] boost::system::error_code& ec) {
          m_context->set_verify_callback(std::move(callback));
       }
 
-      //! @throws Not_Implemented
-      void set_verify_depth(int depth) {
-         BOTAN_UNUSED(depth);
+      /**
+       * Not Implemented.
+       * @param depth the desired verification depth
+       * @throws Not_Implemented todo
+       */
+      void set_verify_depth([[maybe_unused]] int depth) {
          throw Not_Implemented("set_verify_depth is not implemented");
       }
 
@@ -304,15 +330,17 @@ class Stream {
        * @param depth the desired verification depth
        * @param ec Will be set to `Botan::ErrorType::NotImplemented`
        */
-      void set_verify_depth(int depth, boost::system::error_code& ec) {
-         BOTAN_UNUSED(depth);
+      void set_verify_depth([[maybe_unused]] int depth, boost::system::error_code& ec) {
          ec = ErrorType::NotImplemented;
       }
 
-      //! @throws Not_Implemented
+      /**
+       * Not Implemented.
+       * @param v the desired verify mode
+       * @throws Not_Implemented todo
+       */
       template <typename verify_mode>
-      void set_verify_mode(verify_mode v) {
-         BOTAN_UNUSED(v);
+      void set_verify_mode([[maybe_unused]] verify_mode v) {
          throw Not_Implemented("set_verify_mode is not implemented");
       }
 
@@ -322,8 +350,7 @@ class Stream {
        * @param ec Will be set to `Botan::ErrorType::NotImplemented`
        */
       template <typename verify_mode>
-      void set_verify_mode(verify_mode v, boost::system::error_code& ec) {
-         BOTAN_UNUSED(v);
+      void set_verify_mode([[maybe_unused]] verify_mode v, boost::system::error_code& ec) {
          ec = ErrorType::NotImplemented;
       }
 
@@ -337,7 +364,7 @@ class Stream {
        * The function call will block until handshaking is complete or an error occurs.
        *
        * @param side The type of handshaking to be performed, i.e. as a client or as a server.
-       * @throws boost::system::system_error if error occured
+       * @throws boost::system::system_error if error occurred
        */
       void handshake(Connection_Side side) {
          boost::system::error_code ec;
@@ -357,7 +384,7 @@ class Stream {
          setup_native_handle(side, ec);
 
          // We write to the socket if we have data to send and read from it
-         // otherwise, until either some error occured or we have successfully
+         // otherwise, until either some error occurred or we have successfully
          // performed the handshake.
          while(!ec) {
             // Send pending data to the peer and abort the handshake if that
@@ -385,8 +412,6 @@ class Stream {
             // handled by `handle_tls_protocol_errors()` in the next iteration.
             read_and_process_encrypted_data_from_peer(ec);
          }
-
-         BOTAN_ASSERT_NOMSG(ec.failed());
       }
 
       /**
@@ -400,6 +425,7 @@ class Stream {
        */
       template <detail::basic_completion_token CompletionToken = default_completion_token>
       auto async_handshake(Botan::TLS::Connection_Side side,
+                           // NOLINTNEXTLINE(*-missing-std-forward)
                            CompletionToken&& completion_token = default_completion_token{}) {
          return boost::asio::async_initiate<CompletionToken, void(boost::system::error_code)>(
             [this](auto&& completion_handler, TLS::Connection_Side connection_side) {
@@ -408,19 +434,21 @@ class Stream {
                boost::system::error_code ec;
                setup_native_handle(connection_side, ec);
 
-               detail::AsyncHandshakeOperation<completion_handler_t, Stream> op{
+               const detail::AsyncHandshakeOperation<completion_handler_t, Stream> op{
                   std::forward<completion_handler_t>(completion_handler), *this, ec};
             },
             completion_token,
             side);
       }
 
-      //! @throws Not_Implemented
+      /**
+       * Not Implemented.
+       * @throws Not_Implemented todo
+       */
       template <typename ConstBufferSequence, detail::basic_completion_token BufferedHandshakeHandler>
-      auto async_handshake(Connection_Side side,
-                           const ConstBufferSequence& buffers,
-                           BufferedHandshakeHandler&& handler) {
-         BOTAN_UNUSED(side, buffers, handler);
+      auto async_handshake([[maybe_unused]] Connection_Side side,
+                           [[maybe_unused]] const ConstBufferSequence& buffers,
+                           [[maybe_unused]] BufferedHandshakeHandler&& handler /* NOLINT(*missing-std-forward) */) {
          throw Not_Implemented("buffered async handshake is not implemented");
       }
 
@@ -436,7 +464,7 @@ class Stream {
        *
        * Note that this can be used in reaction of a received shutdown alert from the peer.
        *
-       * @param ec Set to indicate what error occured, if any.
+       * @param ec Set to indicate what error occurred, if any.
        */
       void shutdown(boost::system::error_code& ec) {
          try_with_error_code([&] { native_handle()->close(); }, ec);
@@ -452,7 +480,7 @@ class Stream {
        *
        * Note that this can be used in reaction of a received shutdown alert from the peer.
        *
-       * @throws boost::system::system_error if error occured
+       * @throws boost::system::system_error if error occurred
        */
       void shutdown() {
          boost::system::error_code ec;
@@ -470,7 +498,7 @@ class Stream {
        */
       template <typename Handler, typename Executor>
       struct Wrapper {
-            void operator()(boost::system::error_code ec, std::size_t) { handler(ec); }
+            void operator()(boost::system::error_code ec, std::size_t /*unused*/) { handler(ec); }
 
             using executor_type = boost::asio::associated_executor_t<Handler, Executor>;
 
@@ -482,8 +510,8 @@ class Stream {
 
             allocator_type get_allocator() const noexcept { return boost::asio::get_associated_allocator(handler); }
 
-            Handler handler;
-            Executor io_executor;
+            Handler handler;       // NOLINT(*-non-private-member-variable*)
+            Executor io_executor;  // NOLINT(*-non-private-member-variable*)
       };
 
    public:
@@ -498,6 +526,7 @@ class Stream {
        *                         The completion signature of the handler must be: void(boost::system::error_code).
        */
       template <detail::basic_completion_token CompletionToken = default_completion_token>
+      // NOLINTNEXTLINE(*-missing-std-forward)
       auto async_shutdown(CompletionToken&& completion_token = default_completion_token{}) {
          return boost::asio::async_initiate<CompletionToken, void(boost::system::error_code)>(
             [this](auto&& completion_handler) {
@@ -508,7 +537,7 @@ class Stream {
 
                using write_handler_t = Wrapper<completion_handler_t, typename Stream::executor_type>;
 
-               TLS::detail::AsyncWriteOperation<write_handler_t, Stream> op{
+               const TLS::detail::AsyncWriteOperation<write_handler_t, Stream> op{
                   write_handler_t{std::forward<completion_handler_t>(completion_handler), get_executor()},
                   *this,
                   boost::asio::buffer_size(send_buffer()),
@@ -534,7 +563,7 @@ class Stream {
        */
       template <typename MutableBufferSequence>
       std::size_t read_some(const MutableBufferSequence& buffers, boost::system::error_code& ec) {
-         // We read from the socket until either some error occured or we have
+         // We read from the socket until either some error occurred or we have
          // decrypted at least one byte of application data.
          while(!ec) {
             // Some previous invocation of process_encrypted_data() generated
@@ -559,7 +588,6 @@ class Stream {
             read_and_process_encrypted_data_from_peer(ec);
          }
 
-         BOTAN_ASSERT_NOMSG(ec.failed());
          return 0;
       }
 
@@ -571,7 +599,7 @@ class Stream {
        *
        * @param buffers The buffers into which the data will be read.
        * @return The number of bytes read. Returns 0 if an error occurred.
-       * @throws boost::system::system_error if error occured
+       * @throws boost::system::system_error if error occurred
        */
       template <typename MutableBufferSequence>
       std::size_t read_some(const MutableBufferSequence& buffers) {
@@ -606,7 +634,7 @@ class Stream {
        *
        * @param buffers The data to be written.
        * @return The number of bytes written.
-       * @throws boost::system::system_error if error occured
+       * @throws boost::system::system_error if error occurred
        */
       template <typename ConstBufferSequence>
       std::size_t write_some(const ConstBufferSequence& buffers) {
@@ -627,6 +655,7 @@ class Stream {
       template <typename ConstBufferSequence,
                 detail::byte_size_completion_token CompletionToken = default_completion_token>
       auto async_write_some(const ConstBufferSequence& buffers,
+                            // NOLINTNEXTLINE(*-missing-std-forward)
                             CompletionToken&& completion_token = default_completion_token{}) {
          return boost::asio::async_initiate<CompletionToken, void(boost::system::error_code, std::size_t)>(
             [this](auto&& completion_handler, const auto& bufs) {
@@ -641,7 +670,7 @@ class Stream {
                   m_core->send_buffer().consume(m_core->send_buffer().size());
                }
 
-               detail::AsyncWriteOperation<completion_handler_t, Stream> op{
+               const detail::AsyncWriteOperation<completion_handler_t, Stream> op{
                   std::forward<completion_handler_t>(completion_handler),
                   *this,
                   ec ? 0 : boost::asio::buffer_size(bufs),
@@ -663,12 +692,13 @@ class Stream {
       template <typename MutableBufferSequence,
                 detail::byte_size_completion_token CompletionToken = default_completion_token>
       auto async_read_some(const MutableBufferSequence& buffers,
+                           // NOLINTNEXTLINE(*-missing-std-forward)
                            CompletionToken&& completion_token = default_completion_token{}) {
          return boost::asio::async_initiate<CompletionToken, void(boost::system::error_code, std::size_t)>(
             [this](auto&& completion_handler, const auto& bufs) {
                using completion_handler_t = std::decay_t<decltype(completion_handler)>;
 
-               detail::AsyncReadOperation<completion_handler_t, Stream, MutableBufferSequence> op{
+               const detail::AsyncReadOperation<completion_handler_t, Stream, MutableBufferSequence> op{
                   std::forward<completion_handler_t>(completion_handler), *this, bufs};
             },
             completion_token,
@@ -728,8 +758,10 @@ class Stream {
       void setup_native_handle(Connection_Side side, boost::system::error_code& ec) {
          // Do not attempt to instantiate the native_handle when a custom (mocked) channel type template parameter has
          // been specified. This allows mocking the native_handle in test code.
-         if constexpr(std::is_same<ChannelT, Channel>::value) {
-            BOTAN_STATE_CHECK(m_native_handle == nullptr);
+         if constexpr(std::is_same_v<ChannelT, Channel>) {
+            if(m_native_handle != nullptr) {
+               throw Botan::Invalid_State("ASIO native handle unexpectedly set");
+            }
 
             try_with_error_code(
                [&] {
@@ -741,7 +773,8 @@ class Stream {
                                    m_context->m_policy,
                                    m_context->m_rng,
                                    m_context->m_server_info,
-                                   m_context->m_policy->latest_supported_version(false /* no DTLS */)));
+                                   m_context->m_policy->latest_supported_version(false /* no DTLS */),
+                                   m_context->m_app_protocols));
                   } else {
                      m_native_handle = std::unique_ptr<Server>(new Server(m_core,
                                                                           m_context->m_session_manager,
@@ -818,14 +851,19 @@ class Stream {
          // If we have received application data in a previous invocation, this
          // data needs to be passed to the application first. Otherwise, it
          // might get overwritten.
-         BOTAN_ASSERT(!has_received_data(), "receive buffer is empty");
-         BOTAN_ASSERT(!error_from_us() && !alert_from_peer(), "TLS session is healthy");
+         if(has_received_data()) {
+            throw Botan::Invalid_State("ASIO receive buffer not empty");
+         }
+
+         if(error_from_us() || alert_from_peer()) {
+            throw Botan::Invalid_State("ASIO TLS session no longer healthy");
+         }
 
          // If there's no existing error condition, read and process data from
          // the peer and report any sort of network error. TLS related errors do
          // not immediately cause an abort, they are checked in the invocation
          // via `error_from_us()`.
-         boost::asio::const_buffer read_buffer{input_buffer().data(), m_nextLayer.read_some(input_buffer(), ec)};
+         const boost::asio::const_buffer read_buffer{input_buffer().data(), m_nextLayer.read_some(input_buffer(), ec)};
          if(!ec) {
             process_encrypted_data(read_buffer);
          } else if(ec == boost::asio::error::eof) {
@@ -902,8 +940,9 @@ class Stream {
        * @param read_buffer Input buffer containing the encrypted data.
        */
       void process_encrypted_data(const boost::asio::const_buffer& read_buffer) {
-         BOTAN_ASSERT(!alert_from_peer() && !error_from_us(),
-                      "no one sent an alert before (no data allowed after that)");
+         if(alert_from_peer() || error_from_us()) {
+            throw Botan::Invalid_State("ASIO TLS session no longer healthy");
+         }
 
          // If the local TLS implementation generates an alert, we are notified
          // with an exception that is caught in try_with_error_code(). The error
@@ -947,16 +986,16 @@ class Stream {
       boost::system::error_code error_from_us() const { return m_ec_from_last_read; }
 
    protected:
-      std::shared_ptr<Context> m_context;
-      StreamLayer m_nextLayer;
+      std::shared_ptr<Context> m_context;  // NOLINT(*-non-private-member-variable*)
+      StreamLayer m_nextLayer;             // NOLINT(*-non-private-member-variable*)
 
-      std::shared_ptr<StreamCallbacks> m_core;
-      std::unique_ptr<ChannelT> m_native_handle;
-      boost::system::error_code m_ec_from_last_read;
+      std::shared_ptr<StreamCallbacks> m_core;        // NOLINT(*-non-private-member-variable*)
+      std::unique_ptr<ChannelT> m_native_handle;      // NOLINT(*-non-private-member-variable*)
+      boost::system::error_code m_ec_from_last_read;  // NOLINT(*-non-private-member-variable*)
 
       // Buffer space used to read input intended for the core
-      std::vector<uint8_t> m_input_buffer_space;
-      const boost::asio::mutable_buffer m_input_buffer;
+      std::vector<uint8_t> m_input_buffer_space;         // NOLINT(*-non-private-member-variable*)
+      const boost::asio::mutable_buffer m_input_buffer;  // NOLINT(*-non-private-member-variable*)
 };
 
 // deduction guides for convenient construction from an existing

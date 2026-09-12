@@ -18,9 +18,11 @@
 #include <botan/rng.h>
 
 #include <botan/internal/dilithium_algos.h>
+#include <botan/internal/dilithium_keys.h>
 #include <botan/internal/dilithium_symmetric_primitives.h>
 #include <botan/internal/dilithium_types.h>
 #include <botan/internal/fmt.h>
+#include <botan/internal/keypair.h>
 #include <botan/internal/pk_ops_impl.h>
 #include <botan/internal/stl_util.h>
 
@@ -46,13 +48,30 @@ DilithiumMode::Mode dilithium_mode_from_string(std::string_view str) {
    if(str == "Dilithium-8x7-AES-r3") {
       return DilithiumMode::Dilithium8x7_AES;
    }
+   if(str == "ML-DSA-4x4") {
+      return DilithiumMode::ML_DSA_4x4;
+   }
+   if(str == "ML-DSA-6x5") {
+      return DilithiumMode::ML_DSA_6x5;
+   }
+   if(str == "ML-DSA-8x7") {
+      return DilithiumMode::ML_DSA_8x7;
+   }
 
    throw Invalid_Argument(fmt("'{}' is not a valid Dilithium mode name", str));
 }
 
+DilithiumMode::Mode dilithium_mode_from_oid(const OID& oid) {
+   if(const auto name = oid.registered_name()) {
+      return dilithium_mode_from_string(*name);
+   }
+
+   throw Invalid_Argument(fmt("OID '{}' is not registered as a Dilithium/ML-DSA mode", oid));
+}
+
 }  // namespace
 
-DilithiumMode::DilithiumMode(const OID& oid) : m_mode(dilithium_mode_from_string(oid.to_formatted_string())) {}
+DilithiumMode::DilithiumMode(const OID& oid) : m_mode(dilithium_mode_from_oid(oid)) {}
 
 DilithiumMode::DilithiumMode(std::string_view str) : m_mode(dilithium_mode_from_string(str)) {}
 
@@ -74,153 +93,118 @@ std::string DilithiumMode::to_string() const {
          return "Dilithium-8x7-r3";
       case DilithiumMode::Dilithium8x7_AES:
          return "Dilithium-8x7-AES-r3";
+      case DilithiumMode::ML_DSA_4x4:
+         return "ML-DSA-4x4";
+      case DilithiumMode::ML_DSA_6x5:
+         return "ML-DSA-6x5";
+      case DilithiumMode::ML_DSA_8x7:
+         return "ML-DSA-8x7";
    }
 
    BOTAN_ASSERT_UNREACHABLE();
 }
 
-class Dilithium_PublicKeyInternal {
-   public:
-      static std::shared_ptr<Dilithium_PublicKeyInternal> decode(
-         DilithiumConstants mode, StrongSpan<const DilithiumSerializedPublicKey> raw_pk) {
-         auto [rho, t1] = Dilithium_Algos::decode_public_key(raw_pk, mode);
-         return std::make_shared<Dilithium_PublicKeyInternal>(std::move(mode), std::move(rho), std::move(t1));
+bool DilithiumMode::is_aes() const {
+   return m_mode == Dilithium4x4_AES || m_mode == Dilithium6x5_AES || m_mode == Dilithium8x7_AES;
+}
+
+bool DilithiumMode::is_modern() const {
+   return !is_aes();
+}
+
+bool DilithiumMode::is_ml_dsa() const {
+   return m_mode == ML_DSA_4x4 || m_mode == ML_DSA_6x5 || m_mode == ML_DSA_8x7;
+}
+
+bool DilithiumMode::is_available() const {
+#if defined(BOTAN_HAS_DILITHIUM_AES)
+   if(is_dilithium_round3() && is_aes()) {
+      return true;
+   }
+#endif
+#if defined(BOTAN_HAS_DILITHIUM)
+   if(is_dilithium_round3() && is_modern()) {
+      return true;
+   }
+#endif
+#if defined(BOTAN_HAS_ML_DSA)
+   if(is_ml_dsa()) {
+      return true;
+   }
+#endif
+   return false;
+}
+
+namespace {
+
+void validate_dilithium_options(const PK_Signature_Options& options, const DilithiumMode& mode) {
+   /*
+   * The "salt" is the randomness drawn during hedged signing. Its size is fixed
+   * by the scheme, so the option is accepted only if it names that size:
+   * ML-DSA hashes a 32 byte rnd (FIPS 204, Algorithm 2), while randomized
+   * Dilithium round 3 samples the entire 64 byte rho' (Figure 4, line 12).
+   */
+   if(options.using_salt_size()) {
+      BOTAN_ARG_CHECK(!options.using_deterministic_signature(),
+                      "Dilithium cannot support a salt while also being deterministic");
+
+      const size_t randomness_bytes =
+         mode.is_ml_dsa() ? DilithiumConstants::OPTIONAL_RANDOMNESS_BYTES : DilithiumConstants::SEED_RHOPRIME_BYTES;
+
+      if(options.salt_size().value() != randomness_bytes) {
+         throw Invalid_Argument(fmt("{} can only be used with a {} byte salt", mode.to_string(), randomness_bytes));
       }
+   }
+}
 
-      Dilithium_PublicKeyInternal(DilithiumConstants mode, DilithiumSeedRho rho, DilithiumPolyVec t1) :
-            m_mode(std::move(mode)),
-            m_rho(std::move(rho)),
-            m_t1(std::move(t1)),
-            m_tr(m_mode.symmetric_primitives().H(raw_pk())) {
-         BOTAN_ASSERT_NOMSG(!m_rho.empty());
-         BOTAN_ASSERT_NOMSG(m_t1.size() > 0);
-      }
+}  // namespace
 
-   public:
-      DilithiumSerializedPublicKey raw_pk() const { return Dilithium_Algos::encode_public_key(m_rho, m_t1, m_mode); }
-
-      const DilithiumHashedPublicKey& tr() const { return m_tr; }
-
-      const DilithiumPolyVec& t1() const { return m_t1; }
-
-      const DilithiumSeedRho& rho() const { return m_rho; }
-
-      const DilithiumConstants& mode() const { return m_mode; }
-
-   private:
-      const DilithiumConstants m_mode;
-      DilithiumSeedRho m_rho;
-      DilithiumPolyVec m_t1;
-      DilithiumHashedPublicKey m_tr;
-};
-
-class Dilithium_PrivateKeyInternal {
-   public:
-      static std::shared_ptr<Dilithium_PrivateKeyInternal> decode(DilithiumConstants mode,
-                                                                  StrongSpan<const DilithiumSerializedPrivateKey> sk) {
-         auto [rho, signing_seed, tr, s1, s2, t0] = Dilithium_Algos::decode_private_key(sk, mode);
-         return std::make_shared<Dilithium_PrivateKeyInternal>(std::move(mode),
-                                                               std::move(rho),
-                                                               std::move(signing_seed),
-                                                               std::move(tr),
-                                                               std::move(s1),
-                                                               std::move(s2),
-                                                               std::move(t0));
-      }
-
-      Dilithium_PrivateKeyInternal(DilithiumConstants mode,
-                                   DilithiumSeedRho rho,
-                                   DilithiumSigningSeedK signing_seed,
-                                   DilithiumHashedPublicKey tr,
-                                   DilithiumPolyVec s1,
-                                   DilithiumPolyVec s2,
-                                   DilithiumPolyVec t0) :
-            m_mode(std::move(mode)),
-            m_rho(std::move(rho)),
-            m_signing_seed(std::move(signing_seed)),
-            m_tr(std::move(tr)),
-            m_t0(std::move(t0)),
-            m_s1(std::move(s1)),
-            m_s2(std::move(s2)) {}
-
-   public:
-      DilithiumSerializedPrivateKey raw_sk() const {
-         auto scope = CT::scoped_poison(*this);
-         auto result = Dilithium_Algos::encode_private_key(m_rho, m_tr, m_signing_seed, m_s1, m_s2, m_t0, m_mode);
-         CT::unpoison(result);
-         return result;
-      }
-
-      const DilithiumConstants& mode() const { return m_mode; }
-
-      const DilithiumSeedRho& rho() const { return m_rho; }
-
-      const DilithiumSigningSeedK& signing_seed() const { return m_signing_seed; }
-
-      const DilithiumHashedPublicKey& tr() const { return m_tr; }
-
-      const DilithiumPolyVec& s1() const { return m_s1; }
-
-      const DilithiumPolyVec& s2() const { return m_s2; }
-
-      const DilithiumPolyVec& t0() const { return m_t0; }
-
-      void _const_time_poison() const {
-         // Note: m_rho and m_tr is public knowledge
-         CT::poison_all(m_signing_seed, m_s1, m_s2, m_t0);
-      }
-
-      void _const_time_unpoison() const { CT::unpoison_all(m_rho, m_signing_seed, m_tr, m_s1, m_s2, m_t0); }
-
-   private:
-      const DilithiumConstants m_mode;
-      DilithiumSeedRho m_rho;
-      DilithiumSigningSeedK m_signing_seed;
-      DilithiumHashedPublicKey m_tr;
-      DilithiumPolyVec m_t0;
-      DilithiumPolyVec m_s1;
-      DilithiumPolyVec m_s2;
-};
+// The signature and verification operations should be in an anonymous namespace
+// as well, but cannot due to an apparent bug in MSVC
 
 class Dilithium_Signature_Operation final : public PK_Ops::Signature {
    public:
-      Dilithium_Signature_Operation(std::shared_ptr<Dilithium_PrivateKeyInternal> sk, bool randomized) :
-            m_priv_key(std::move(sk)),
-            m_randomized(randomized),
-            m_h(m_priv_key->mode().symmetric_primitives().get_message_hash(m_priv_key->tr())),
-            m_s1(ntt(m_priv_key->s1().clone())),
-            m_s2(ntt(m_priv_key->s2().clone())),
-            m_t0(ntt(m_priv_key->t0().clone())),
-            m_A(Dilithium_Algos::expand_A(m_priv_key->rho(), m_priv_key->mode())) {}
+      Dilithium_Signature_Operation(DilithiumInternalKeypair keypair, const PK_Signature_Options& options) :
+            m_keypair(std::move(keypair)),
 
-      void update(std::span<const uint8_t> input) override { m_h.update(input); }
+            // FIPS 204, Section 3.4
+            //   By default, this standard specifies the signing algorithm to use both
+            //   types of randomness [fresh from the RNG and a value in the private key].
+            //   This is referred to as the “hedged” variant of the signing procedure.
+            m_randomized(!options.using_deterministic_signature()),
+            m_h(m_keypair.second->mode().symmetric_primitives().get_message_hash(m_keypair.first->tr())),
+            m_s1(ntt(m_keypair.second->s1().clone())),
+            m_s2(ntt(m_keypair.second->s2().clone())),
+            m_t0(ntt(m_keypair.second->t0().clone())),
+            m_A(Dilithium_Algos::expand_A(m_keypair.first->rho(), m_keypair.second->mode())) {
+         validate_dilithium_options(options, m_keypair.second->mode().mode());
+      }
+
+      void update(std::span<const uint8_t> input) override { m_h->update(input); }
 
       /**
-       * NIST FIPS 204 IPD, Algorithm 2 (ML-DSA.Sign)
+       * NIST FIPS 204, Algorithm 2 (ML-DSA.Sign) and Algorithm 7 (ML-DSA.Sign_internal)
        *
        * Note that the private key decoding is done ahead of time. Also, the
        * matrix expansion of A from 'rho' along with the NTT-transforms of s1,
        * s2 and t0 are done in the constructor of this class, as a 'signature
        * operation' may be used to sign multiple messages.
+       *
+       * TODO: Implement support for the specified 'ctx' context string which is
+       *       application defined and "empty" by default and <= 255 bytes long.
        */
       std::vector<uint8_t> sign(RandomNumberGenerator& rng) override {
-         auto scope = CT::scoped_poison(*m_priv_key);
+         auto scope = CT::scoped_poison(*m_keypair.second);
 
-         const auto mu = m_h.final();
-         const auto& mode = m_priv_key->mode();
+         const auto mu = m_h->final();
+         const auto& mode = m_keypair.second->mode();
          const auto& sympri = mode.symmetric_primitives();
 
-         // TODO: ML-DSA generates rhoprime differently, namely
-         //       rhoprime = H(K, rnd, mu) with rnd being 32 random bytes or 32 zero bytes
-         const auto rhoprime = (m_randomized)
-                                  ? rng.random_vec<DilithiumSeedRhoPrime>(DilithiumConstants::SEED_RHOPRIME_BYTES)
-                                  : sympri.H(m_priv_key->signing_seed(), mu);
+         const auto rhoprime = sympri.H_maybe_randomized(m_keypair.second->signing_seed(), mu, maybe(rng));
          CT::poison(rhoprime);
 
-         // Note: nonce (as requested by `polyvecl_uniform_gamma1`) is actually just uint16_t
-         //       but to avoid an integer overflow, we use uint32_t as the loop variable.
-         for(uint32_t nonce = 0; nonce <= std::numeric_limits<uint16_t>::max(); nonce += mode.l()) {
-            const auto y = Dilithium_Algos::expand_mask(rhoprime, static_cast<uint16_t>(nonce), mode);
+         for(uint16_t nonce = 0, n = 0; n <= DilithiumConstants::SIGNING_LOOP_BOUND; ++n, nonce += mode.l()) {
+            const auto y = Dilithium_Algos::expand_mask(rhoprime, nonce, mode);
 
             auto w_ntt = m_A * ntt(y.clone());
             w_ntt.reduce();
@@ -228,40 +212,44 @@ class Dilithium_Signature_Operation final : public PK_Ops::Signature {
             w.conditional_add_q();
 
             auto [w1, w0] = Dilithium_Algos::decompose(w, mode);
-            const auto ch = sympri.H(mu, Dilithium_Algos::encode_commitment(w1, mode));
-            CT::unpoison(ch);  // part of the signature
+            const auto ch = CT::driveby_unpoison(sympri.H(mu, Dilithium_Algos::encode_commitment(w1, mode)));
 
-            StrongSpan<const DilithiumCommitmentHash> c1(
-               std::span<const uint8_t>(ch).first(DilithiumConstants::COMMITMENT_HASH_C1_BYTES));
-            const auto c = ntt(Dilithium_Algos::sample_in_ball(c1, mode));
+            const auto c = ntt(Dilithium_Algos::sample_in_ball(ch, mode));
             const auto cs1 = inverse_ntt(c * m_s1);
             auto z = y + cs1;
             z.reduce();
+
+            // We validate the infinity norm of z before proceeding to calculate cs2
             if(!Dilithium_Algos::infinity_norm_within_bound(z, to_underlying(mode.gamma1()) - mode.beta())) {
                continue;
             }
             CT::unpoison(z);  // part of the signature
 
             const auto cs2 = inverse_ntt(c * m_s2);
+
+            // Note: w0 is used as a scratch space for calculation. We're aliasing
+            //       the results to const&'s merely to communicate which value the
+            //       intermediate results represent in the specification.
             w0 -= cs2;
             w0.reduce();
-            if(!Dilithium_Algos::infinity_norm_within_bound(w0, to_underlying(mode.gamma2()) - mode.beta())) {
+            const auto& r0 = w0;
+            if(!Dilithium_Algos::infinity_norm_within_bound(r0, to_underlying(mode.gamma2()) - mode.beta())) {
                continue;
             }
 
             auto ct0 = inverse_ntt(c * m_t0);
             ct0.reduce();
+            // We validate the infinity norm of ct0 before proceeding to calculate the hint.
             if(!Dilithium_Algos::infinity_norm_within_bound(ct0, mode.gamma2())) {
                continue;
             }
 
             w0 += ct0;
             w0.conditional_add_q();
+            const auto& w0cs2ct0 = w0;
 
-            const auto hint = Dilithium_Algos::make_hint(w0, w1, mode);
-            const auto hamming_weight = hint.hamming_weight();
-            CT::unpoison(hamming_weight);
-            if(hamming_weight > mode.omega()) {
+            const auto hint = Dilithium_Algos::make_hint(w0cs2ct0, w1, mode);
+            if(CT::driveby_unpoison(hint.hamming_weight()) > mode.omega()) {
                continue;
             }
             CT::unpoison(hint);  // part of the signature
@@ -269,22 +257,31 @@ class Dilithium_Signature_Operation final : public PK_Ops::Signature {
             return Dilithium_Algos::encode_signature(ch, z, hint, mode).get();
          }
 
-         throw Internal_Error("Dilithium signature loop did not terminate");
+         throw Internal_Error("ML-DSA/Dilithium signature loop did not terminate");
       }
 
-      size_t signature_length() const override { return m_priv_key->mode().signature_bytes(); }
+      size_t signature_length() const override { return m_keypair.second->mode().signature_bytes(); }
 
       AlgorithmIdentifier algorithm_identifier() const override {
-         return AlgorithmIdentifier(m_priv_key->mode().mode().object_identifier(),
+         return AlgorithmIdentifier(m_keypair.second->mode().mode().object_identifier(),
                                     AlgorithmIdentifier::USE_EMPTY_PARAM);
       }
 
-      std::string hash_function() const override { return m_h.name(); }
+      std::string hash_function() const override { return m_h->name(); }
 
    private:
-      std::shared_ptr<Dilithium_PrivateKeyInternal> m_priv_key;
+      std::optional<std::reference_wrapper<RandomNumberGenerator>> maybe(RandomNumberGenerator& rng) const {
+         if(m_randomized) {
+            return rng;
+         } else {
+            return std::nullopt;
+         }
+      }
+
+   private:
+      DilithiumInternalKeypair m_keypair;
       bool m_randomized;
-      DilithiumMessageHash m_h;
+      std::unique_ptr<DilithiumMessageHash> m_h;
 
       const DilithiumPolyVecNTT m_s1;
       const DilithiumPolyVecNTT m_s2;
@@ -294,46 +291,51 @@ class Dilithium_Signature_Operation final : public PK_Ops::Signature {
 
 class Dilithium_Verification_Operation final : public PK_Ops::Verification {
    public:
-      Dilithium_Verification_Operation(std::shared_ptr<Dilithium_PublicKeyInternal> pubkey) :
+      explicit Dilithium_Verification_Operation(std::shared_ptr<const Dilithium_PublicKeyInternal> pubkey) :
             m_pub_key(std::move(pubkey)),
             m_A(Dilithium_Algos::expand_A(m_pub_key->rho(), m_pub_key->mode())),
             m_t1_ntt_shifted(ntt(m_pub_key->t1() << DilithiumConstants::D)),
             m_h(m_pub_key->mode().symmetric_primitives().get_message_hash(m_pub_key->tr())) {}
 
-      void update(std::span<const uint8_t> input) override { m_h.update(input); }
+      void update(std::span<const uint8_t> input) override { m_h->update(input); }
 
       /**
-       * NIST FIPS 204 IPD, Algorithm 3 (ML-DSA.Verify)
+       * NIST FIPS 204, Algorithm 3 (ML-DSA.Verify) and 8 (ML-DSA.Verify_internal)
        *
        * Note that the public key decoding is done ahead of time. Also, the
        * matrix A is expanded from 'rho' in the constructor of this class, as
        * a 'verification operation' may be used to verify multiple signatures.
+       *
+       * TODO: Implement support for the specified 'ctx' context string which is
+       *       application defined and "empty" by default and <= 255 bytes long.
        */
       bool is_valid_signature(std::span<const uint8_t> sig) override {
          const auto& mode = m_pub_key->mode();
          const auto& sympri = mode.symmetric_primitives();
-         StrongSpan<const DilithiumSerializedSignature> sig_bytes(sig);
+         const StrongSpan<const DilithiumSerializedSignature> sig_bytes(sig);
+
+         const auto mu = m_h->final();
 
          if(sig_bytes.size() != mode.signature_bytes()) {
             return false;
          }
-
-         const auto mu = m_h.final();
 
          auto signature = Dilithium_Algos::decode_signature(sig_bytes, mode);
          if(!signature.has_value()) {
             return false;
          }
          auto [ch, z, h] = std::move(signature.value());
-         StrongSpan<const DilithiumCommitmentHash> c1(
-            std::span<uint8_t>(ch).first(DilithiumConstants::COMMITMENT_HASH_C1_BYTES));
 
-         if(h.hamming_weight() > mode.omega() ||
-            !Dilithium_Algos::infinity_norm_within_bound(z, to_underlying(mode.gamma1()) - mode.beta())) {
+         // This check was removed from the final version of ML-DSA
+         if(!mode.is_ml_dsa() && h.hamming_weight() > mode.omega()) {
             return false;
          }
 
-         const auto c_hat = ntt(Dilithium_Algos::sample_in_ball(c1, mode));
+         if(!Dilithium_Algos::infinity_norm_within_bound(z, to_underlying(mode.gamma1()) - mode.beta())) {
+            return false;
+         }
+
+         const auto c_hat = ntt(Dilithium_Algos::sample_in_ball(ch, mode));
          auto w_approx = m_A * ntt(std::move(z));
          w_approx -= c_hat * m_t1_ntt_shifted;
          w_approx.reduce();
@@ -347,20 +349,26 @@ class Dilithium_Verification_Operation final : public PK_Ops::Verification {
          return std::equal(ch.begin(), ch.end(), chprime.begin());
       }
 
-      std::string hash_function() const override { return m_h.name(); }
+      std::string hash_function() const override { return m_h->name(); }
 
    private:
-      std::shared_ptr<Dilithium_PublicKeyInternal> m_pub_key;
+      std::shared_ptr<const Dilithium_PublicKeyInternal> m_pub_key;
       DilithiumPolyMatNTT m_A;
       DilithiumPolyVecNTT m_t1_ntt_shifted;
-      DilithiumMessageHash m_h;
+      std::unique_ptr<DilithiumMessageHash> m_h;
 };
 
 Dilithium_PublicKey::Dilithium_PublicKey(const AlgorithmIdentifier& alg_id, std::span<const uint8_t> pk) :
-      Dilithium_PublicKey(pk, DilithiumMode(alg_id.oid())) {}
+      Dilithium_PublicKey(pk, DilithiumMode(alg_id.oid())) {
+   // The parameter set is identified by the OID; no parameters are defined.
+   if(!alg_id.parameters_are_empty()) {
+      throw Decoding_Error("Unexpected parameters for ML-DSA/Dilithium public key");
+   }
+}
 
 Dilithium_PublicKey::Dilithium_PublicKey(std::span<const uint8_t> pk, DilithiumMode m) {
    DilithiumConstants mode(m);
+   BOTAN_ARG_CHECK(mode.mode().is_available(), "Dilithium/ML-DSA mode is not available in this build");
    BOTAN_ARG_CHECK(pk.empty() || pk.size() == mode.public_key_bytes(),
                    "dilithium public key does not have the correct byte count");
 
@@ -368,7 +376,15 @@ Dilithium_PublicKey::Dilithium_PublicKey(std::span<const uint8_t> pk, DilithiumM
 }
 
 std::string Dilithium_PublicKey::algo_name() const {
-   return object_identifier().to_formatted_string();
+   // Note: For Dilithium we made the blunder to return the OID's human readable
+   //       name, e.g. "Dilithium-4x4-AES". This is inconsistent with the other
+   //       public key algorithms which return the generic name only.
+   //
+   // TODO(Botan4): Fix the inconsistency described above, also considering that
+   //               there might be other code locations that identify Dilithium
+   //               by std::string::starts_with("Dilithium-").
+   //               (Above assumes that Dilithium won't be removed entirely!)
+   return (m_public->mode().is_ml_dsa()) ? std::string("ML-DSA") : m_public->mode().mode().to_string();
 }
 
 AlgorithmIdentifier Dilithium_PublicKey::algorithm_identifier() const {
@@ -397,21 +413,28 @@ std::vector<uint8_t> Dilithium_PublicKey::public_key_bits() const {
    return raw_public_key_bits();
 }
 
-bool Dilithium_PublicKey::check_key(RandomNumberGenerator&, bool) const {
-   return true;  // ???
+bool Dilithium_PublicKey::check_key(RandomNumberGenerator& /*rng*/, bool /*strong*/) const {
+   // The public key consists of (rho, t1). Length validation is performed in
+   // the constructor, and t1 coefficients are decoded via SimpleBitUnpack
+   // (FIPS 204 Algorithm 18) into a power-of-2 range that exactly covers all
+   // valid values, so no out-of-range coefficients are possible. For the
+   // private key, s1/s2 coefficient ranges are validated and t is recomputed
+   // from (A, s1, s2) and verified against the stored hash during decoding.
+   return true;
 }
 
 std::unique_ptr<Private_Key> Dilithium_PublicKey::generate_another(RandomNumberGenerator& rng) const {
    return std::make_unique<Dilithium_PrivateKey>(rng, m_public->mode().mode());
 }
 
-std::unique_ptr<PK_Ops::Verification> Dilithium_PublicKey::create_verification_op(std::string_view params,
-                                                                                  std::string_view provider) const {
-   BOTAN_ARG_CHECK(params.empty() || params == "Pure", "Unexpected parameters for verifying with Dilithium");
-   if(provider.empty() || provider == "base") {
+std::unique_ptr<PK_Ops::Verification> Dilithium_PublicKey::_create_verification_op(
+   const PK_Signature_Options& options) const {
+   validate_dilithium_options(options, m_public->mode().mode());
+
+   if(!options.using_provider()) {
       return std::make_unique<Dilithium_Verification_Operation>(m_public);
    }
-   throw Provider_Not_Found(algo_name(), provider);
+   throw Provider_Not_Found(algo_name(), options.provider().value());
 }
 
 std::unique_ptr<PK_Ops::Verification> Dilithium_PublicKey::create_x509_verification_op(
@@ -425,76 +448,35 @@ std::unique_ptr<PK_Ops::Verification> Dilithium_PublicKey::create_x509_verificat
    throw Provider_Not_Found(algo_name(), provider);
 }
 
-namespace Dilithium_Algos {
-
-namespace {
-
-std::pair<DilithiumPolyVec, DilithiumPolyVec> compute_t1_and_t0(const DilithiumPolyMatNTT& A,
-                                                                const DilithiumPolyVec& s1,
-                                                                const DilithiumPolyVec& s2) {
-   auto t_hat = A * ntt(s1.clone());
-   t_hat.reduce();
-   auto t = inverse_ntt(std::move(t_hat));
-   t += s2;
-   t.conditional_add_q();
-
-   return Dilithium_Algos::power2round(t);
-}
-
-}  // namespace
-
-}  // namespace Dilithium_Algos
-
 /**
- * NIST FIPS 204 IPD, Algorithm 1 (ML-DSA.KeyGen)
+ * NIST FIPS 204, Algorithm 1 (ML-DSA.KeyGen), and 6 (ML-DSA.KeyGen_internal)
+ *
+ * This integrates the seed generation and the actual key generation into one
+ * function. After generation, the relevant components of the key are kept in
+ * memory; the key encoding is deferred until explicitly requested.
+ *
+ * The calculation of (t1, t0) is done in a separate function, as it is also
+ * needed for the decoding of a private key.
  */
 Dilithium_PrivateKey::Dilithium_PrivateKey(RandomNumberGenerator& rng, DilithiumMode m) {
    DilithiumConstants mode(m);
-   const auto& sympriv = mode.symmetric_primitives();
-
-   const auto xi = rng.random_vec<DilithiumSeedRandomness>(DilithiumConstants::SEED_RANDOMNESS_BYTES);
-   CT::poison(xi);
-
-   auto [rho, rhoprime, key] = sympriv.H(xi);
-   CT::unpoison(rho);  // rho is public (seed for the public matrix A)
-
-   const auto A = Dilithium_Algos::expand_A(rho, mode);
-   auto [s1, s2] = Dilithium_Algos::expand_s(rhoprime, mode);
-   auto [t1, t0] = Dilithium_Algos::compute_t1_and_t0(A, s1, s2);
-
-   CT::unpoison_all(t1, key, s1, s2, t0);
-   m_public = std::make_shared<Dilithium_PublicKeyInternal>(mode, rho, std::move(t1));
-   m_private = std::make_shared<Dilithium_PrivateKeyInternal>(
-      std::move(mode), std::move(rho), std::move(key), m_public->tr(), std::move(s1), std::move(s2), std::move(t0));
+   BOTAN_ARG_CHECK(mode.mode().is_available(), "Dilithium/ML-DSA mode is not available in this build");
+   std::tie(m_public, m_private) = Dilithium_Algos::expand_keypair(
+      rng.random_vec<DilithiumSeedRandomness>(DilithiumConstants::SEED_RANDOMNESS_BYTES), std::move(mode));
 }
 
 Dilithium_PrivateKey::Dilithium_PrivateKey(const AlgorithmIdentifier& alg_id, std::span<const uint8_t> sk) :
-      Dilithium_PrivateKey(sk, DilithiumMode(alg_id.oid())) {}
+      Dilithium_PrivateKey(sk, DilithiumMode(alg_id.oid())) {
+   // The parameter set is identified by the OID; no parameters are defined.
+   if(!alg_id.parameters_are_empty()) {
+      throw Decoding_Error("Unexpected parameters for ML-DSA/Dilithium private key");
+   }
+}
 
 Dilithium_PrivateKey::Dilithium_PrivateKey(std::span<const uint8_t> sk, DilithiumMode m) {
-   auto scope = CT::scoped_poison(sk);
-
    DilithiumConstants mode(m);
-   BOTAN_ARG_CHECK(sk.size() == mode.private_key_bytes(), "dilithium private key does not have the correct byte count");
-   m_private =
-      Dilithium_PrivateKeyInternal::decode(std::move(mode), StrongSpan<const DilithiumSerializedPrivateKey>(sk));
-
-   // Currently, Botan's Private_Key class inherits from Public_Key, forcing us
-   // to derive the public key from the private key here.
-
-   // rho is public (used in rejection sampling of matrix A)
-   CT::unpoison(m_private->rho());
-
-   const auto A = Dilithium_Algos::expand_A(m_private->rho(), m_private->mode());
-   auto [t1, _] = Dilithium_Algos::compute_t1_and_t0(A, m_private->s1(), m_private->s2());
-   CT::unpoison(t1);
-
-   m_public = std::make_shared<Dilithium_PublicKeyInternal>(m_private->mode(), m_private->rho(), std::move(t1));
-   CT::unpoison(*m_private);
-
-   if(m_public->tr() != m_private->tr()) {
-      throw Decoding_Error("Calculated dilithium public key hash does not match the one stored in the private key");
-   }
+   auto& codec = mode.keypair_codec();
+   std::tie(m_public, m_private) = codec.decode_keypair(sk, std::move(mode));
 }
 
 secure_vector<uint8_t> Dilithium_PrivateKey::raw_private_key_bits() const {
@@ -502,24 +484,29 @@ secure_vector<uint8_t> Dilithium_PrivateKey::raw_private_key_bits() const {
 }
 
 secure_vector<uint8_t> Dilithium_PrivateKey::private_key_bits() const {
-   return std::move(m_private->raw_sk().get());
+   return m_private->mode().keypair_codec().encode_keypair({m_public, m_private});
 }
 
-std::unique_ptr<PK_Ops::Signature> Dilithium_PrivateKey::create_signature_op(RandomNumberGenerator& rng,
-                                                                             std::string_view params,
-                                                                             std::string_view provider) const {
+std::unique_ptr<PK_Ops::Signature> Dilithium_PrivateKey::_create_signature_op(
+   RandomNumberGenerator& rng, const PK_Signature_Options& options) const {
    BOTAN_UNUSED(rng);
 
-   BOTAN_ARG_CHECK(params.empty() || params == "Deterministic" || params == "Randomized",
-                   "Unexpected parameters for signing with Dilithium");
-
-   // TODO: ML-DSA uses the randomized (hedged) variant by default.
-   //       We might even drop support for the deterministic variant.
-   const bool randomized = (params == "Randomized");
-   if(provider.empty() || provider == "base") {
-      return std::make_unique<Dilithium_Signature_Operation>(m_private, randomized);
+   if(!options.using_provider()) {
+      return std::make_unique<Dilithium_Signature_Operation>(DilithiumInternalKeypair{m_public, m_private}, options);
    }
-   throw Provider_Not_Found(algo_name(), provider);
+   throw Provider_Not_Found(algo_name(), options.provider().value());
+}
+
+bool Dilithium_PrivateKey::check_key(RandomNumberGenerator& rng, bool strong) const {
+   if(!Dilithium_PublicKey::check_key(rng, strong)) {
+      return false;
+   }
+
+   if(strong) {
+      return KeyPair::signature_consistency_check(rng, *this, "");
+   }
+
+   return true;
 }
 
 std::unique_ptr<Public_Key> Dilithium_PrivateKey::public_key() const {

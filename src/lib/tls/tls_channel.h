@@ -11,16 +11,22 @@
 #ifndef BOTAN_TLS_CHANNEL_H_
 #define BOTAN_TLS_CHANNEL_H_
 
+#include <botan/symkey.h>
 #include <botan/tls_alert.h>
-#include <botan/tls_callbacks.h>
-#include <botan/tls_session.h>
-#include <botan/tls_session_manager.h>
-#include <botan/x509cert.h>
-
+#include <chrono>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace Botan {
+
+class Public_Key;
+class X509_Certificate;
+
+}  // namespace Botan
 
 namespace Botan::TLS {
 
@@ -33,7 +39,14 @@ class BOTAN_PUBLIC_API(2, 0) Channel {
 
       virtual ~Channel() = default;
 
+      Channel(const Channel& other) = delete;
+      Channel(Channel&& other) = default;
+      Channel& operator=(const Channel& other) = delete;
+      Channel& operator=(Channel&& other) = delete;
+
    protected:
+      Channel() = default;
+
       virtual size_t from_peer(std::span<const uint8_t> data) = 0;
       virtual void to_peer(std::span<const uint8_t> data) = 0;
 
@@ -59,7 +72,7 @@ class BOTAN_PUBLIC_API(2, 0) Channel {
       * Inject plaintext intended for counterparty
       * Throws an exception if is_active() is false
       */
-      void send(std::string_view val) { this->send(std::span(cast_char_ptr_to_uint8(val.data()), val.size())); }
+      void send(std::string_view s) { this->send({reinterpret_cast<const uint8_t*>(s.data()), s.size()}); }
 
       /**
       * Inject plaintext intended for counterparty
@@ -108,6 +121,12 @@ class BOTAN_PUBLIC_API(2, 0) Channel {
       * @return true iff the connection is active for sending application data
       */
       virtual bool is_active() const = 0;
+
+      /**
+      * @return the remaining time until timeout_check() might retransmit
+      *         handshake data, or std::nullopt if no timeout check is needed.
+      */
+      virtual std::optional<std::chrono::milliseconds> next_retransmission_timeout() const = 0;
 
       /**
       * Note: For TLS 1.3 a connection is closed only after both peers have
@@ -183,10 +202,16 @@ class BOTAN_PUBLIC_API(2, 0) Channel {
       /**
       * Perform a handshake timeout check.
       *
-      * This function does nothing unless the channel represents a DTLS
-      * connection and a handshake is actively in progress. In this case it will
-      * check the current timeout state and potentially initiate retransmission
-      * of handshake packets.
+      * This function does nothing unless the channel represents a DTLS connection with
+      * a handshake in progress.
+      *
+      * By default after a certain interval where no progress has been made in the
+      * handshake (controlled by the policy values `TLS::Policy::dtls_initial_timeout`,
+      * `TLS::Policy::dtls_maximum_timeout`, and `TLS::Policy::dtls_maximum_retransmissions`),
+      * calling `timeout_check` will throw indicating the handshake has failed to
+      * complete. If you wish to never fully timeout, this can be accomplished by
+      * overriding `TLS::Policy::dtls_maximum_retransmissions` to return `std::nullopt`,
+      * in which case a handshake attempt will retry indefinitely.
       *
       * @returns true if a timeout condition occurred
       */

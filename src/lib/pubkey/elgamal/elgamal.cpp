@@ -8,6 +8,7 @@
 #include <botan/elgamal.h>
 
 #include <botan/internal/blinding.h>
+#include <botan/internal/buffer_stuffer.h>
 #include <botan/internal/dl_scheme.h>
 #include <botan/internal/keypair.h>
 #include <botan/internal/monty_exp.h>
@@ -91,7 +92,13 @@ bool ElGamal_PrivateKey::check_key(RandomNumberGenerator& rng, bool strong) cons
       return false;
    }
 
-   return KeyPair::encryption_consistency_check(rng, *this, "OAEP(SHA-256)");
+#if defined(BOTAN_HAS_OAEP) && defined(BOTAN_HAS_SHA_256)
+   const std::string padding = "OAEP(SHA-256)";
+#else
+   const std::string padding = "Raw";
+#endif
+
+   return KeyPair::encryption_consistency_check(rng, *this, padding);
 }
 
 namespace {
@@ -99,12 +106,12 @@ namespace {
 /**
 * ElGamal encryption operation
 */
-class ElGamal_Encryption_Operation final : public PK_Ops::Encryption_with_EME {
+class ElGamal_Encryption_Operation final : public PK_Ops::Encryption_with_Padding {
    public:
-      ElGamal_Encryption_Operation(const std::shared_ptr<const DL_PublicKey>& key, std::string_view eme) :
-            PK_Ops::Encryption_with_EME(eme), m_key(key) {
+      ElGamal_Encryption_Operation(const std::shared_ptr<const DL_PublicKey>& key, std::string_view padding) :
+            PK_Ops::Encryption_with_Padding(padding), m_key(key) {
          const size_t powm_window = 4;
-         m_monty_y_p = monty_precompute(m_key->group().monty_params_p(), m_key->public_key(), powm_window);
+         m_monty_y_p = monty_precompute(m_key->group()._monty_params_p(), m_key->public_key(), powm_window);
       }
 
       size_t ciphertext_length(size_t /*ptext_len*/) const override { return 2 * m_key->group().p_bytes(); }
@@ -115,17 +122,17 @@ class ElGamal_Encryption_Operation final : public PK_Ops::Encryption_with_EME {
 
    private:
       std::shared_ptr<const DL_PublicKey> m_key;
-      std::shared_ptr<const Montgomery_Exponentation_State> m_monty_y_p;
+      std::shared_ptr<const Montgomery_Exponentiation_State> m_monty_y_p;
 };
 
 std::vector<uint8_t> ElGamal_Encryption_Operation::raw_encrypt(std::span<const uint8_t> ptext,
                                                                RandomNumberGenerator& rng) {
-   BigInt m(ptext);
+   const BigInt m(ptext);
 
    const auto& group = m_key->group();
 
-   if(m >= group.get_p()) {
-      throw Invalid_Argument("ElGamal encryption: Input is too large");
+   if(m == 0 || m >= group.get_p()) {
+      throw Invalid_Argument("ElGamal encryption: Message out of valid plaintext range");
    }
 
    /*
@@ -140,28 +147,35 @@ std::vector<uint8_t> ElGamal_Encryption_Operation::raw_encrypt(std::span<const u
    const BigInt k(rng, k_bits, false);
 
    const BigInt a = group.power_g_p(k, k_bits);
-   const BigInt b = group.multiply_mod_p(m, monty_execute(*m_monty_y_p, k, k_bits));
+   const BigInt b = group.multiply_mod_p(m, monty_execute(*m_monty_y_p, k, k_bits).value());
 
-   return unlock(BigInt::encode_fixed_length_int_pair(a, b, group.p_bytes()));
+   const size_t p_bytes = group.p_bytes();
+   std::vector<uint8_t> ctext(2 * p_bytes);
+   BufferStuffer stuffer(ctext);
+   a.serialize_to(stuffer.next(p_bytes));
+   b.serialize_to(stuffer.next(p_bytes));
+   return ctext;
 }
 
 /**
 * ElGamal decryption operation
 */
-class ElGamal_Decryption_Operation final : public PK_Ops::Decryption_with_EME {
+class ElGamal_Decryption_Operation final : public PK_Ops::Decryption_with_Padding {
    public:
       ElGamal_Decryption_Operation(const std::shared_ptr<const DL_PrivateKey>& key,
-                                   std::string_view eme,
+                                   std::string_view padding,
                                    RandomNumberGenerator& rng) :
-            PK_Ops::Decryption_with_EME(eme),
+            PK_Ops::Decryption_with_Padding(padding),
             m_key(key),
             m_blinder(
-               m_key->group().get_p(),
+               m_key->group()._reducer_mod_p(),
                rng,
                [](const BigInt& k) { return k; },
                [this](const BigInt& k) { return powermod_x_p(k); }) {}
 
       size_t plaintext_length(size_t /*ctext_len*/) const override { return m_key->group().p_bytes(); }
+
+      size_t ciphertext_length(size_t /*ptext_len*/) const override { return 2 * m_key->group().p_bytes(); }
 
       secure_vector<uint8_t> raw_decrypt(std::span<const uint8_t> ctext) override;
 
@@ -184,7 +198,11 @@ secure_vector<uint8_t> ElGamal_Decryption_Operation::raw_decrypt(std::span<const
    BigInt a(ctext.first(p_bytes));
    const BigInt b(ctext.last(p_bytes));
 
-   if(a >= group.get_p() || b >= group.get_p()) {
+   if(!group.verify_public_element(a)) {
+      throw Invalid_Argument("ElGamal decryption: Invalid message");
+   }
+
+   if(b == 0 || b >= group.get_p()) {
       throw Invalid_Argument("ElGamal decryption: Invalid message");
    }
 

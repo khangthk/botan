@@ -5,39 +5,44 @@ Development Roadmap
 Near Term Plans
 ----------------------------------------
 
-Here is an outline for the development plans over the next 12-24 months,
-as of May 2024.
+Here is an outline of the development plans over the next ~12 months, as of
+August 2026.
 
-Botan 2
+Botan2
 ---------------
 
-Botan 2 is still supported, but no further feature work is planned.
-Only security issues and serious bugs will be addressed.
+As of 2025-01-01, Botan2 has reached end of life. No further releases are planned.
 
-Botan 3
+Botan3
 ---------------
 
-The following future work is currently planned for Botan 3:
+The following major feature work is currently planned for Botan3:
 
-* BSI Project 481 [https://github.com/randombit/botan/issues/3108]
-  will add several new post-quantum algorithms including LMS signatures
-  and Classic McEliece.
+* BLS12-381
+* HPKE (RFC 9180)
+* DTLS 1.3
+* CMS (RFC 5562 et al)
+* XMSS^MT
+* HQC, possibly implemented using Rust
 
-* New ECC based password authenticated key exchanges, to replace SRP.
-  The most likely candidate algorithms are CPace and OPAQUE.
+Along with the usual optimizations, bug fixes, and refinements.
 
-* Adding an implementation of BLS12-381 elliptic curve pairing.
-
-* Low level integer math and elliptic curve arithmetic optimizations.
-
-Botan 4
+Botan4
 ---------------
 
-At this time there is no immediate plan for a new major version. When it occurs,
-it will remove functionality currently marked as deprecated, and adopt a new C++
-version. This is unlikely to occur before 2027, at the earliest.
+Botan4 is currently planned for release in May 2027, though this could easily slip to
+later in that year.
 
-One major change already planned for Botan 4 is that in this release, Public_Key
+See the current planning discussion in https://github.com/randombit/botan/issues/4666
+
+Botan4 will continue using C++20 rather than adopting a more recent language version.
+However it will require slightly more recent compilers than Botan3's minimum supported
+compiler versions.
+
+Botan4 is expected to be largely a subtractive major release;
+deprecated APIs and functionality will be removed, with few additions.
+
+One notable change planned for Botan4 is that in that release, Public_Key
 will no longer derive from Private_Key. And similarly, specific private keys
 (for example RSA_PrivateKey) will no longer derive from their corresponding
 public key type.

@@ -8,10 +8,12 @@
 
 #include <botan/certstor_macos.h>
 
+#include <botan/assert.h>
 #include <botan/ber_dec.h>
-#include <botan/data_src.h>
+#include <botan/bigint.h>
 #include <botan/exceptn.h>
 #include <botan/pkix_types.h>
+#include <botan/internal/x509_cert_cache.h>
 
 #include <algorithm>
 #include <array>
@@ -64,37 +66,36 @@ class scoped_CFType {
  * See: opensource.apple.com/source/Security/Security-55471/sec/Security/SecCertificate.c.auto.html
  */
 X509_DN normalize(const X509_DN& dn) {
-   X509_DN result;
+   X509_DN result{};
 
-   for(const auto& rdn : dn.dn_info()) {
-      // TODO: C++14 - use std::get<ASN1_String>(), resp. std::get<OID>()
-      const auto oid = rdn.first;
-      auto str = rdn.second;
-
+   // TODO use X509_DN::rdns here
+   const auto flat = dn.dn_info();
+   for(const auto& [oid, str] : flat) {
       if(str.tagging() == ASN1_Type::PrintableString) {
          std::string normalized;
          normalized.reserve(str.value().size());
+
          for(const char c : str.value()) {
             if(c != ' ') {
-               // store all 'normal' characters as upper case
-               normalized.push_back(::toupper(c));
+               // PrintableString is ASCII-only; locale-independent fold to upper case
+               const char up = (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c;
+               normalized.push_back(up);
             } else if(!normalized.empty() && normalized.back() != ' ') {
                // remove leading and squash multiple white spaces
                normalized.push_back(c);
             }
          }
 
-         if(normalized.back() == ' ') {
+         if(!normalized.empty() && normalized.back() == ' ') {
             // remove potential remaining single trailing white space char
-            normalized.erase(normalized.end() - 1);
+            normalized.pop_back();
          }
 
-         str = ASN1_String(normalized, str.tagging());
+         result.add_attribute(oid, ASN1_String(normalized, str.tagging()));
+      } else {
+         result.add_attribute(oid, str);
       }
-
-      result.add_attribute(oid, str);
    }
-
    return result;
 }
 
@@ -152,11 +153,15 @@ class Certificate_Store_MacOS_Impl {
       static constexpr const char* system_roots = "/System/Library/Keychains/SystemRootCertificates.keychain";
       static constexpr const char* system_keychain = "/Library/Keychains/System.keychain";
 
+      // Same size as the Windows system certificate store uses; arbitrary but
+      // large enough that repeated lookups of the same roots hit the cache
+      static constexpr size_t SystemStore_CertCacheSize = 128;
+
    public:
       /**
        * Wraps a list of search query parameters that are later passed into
-       * Apple's certifificate store API. The class provides some convenience
-       * functionality and handles the query paramenter's data lifetime.
+       * Apple's certificate store API. The class provides some convenience
+       * functionality and handles the query parameter's data lifetime.
        */
       class Query {
          public:
@@ -217,7 +222,7 @@ class Certificate_Store_MacOS_Impl {
             using Values = std::vector<CFTypeRef>;
 
             Data m_data_store;     //! makes sure that data parameters are kept alive
-            DataRefs m_data_refs;  //! keeps track of CFDataRef objects refering into \p m_data_store
+            DataRefs m_data_refs;  //! keeps track of CFDataRef objects referring into \p m_data_store
             Keys m_keys;           //! ordered list of search parameter keys
             Values m_values;       //! ordered list of search parameter values
       };
@@ -227,7 +232,8 @@ class Certificate_Store_MacOS_Impl {
             m_policy(SecPolicyCreateBasicX509()),
             m_system_roots(nullptr),
             m_system_chain(nullptr),
-            m_keychains(nullptr) {
+            m_keychains(nullptr),
+            m_cert_cache(SystemStore_CertCacheSize) {
          BOTAN_DIAGNOSTIC_PUSH
          BOTAN_DIAGNOSTIC_IGNORE_DEPRECATED_DECLARATIONS
          // macOS 12.0 deprecates 'Custom keychain management', though the API still works.
@@ -297,6 +303,10 @@ class Certificate_Store_MacOS_Impl {
 
       /**
        * Convert a CFTypeRef object into a X509_Certificate
+       *
+       * The DER encoding is looked up in (or inserted into) the certificate
+       * cache, so repeated hits for the same keychain item share one parsed
+       * certificate instead of being parsed again on every lookup.
        */
       X509_Certificate readCertificate(CFTypeRef object) const {
          if(!object || CFGetTypeID(object) != SecCertificateGetTypeID()) {
@@ -309,10 +319,9 @@ class Certificate_Store_MacOS_Impl {
          check_notnull(derData, "read extracted certificate");
 
          const auto data = CFDataGetBytePtr(derData.get());
-         const auto length = CFDataGetLength(derData.get());
+         const auto length = static_cast<size_t>(CFDataGetLength(derData.get()));
 
-         DataSource_Memory ds(data, length);
-         return X509_Certificate(ds);
+         return m_cert_cache.find_or_insert({data, length});
       }
 
       CFArrayRef keychains() const { return m_keychains.get(); }
@@ -324,6 +333,10 @@ class Certificate_Store_MacOS_Impl {
       scoped_CFType<SecKeychainRef> m_system_roots;
       scoped_CFType<SecKeychainRef> m_system_chain;
       scoped_CFType<CFArrayRef> m_keychains;
+
+      // The cache has its own mutex and is used from const lookup functions;
+      // everything else in this class is immutable after construction.
+      mutable X509_Certificate_Cache m_cert_cache;
 };
 
 //
@@ -395,9 +408,71 @@ std::optional<X509_Certificate> Certificate_Store_MacOS::find_cert_by_raw_subjec
    throw Not_Implemented("Certificate_Store_MacOS::find_cert_by_raw_subject_dn_sha256");
 }
 
+std::optional<X509_Certificate> Certificate_Store_MacOS::find_cert_by_issuer_dn_and_serial_number(
+   const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const {
+   /*
+   The keychain stores kSecAttrSerialNumber as the content octets of the DER
+   INTEGER, i.e. with a leading zero octet if the top bit of the magnitude is
+   set and as a single zero octet for serial number zero. The interface passes
+   the unsigned magnitude (as X509_Certificate::serial_number returns it), so
+   it has to be re-encoded before it can be used in the query.
+   */
+   const auto serial = X509_Serial_Number::from_bytes(serial_number);
+
+   const auto lookup = [&](const X509_Serial_Number& s) {
+      Certificate_Store_MacOS_Impl::Query query;
+      query.addParameter(kSecAttrIssuer, normalizeAndSerialize(issuer_dn));
+
+      const auto contents = s.der_contents();
+      query.addParameter(kSecAttrSerialNumber, std::vector<uint8_t>(contents.begin(), contents.end()));
+
+      return m_impl->findOne(std::move(query));
+   };
+
+   if(auto cert = lookup(serial)) {
+      return cert;
+   }
+
+   /*
+   The other certificate stores compare the magnitude only, so they also find
+   a (non-conforming) certificate whose serial number is negative. Retry with
+   the negative encoding of the same magnitude to behave the same way.
+
+   TODO(Botan4) remove this behavior when negative serial number support is dropped
+   */
+   if(!serial.is_zero()) {
+      return lookup(X509_Serial_Number(-serial.to_bigint()));
+   }
+
+   return std::nullopt;
+}
+
 std::optional<X509_CRL> Certificate_Store_MacOS::find_crl_for(const X509_Certificate& subject) const {
    BOTAN_UNUSED(subject);
    return {};
+}
+
+bool Certificate_Store_MacOS::contains(const X509_Certificate& cert) const {
+   /*
+   The keychain cannot be searched by a hash of the whole certificate (unlike
+   CERT_FIND_SHA1_HASH on Windows). The most selective attribute the keychain
+   indexes is the SHA-1 hash of the public key, which is derived from the key
+   itself (see GH #2779) and shared only between certificates for the same
+   key, e.g. cross-signed variants of a root. Fetch those candidates and
+   compare their full encoding, so that, as in the generic implementation,
+   only a binary identical certificate counts.
+   */
+   Certificate_Store_MacOS_Impl::Query query;
+   query.addParameter(kSecAttrPublicKeyHash, cert.subject_public_key_bitstring_sha1());
+
+   const auto sha256 = cert.certificate_data_sha256();
+   for(const auto& candidate : m_impl->findAll(std::move(query))) {
+      if(std::ranges::equal(candidate.certificate_data_sha256(), sha256)) {
+         return true;
+      }
+   }
+
+   return false;
 }
 
 }  // namespace Botan

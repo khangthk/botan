@@ -9,15 +9,19 @@
 #ifndef BOTAN_LM_OTS_H_
 #define BOTAN_LM_OTS_H_
 
-#include <botan/hash.h>
-#include <botan/internal/stl_util.h>
-
+#include <botan/secmem.h>
+#include <botan/strong_type.h>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace Botan {
+
+class BufferSlicer;
+class HashFunction;
+class Hash_Engine;
 
 /**
  * @brief Seed of the LMS tree, used to generate the LM-OTS private keys.
@@ -62,7 +66,7 @@ using LMS_Message = Strong<std::vector<uint8_t>, struct LMS_Message_>;
  * introduced in RFC 8554 Section 3.2. and their format specified in
  * Section 3.3.
  */
-enum class LMOTS_Algorithm_Type : uint32_t {
+enum class LMOTS_Algorithm_Type : uint32_t /* NOLINT(*-enum-size) */ {
    // --- RFC 8554 ---
    RESERVED = 0x00,
 
@@ -97,7 +101,7 @@ enum class LMOTS_Algorithm_Type : uint32_t {
  *
  * See RFC 8554 Section 4.1.
  */
-class BOTAN_TEST_API LMOTS_Params {
+class BOTAN_TEST_API LMOTS_Params final {
    public:
       /**
        * @brief Create the LM-OTS parameters from a known algorithm type.
@@ -108,7 +112,7 @@ class BOTAN_TEST_API LMOTS_Params {
       /**
        * @brief Create the LM-OTS parameters from a hash function and width.
        *
-       * @param hash_name tha name of the hash function to use.
+       * @param hash_name the name of the hash function to use.
        * @param w the width (in bits) of the Winternitz coefficients.
        * @throws Decoding_Error If the algorithm type is unknown
        */
@@ -152,7 +156,7 @@ class BOTAN_TEST_API LMOTS_Params {
       /**
        * @brief Construct a new hash instance for the OTS instance.
        */
-      std::unique_ptr<HashFunction> hash() const { return HashFunction::create_or_throw(hash_name()); }
+      std::unique_ptr<HashFunction> hash() const;
 
    private:
       /**
@@ -175,7 +179,7 @@ class BOTAN_TEST_API LMOTS_Params {
 /**
  * @brief Representation of a LM-OTS signature.
  */
-class BOTAN_TEST_API LMOTS_Signature {
+class BOTAN_TEST_API LMOTS_Signature final {
    public:
       /**
        * @brief Parse a LM-OTS signature.
@@ -254,7 +258,7 @@ class BOTAN_TEST_API OTS_Instance {
  * Contains the OTS params, I, q, the secret LMS seed and its derived
  * secret chain inputs (x[] in RFC 8554 4.2)
  */
-class BOTAN_TEST_API LMOTS_Private_Key : public OTS_Instance {
+class BOTAN_TEST_API LMOTS_Private_Key final : public OTS_Instance {
    public:
       /**
        * @brief Derive a LMOTS private key for a given @p seed.
@@ -265,6 +269,16 @@ class BOTAN_TEST_API LMOTS_Private_Key : public OTS_Instance {
                         const LMS_Identifier& identifier,
                         LMS_Tree_Node_Idx q,
                         const LMS_Seed& seed);
+
+      /**
+       * @brief As above, but using a caller-provided hash engine, allowing
+       * its reuse over many key derivations
+       */
+      LMOTS_Private_Key(const LMOTS_Params& params,
+                        const LMS_Identifier& identifier,
+                        LMS_Tree_Node_Idx q,
+                        const LMS_Seed& seed,
+                        Hash_Engine& engine);
 
       /**
        * @brief The secret chain input at a given chain index. (x[] in RFC 8554 4.2).
@@ -303,13 +317,19 @@ class BOTAN_TEST_API LMOTS_Private_Key : public OTS_Instance {
  *
  * u32str(type) || I || u32str(q) || K
  */
-class BOTAN_TEST_API LMOTS_Public_Key : public OTS_Instance {
+class BOTAN_TEST_API LMOTS_Public_Key final : public OTS_Instance {
    public:
       /**
        * @brief Derivivation of an LMOTS public key using an LMOTS_Private_Key as defined
        * in RFC 8554 4.3
        */
-      LMOTS_Public_Key(const LMOTS_Private_Key& lmots_sk);
+      explicit LMOTS_Public_Key(const LMOTS_Private_Key& lmots_sk);
+
+      /**
+       * @brief As above, but using a caller-provided hash engine, allowing
+       * its reuse over many key derivations
+       */
+      LMOTS_Public_Key(const LMOTS_Private_Key& lmots_sk, Hash_Engine& engine);
 
       /**
        * @brief Construct a new LMOTS public key object using the bytes.
@@ -330,6 +350,20 @@ class BOTAN_TEST_API LMOTS_Public_Key : public OTS_Instance {
    private:
       LMOTS_K m_K;
 };
+
+/**
+ * @brief Compute the public key hash values K (RFC 8554 4.3) of @p count
+ * consecutive LM-OTS instances beginning at @p first_q, deriving the
+ * instances' secrets from @p seed. The hashing is batched across all
+ * instances' chains.
+ */
+BOTAN_TEST_API void lmots_compute_pubkeys(std::span<uint8_t> out_ks,
+                                          const LMOTS_Params& params,
+                                          const LMS_Identifier& identifier,
+                                          LMS_Tree_Node_Idx first_q,
+                                          size_t count,
+                                          const LMS_Seed& seed,
+                                          Hash_Engine& engine);
 
 /**
  * @brief Compute a public key candidate for an OTS-signature-message pair and the OTS instance parameters.

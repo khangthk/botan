@@ -9,6 +9,11 @@
 
 #include <botan/internal/loadstor.h>
 #include <botan/internal/prefetch.h>
+#include <botan/internal/rotate.h>
+
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
 
 namespace Botan {
 
@@ -51,17 +56,18 @@ alignas(256) const uint8_t SEED_S1[256] = {
 /*
 * SEED G Function
 */
-inline uint32_t SEED_G(uint32_t X) {
-   const uint32_t M = 0x01010101;
+BOTAN_FORCE_INLINE uint32_t SEED_G(uint32_t X) {
+   constexpr uint32_t M = 0x01010101;
+
    const uint32_t s0 = M * SEED_S0[get_byte<3>(X)];
    const uint32_t s1 = M * SEED_S1[get_byte<2>(X)];
    const uint32_t s2 = M * SEED_S0[get_byte<1>(X)];
    const uint32_t s3 = M * SEED_S1[get_byte<0>(X)];
 
-   const uint32_t M0 = 0x3FCFF3FC;
-   const uint32_t M1 = 0xFC3FCFF3;
-   const uint32_t M2 = 0xF3FC3FCF;
-   const uint32_t M3 = 0xCFF3FC3F;
+   constexpr uint32_t M0 = 0x3FCFF3FC;
+   constexpr uint32_t M1 = 0xFC3FCFF3;
+   constexpr uint32_t M2 = 0xF3FC3FCF;
+   constexpr uint32_t M3 = 0xCFF3FC3F;
 
    return (s0 & M0) ^ (s1 & M1) ^ (s2 & M2) ^ (s3 & M3);
 }
@@ -74,7 +80,65 @@ inline uint32_t SEED_G(uint32_t X) {
 void SEED::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
 
+#if defined(BOTAN_HAS_SEED_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_encrypt(in, out, blocks);
+   }
+#endif
+
+#if defined(BOTAN_HAS_SEED_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_encrypt(in, out, blocks);
+   }
+#endif
+
    prefetch_arrays(SEED_S0, SEED_S1);
+
+   while(blocks >= 2) {
+      uint32_t B00 = load_be<uint32_t>(in, 0);
+      uint32_t B01 = load_be<uint32_t>(in, 1);
+      uint32_t B02 = load_be<uint32_t>(in, 2);
+      uint32_t B03 = load_be<uint32_t>(in, 3);
+      uint32_t B10 = load_be<uint32_t>(in, 4);
+      uint32_t B11 = load_be<uint32_t>(in, 5);
+      uint32_t B12 = load_be<uint32_t>(in, 6);
+      uint32_t B13 = load_be<uint32_t>(in, 7);
+
+      for(size_t j = 0; j != 16; j += 2) {
+         uint32_t T00 = B02 ^ m_K[2 * j];
+         uint32_t T10 = B12 ^ m_K[2 * j];
+         uint32_t T01 = SEED_G(B02 ^ B03 ^ m_K[2 * j + 1]);
+         uint32_t T11 = SEED_G(B12 ^ B13 ^ m_K[2 * j + 1]);
+         T00 = SEED_G(T01 + T00);
+         T10 = SEED_G(T11 + T10);
+         T01 = SEED_G(T01 + T00);
+         T11 = SEED_G(T11 + T10);
+         B01 ^= T01;
+         B11 ^= T11;
+         B00 ^= T00 + T01;
+         B10 ^= T10 + T11;
+
+         T00 = B00 ^ m_K[2 * j + 2];
+         T10 = B10 ^ m_K[2 * j + 2];
+         T01 = SEED_G(B00 ^ B01 ^ m_K[2 * j + 3]);
+         T11 = SEED_G(B10 ^ B11 ^ m_K[2 * j + 3]);
+         T10 = SEED_G(T11 + T10);
+         T00 = SEED_G(T01 + T00);
+         T01 = SEED_G(T01 + T00);
+         T11 = SEED_G(T11 + T10);
+         B03 ^= T01;
+         B13 ^= T11;
+         B02 ^= T00 + T01;
+         B12 ^= T10 + T11;
+      }
+
+      store_be(out, B02, B03, B00, B01, B12, B13, B10, B11);
+
+      in += 2 * BLOCK_SIZE;
+      out += 2 * BLOCK_SIZE;
+
+      blocks -= 2;
+   }
 
    for(size_t i = 0; i != blocks; ++i) {
       uint32_t B0 = load_be<uint32_t>(in, 0);
@@ -83,10 +147,8 @@ void SEED::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
       uint32_t B3 = load_be<uint32_t>(in, 3);
 
       for(size_t j = 0; j != 16; j += 2) {
-         uint32_t T0, T1;
-
-         T0 = B2 ^ m_K[2 * j];
-         T1 = SEED_G(B2 ^ B3 ^ m_K[2 * j + 1]);
+         uint32_t T0 = B2 ^ m_K[2 * j];
+         uint32_t T1 = SEED_G(B2 ^ B3 ^ m_K[2 * j + 1]);
          T0 = SEED_G(T1 + T0);
          T1 = SEED_G(T1 + T0);
          B1 ^= T1;
@@ -113,7 +175,64 @@ void SEED::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
 void SEED::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
 
+#if defined(BOTAN_HAS_SEED_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_decrypt(in, out, blocks);
+   }
+#endif
+
+#if defined(BOTAN_HAS_SEED_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_decrypt(in, out, blocks);
+   }
+#endif
+
    prefetch_arrays(SEED_S0, SEED_S1);
+
+   while(blocks >= 2) {
+      uint32_t B00 = load_be<uint32_t>(in, 0);
+      uint32_t B01 = load_be<uint32_t>(in, 1);
+      uint32_t B02 = load_be<uint32_t>(in, 2);
+      uint32_t B03 = load_be<uint32_t>(in, 3);
+      uint32_t B10 = load_be<uint32_t>(in, 4);
+      uint32_t B11 = load_be<uint32_t>(in, 5);
+      uint32_t B12 = load_be<uint32_t>(in, 6);
+      uint32_t B13 = load_be<uint32_t>(in, 7);
+
+      for(size_t j = 0; j != 16; j += 2) {
+         uint32_t T00 = B02 ^ m_K[30 - 2 * j];
+         uint32_t T10 = B12 ^ m_K[30 - 2 * j];
+         uint32_t T01 = SEED_G(B02 ^ B03 ^ m_K[31 - 2 * j]);
+         uint32_t T11 = SEED_G(B12 ^ B13 ^ m_K[31 - 2 * j]);
+         T00 = SEED_G(T01 + T00);
+         T10 = SEED_G(T11 + T10);
+         T01 = SEED_G(T01 + T00);
+         T11 = SEED_G(T11 + T10);
+         B01 ^= T01;
+         B11 ^= T11;
+         B00 ^= T00 + T01;
+         B10 ^= T10 + T11;
+
+         T00 = B00 ^ m_K[28 - 2 * j];
+         T10 = B10 ^ m_K[28 - 2 * j];
+         T01 = SEED_G(B00 ^ B01 ^ m_K[29 - 2 * j]);
+         T11 = SEED_G(B10 ^ B11 ^ m_K[29 - 2 * j]);
+         T00 = SEED_G(T01 + T00);
+         T10 = SEED_G(T11 + T10);
+         T01 = SEED_G(T01 + T00);
+         T11 = SEED_G(T11 + T10);
+         B03 ^= T01;
+         B13 ^= T11;
+         B02 ^= T00 + T01;
+         B12 ^= T10 + T11;
+      }
+
+      store_be(out, B02, B03, B00, B01, B12, B13, B10, B11);
+
+      in += 2 * BLOCK_SIZE;
+      out += 2 * BLOCK_SIZE;
+      blocks -= 2;
+   }
 
    for(size_t i = 0; i != blocks; ++i) {
       uint32_t B0 = load_be<uint32_t>(in, 0);
@@ -122,10 +241,8 @@ void SEED::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
       uint32_t B3 = load_be<uint32_t>(in, 3);
 
       for(size_t j = 0; j != 16; j += 2) {
-         uint32_t T0, T1;
-
-         T0 = B2 ^ m_K[30 - 2 * j];
-         T1 = SEED_G(B2 ^ B3 ^ m_K[31 - 2 * j]);
+         uint32_t T0 = B2 ^ m_K[30 - 2 * j];
+         uint32_t T1 = SEED_G(B2 ^ B3 ^ m_K[31 - 2 * j]);
          T0 = SEED_G(T1 + T0);
          T1 = SEED_G(T1 + T0);
          B1 ^= T1;
@@ -150,26 +267,30 @@ bool SEED::has_keying_material() const {
    return !m_K.empty();
 }
 
+namespace {
+
+consteval std::array<uint32_t, 16> seed_round_constants() {
+   constexpr uint32_t phi = 0x9E3779B9;
+   std::array<uint32_t, 16> rc{};
+
+   uint32_t v = phi;
+   for(size_t i = 0; i != 16; ++i) {
+      rc[i] = v;
+      v = rotl<1>(v);
+   }
+
+   return rc;
+}
+
+}  // namespace
+
 /*
 * SEED Key Schedule
 */
 void SEED::key_schedule(std::span<const uint8_t> key) {
-   const uint32_t RC[16] = {0x9E3779B9,
-                            0x3C6EF373,
-                            0x78DDE6E6,
-                            0xF1BBCDCC,
-                            0xE3779B99,
-                            0xC6EF3733,
-                            0x8DDE6E67,
-                            0x1BBCDCCF,
-                            0x3779B99E,
-                            0x6EF3733C,
-                            0xDDE6E678,
-                            0xBBCDCCF1,
-                            0x779B99E3,
-                            0xEF3733C6,
-                            0xDE6E678D,
-                            0xBCDCCF1B};
+   constexpr auto RC = seed_round_constants();
+
+   prefetch_arrays(SEED_S0, SEED_S1);
 
    secure_vector<uint32_t> WK(4);
 
@@ -198,6 +319,38 @@ void SEED::key_schedule(std::span<const uint8_t> key) {
 
 void SEED::clear() {
    zap(m_K);
+}
+
+size_t SEED::parallelism() const {
+#if defined(BOTAN_HAS_SEED_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return 16;
+   }
+#endif
+
+#if defined(BOTAN_HAS_SEED_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return 4;
+   }
+#endif
+
+   return 1;
+}
+
+std::string SEED::provider() const {
+#if defined(BOTAN_HAS_SEED_AVX512_GFNI)
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return *feat;
+   }
+#endif
+
+#if defined(BOTAN_HAS_SEED_HWAES)
+   if(auto feat = CPUID::check(CPUID::Feature::HW_AES)) {
+      return *feat;
+   }
+#endif
+
+   return "base";
 }
 
 }  // namespace Botan

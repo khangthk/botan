@@ -1,5 +1,5 @@
 /*
- * SPHINCS+ Hashes
+ * SLH-DSA Hash Function Interface
  * (C) 2023 Jack Lloyd
  *     2023 Fabian Albert, René Meusel, Amos Treiber - Rohde & Schwarz Cybersecurity
  *
@@ -16,11 +16,13 @@
 
 namespace Botan {
 
+class Hash_Engine;
+
 /**
- * A collection of pseudorandom hash functions required for SPHINCS+
- * computations.
+ * A collection of pseudorandom hash functions required for SLH-DSA
+ * computations. See FIPS 205, Section 11.2.1 and 11.2.2.
  **/
-class BOTAN_TEST_API Sphincs_Hash_Functions {
+class BOTAN_TEST_API Sphincs_Hash_Functions /* NOLINT(*-special-member-functions) */ {
    public:
       virtual ~Sphincs_Hash_Functions() = default;
 
@@ -34,9 +36,10 @@ class BOTAN_TEST_API Sphincs_Hash_Functions {
       static std::unique_ptr<Sphincs_Hash_Functions> create(const Sphincs_Parameters& sphincs_params,
                                                             const SphincsPublicSeed& pub_seed);
 
-   public:
       std::tuple<SphincsHashedMessage, XmssTreeIndexInLayer, TreeNodeIndex> H_msg(
-         StrongSpan<const SphincsMessageRandomness> r, const SphincsTreeNode& root, std::span<const uint8_t> message);
+         StrongSpan<const SphincsMessageRandomness> r,
+         const SphincsTreeNode& root,
+         const SphincsMessageInternal& message);
 
       /**
        * Using SK.PRF, the optional randomness, and a message, computes the message random R,
@@ -48,21 +51,21 @@ class BOTAN_TEST_API Sphincs_Hash_Functions {
        * @param msg message
        */
       virtual void PRF_msg(StrongSpan<SphincsMessageRandomness> out,
-                           const SphincsSecretPRF& sk_prf,
-                           const SphincsOptionalRandomness& opt_rand,
-                           std::span<const uint8_t> msg) = 0;
+                           StrongSpan<const SphincsSecretPRF> sk_prf,
+                           StrongSpan<const SphincsOptionalRandomness> opt_rand,
+                           const SphincsMessageInternal& msg) = 0;
 
       template <typename... BufferTs>
-      void T(std::span<uint8_t> out, const Sphincs_Address& address, BufferTs&&... in) {
-         auto& hash = tweak_hash(address, (std::forward<BufferTs>(in).size() + ...));
-         (hash.update(std::forward<BufferTs>(in)), ...);
+      void T(std::span<uint8_t> out, const Sphincs_Address& address, const BufferTs&... in) {
+         auto& hash = tweak_hash(address, (in.size() + ...));
+         (hash.update(in), ...);
          hash.final(out);
       }
 
       template <typename OutT = std::vector<uint8_t>, typename... BufferTs>
-      OutT T(const Sphincs_Address& address, BufferTs&&... in) {
+      OutT T(const Sphincs_Address& address, const BufferTs&... in) {
          OutT t(m_sphincs_params.n());
-         T(t, address, std::forward<BufferTs>(in)...);
+         T(t, address, in...);
          return t;
       }
 
@@ -74,6 +77,24 @@ class BOTAN_TEST_API Sphincs_Hash_Functions {
          T(out, address, sk_seed);
       }
 
+      /**
+      * Batched variant of T with a single input buffer per lane
+      *
+      * Computes outputs[i] = T(addresses[i], inputs[i]). All inputs must
+      * have identical length. outputs[i] may alias inputs[i], as used for
+      * stepping WOTS+ chains in place.
+      */
+      void T_batch(std::span<std::span<uint8_t>> outputs,
+                   std::span<const Sphincs_Address> addresses,
+                   std::span<std::span<const uint8_t>> inputs);
+
+      /**
+      * Batched variant of PRF: outputs[i] = PRF(sk_seed, addresses[i])
+      */
+      void PRF_batch(std::span<std::span<uint8_t>> outputs,
+                     const SphincsSecretSeed& sk_seed,
+                     std::span<const Sphincs_Address> addresses);
+
       virtual std::string msg_hash_function_name() const = 0;
 
    protected:
@@ -83,7 +104,7 @@ class BOTAN_TEST_API Sphincs_Hash_Functions {
        * Prepare the underlying hash function for hashing any given input
        * depending on the expected input length.
        *
-       * @param address       the SPHINCS+ address of the hash to be tweaked
+       * @param address       the SLH-DSA address of the hash to be tweaked
        * @param input_length  the input buffer length that will be processed
        *                      with the tweaked hash (typically N or 2*N)
        * @returns a reference to a Botan::HashFunction that is preconditioned
@@ -94,12 +115,33 @@ class BOTAN_TEST_API Sphincs_Hash_Functions {
        */
       virtual HashFunction& tweak_hash(const Sphincs_Address& address, size_t input_length) = 0;
 
+      /**
+      * @return engine for batched tweaked hashing of inputs of the given length
+      */
+      virtual Hash_Engine& tweak_hash_engine(size_t input_length) = 0;
+
+      /**
+      * @return byte length of the address encoding used for tweaked hashing
+      */
+      virtual size_t address_encoding_len() const = 0;
+
+      /**
+      * Write the encoding of @p address used for tweaked hashing to @p out
+      */
+      virtual void encode_address(std::span<uint8_t> out, const Sphincs_Address& address) const = 0;
+
       virtual std::vector<uint8_t> H_msg_digest(StrongSpan<const SphincsMessageRandomness> r,
                                                 const SphincsTreeNode& root,
-                                                std::span<const uint8_t> message) = 0;
+                                                const SphincsMessageInternal& message) = 0;
 
-      const Sphincs_Parameters& m_sphincs_params;
-      const SphincsPublicSeed& m_pub_seed;
+      const Sphincs_Parameters& m_sphincs_params;  // NOLINT(*non-private-member-variable*)
+      const SphincsPublicSeed& m_pub_seed;         // NOLINT(*non-private-member-variable*)
+
+   private:
+      // Scratch space for batched hashing
+      std::vector<uint8_t> m_adrs_buf;
+      std::vector<std::span<const uint8_t>> m_adrs_spans;
+      std::vector<std::span<const uint8_t>> m_prf_inputs;
 };
 
 }  // namespace Botan

@@ -5,10 +5,50 @@
 */
 
 #include <botan/internal/serpent.h>
-#include <botan/internal/serpent_sbox.h>
+
+#include <botan/internal/serpent_fn.h>
 #include <botan/internal/simd_avx512.h>
 
 namespace Botan {
+
+// TODO(Botan4) if minimum GCC is increased we can remove this
+#if defined(__GNUG__) && !defined(__clang__) && (__GNUG__ < 14)
+
+// These macros are redundant with the versions in serpent_sbox.h
+// but unfortunately removing them seems to trigger a bug in GCC
+// when building in amalgamation mode
+
+   #define transform(B0, B1, B2, B3) \
+      do {                           \
+         B0 = B0.rotl<13>();         \
+         B2 = B2.rotl<3>();          \
+         B1 ^= B0 ^ B2;              \
+         B3 ^= B2 ^ B0.shl<3>();     \
+         B1 = B1.rotl<1>();          \
+         B3 = B3.rotl<7>();          \
+         B0 ^= B1 ^ B3;              \
+         B2 ^= B3 ^ B1.shl<7>();     \
+         B0 = B0.rotl<5>();          \
+         B2 = B2.rotl<22>();         \
+      } while(0)
+
+   #define i_transform(B0, B1, B2, B3) \
+      do {                             \
+         B2 = B2.rotr<22>();           \
+         B0 = B0.rotr<5>();            \
+         B2 ^= B3 ^ B1.shl<7>();       \
+         B0 ^= B1 ^ B3;                \
+         B3 = B3.rotr<7>();            \
+         B1 = B1.rotr<1>();            \
+         B3 ^= B2 ^ B0.shl<3>();       \
+         B1 ^= B0 ^ B2;                \
+         B2 = B2.rotr<3>();            \
+         B0 = B0.rotr<13>();           \
+      } while(0)
+
+#endif
+
+namespace {
 
 BOTAN_FORCE_INLINE void SBoxE0(SIMD_16x32& a, SIMD_16x32& b, SIMD_16x32& c, SIMD_16x32& d) {
    const SIMD_16x32 t0 = SIMD_16x32::ternary_fn<0xb9>(b, d, c);
@@ -261,8 +301,9 @@ BOTAN_FORCE_INLINE void SBoxD7(SIMD_16x32& a, SIMD_16x32& b, SIMD_16x32& c, SIMD
    d = o3;
 }
 
-BOTAN_AVX512_FN
-void Serpent::avx512_encrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16]) const {
+}  // namespace
+
+void BOTAN_FN_ISA_AVX512 Serpent::avx512_encrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16]) const {
    using namespace Botan::Serpent_F;
 
    SIMD_16x32 B0 = SIMD_16x32::load_le(in);
@@ -383,8 +424,7 @@ void Serpent::avx512_encrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16])
    SIMD_16x32::zero_registers();
 }
 
-BOTAN_AVX512_FN
-void Serpent::avx512_decrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16]) const {
+void BOTAN_FN_ISA_AVX512 Serpent::avx512_decrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16]) const {
    using namespace Botan::Serpent_F;
 
    SIMD_16x32 B0 = SIMD_16x32::load_le(in);
@@ -505,5 +545,9 @@ void Serpent::avx512_decrypt_16(const uint8_t in[16 * 16], uint8_t out[16 * 16])
 
    SIMD_16x32::zero_registers();
 }
+
+// TODO(Botan4) remove when compiler hack above is removed
+#undef transform
+#undef i_transform
 
 }  // namespace Botan

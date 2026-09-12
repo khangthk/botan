@@ -16,7 +16,8 @@
 
 namespace Botan {
 
-class Dilithium_Symmetric_Primitives;
+class Dilithium_Symmetric_Primitives_Base;
+class Dilithium_Keypair_Codec;
 
 /**
  * Algorithm constants and parameter-set dependent values
@@ -51,31 +52,44 @@ class DilithiumConstants final {
       static constexpr size_t SEED_RANDOMNESS_BYTES = 32;
       static constexpr size_t SEED_RHO_BYTES = 32;
       static constexpr size_t SEED_RHOPRIME_BYTES = 64;
+      static constexpr size_t OPTIONAL_RANDOMNESS_BYTES = 32;
       static constexpr size_t SEED_SIGNING_KEY_BYTES = 32;
       static constexpr size_t MESSAGE_HASH_BYTES = 64;
-      static constexpr size_t PUBLIC_KEY_HASH_BYTES = 32;
-      static constexpr size_t COMMITMENT_HASH_FULL_BYTES = 32;
       static constexpr size_t COMMITMENT_HASH_C1_BYTES = 32;
 
       /// @}
 
-   public:
-      enum DilithiumTau : uint32_t { _39 = 39, _49 = 49, _60 = 60 };
+      /// \name Loop bounds for various rejection sampling loops (FIPS 204, Apx C)
+      /// @{
 
-      enum DilithiumLambda : uint32_t { _128 = 128, _192 = 192, _256 = 256 };
+      static constexpr uint16_t SIGNING_LOOP_BOUND = 814;
+      static constexpr uint16_t SAMPLE_POLY_FROM_XOF_BOUND = 481;
+      static constexpr uint16_t SAMPLE_NTT_POLY_FROM_XOF_BOUND = 894;
+      static constexpr uint16_t SAMPLE_IN_BALL_XOF_BOUND = 221;
+
+      /// @}
+
+   public:
+      // NOLINTBEGIN(*-use-enum-class)
+
+      enum DilithiumTau : uint8_t { _39 = 39, _49 = 49, _60 = 60 };
+
+      enum DilithiumLambda : uint16_t { _128 = 128, _192 = 192, _256 = 256 };
 
       enum DilithiumGamma1 : uint32_t { ToThe17th = (1 << 17), ToThe19th = (1 << 19) };
 
-      enum DilithiumGamma2 : uint32_t { Qminus1DevidedBy88 = (Q - 1) / 88, Qminus1DevidedBy32 = (Q - 1) / 32 };
+      enum DilithiumGamma2 : uint32_t { Qminus1DividedBy88 = (Q - 1) / 88, Qminus1DividedBy32 = (Q - 1) / 32 };
 
-      enum DilithiumEta : uint32_t { _2 = 2, _4 = 4 };
+      enum DilithiumEta : uint8_t { _2 = 2, _4 = 4 };
 
-      enum DilithiumBeta : uint32_t { _78 = 78, _196 = 196, _120 = 120 };
+      enum DilithiumBeta : uint8_t { _78 = 78, _196 = 196, _120 = 120 };
 
-      enum DilithiumOmega : uint32_t { _80 = 80, _55 = 55, _75 = 75 };
+      enum DilithiumOmega : uint8_t { _80 = 80, _55 = 55, _75 = 75 };
 
-      DilithiumConstants(DilithiumMode dimension);
-      ~DilithiumConstants() = default;
+      // NOLINTEND(*-use-enum-class)
+
+      explicit DilithiumConstants(DilithiumMode dimension);
+      ~DilithiumConstants();
 
       DilithiumConstants(const DilithiumConstants& other) : DilithiumConstants(other.m_mode) {}
 
@@ -86,6 +100,8 @@ class DilithiumConstants final {
       bool is_modern() const { return m_mode.is_modern(); }
 
       bool is_aes() const { return m_mode.is_aes(); }
+
+      bool is_ml_dsa() const { return m_mode.is_ml_dsa(); }
 
    public:
       /// \name Foundational constants
@@ -118,8 +134,11 @@ class DilithiumConstants final {
       /// maximal hamming weight of the hint polynomial vector 'h'
       DilithiumOmega omega() const { return m_omega; }
 
-      /// length of the entire commitment hash in bytes
-      size_t commitment_hash_full_bytes() const { return COMMITMENT_HASH_FULL_BYTES; }
+      /// length of the public key hash 'tr' in bytes (differs between R3 and ML-DSA)
+      size_t public_key_hash_bytes() const { return m_public_key_hash_bytes; }
+
+      /// length of the entire commitment hash 'c~' in bytes (differs between R3 and ML-DSA)
+      size_t commitment_hash_full_bytes() const { return m_commitment_hash_full_bytes; }
 
       /// @}
 
@@ -145,7 +164,9 @@ class DilithiumConstants final {
       /// @returns one of {44, 65, 87}
       size_t canonical_parameter_set_identifier() const { return k() * 10 + l(); }
 
-      Dilithium_Symmetric_Primitives& symmetric_primitives() const { return *m_symmetric_primitives; }
+      Dilithium_Symmetric_Primitives_Base& symmetric_primitives() const { return *m_symmetric_primitives; }
+
+      Dilithium_Keypair_Codec& keypair_codec() const { return *m_keypair_codec; }
 
    private:
       DilithiumMode m_mode;
@@ -159,6 +180,8 @@ class DilithiumConstants final {
       DilithiumEta m_eta;
       DilithiumBeta m_beta;
       DilithiumOmega m_omega;
+      uint32_t m_public_key_hash_bytes;
+      uint32_t m_commitment_hash_full_bytes;
 
       uint32_t m_private_key_bytes;
       uint32_t m_public_key_bytes;
@@ -166,7 +189,8 @@ class DilithiumConstants final {
       uint32_t m_serialized_commitment_bytes;
 
       // Mode dependent primitives
-      std::unique_ptr<Dilithium_Symmetric_Primitives> m_symmetric_primitives;
+      std::unique_ptr<Dilithium_Symmetric_Primitives_Base> m_symmetric_primitives;
+      std::unique_ptr<Dilithium_Keypair_Codec> m_keypair_codec;
 };
 
 }  // namespace Botan

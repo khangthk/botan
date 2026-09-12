@@ -29,7 +29,7 @@ class KyberConstants final {
       /// modulus
       static constexpr T Q = 3329;
 
-      /// as specified in FIPS 203 (see Algorithm 9 (NTT^-1), f = 128^-1 mod Q)
+      /// as specified in FIPS 203 (see Algorithm 10 (NTT^-1), f = 128^-1 mod Q)
       static constexpr T F = 3303;
 
       /// the primitive 256-th root of unity modulo Q (see FIPS 203 Section 4.3)
@@ -43,17 +43,24 @@ class KyberConstants final {
       static constexpr size_t PUBLIC_KEY_HASH_BYTES = 32;
       static constexpr size_t SHARED_KEY_BYTES = 32;
 
+      /// sampling limit for SampleNTT (in bytes), see FIPS 204, Apx B
+      static constexpr uint16_t SAMPLE_NTT_POLY_FROM_XOF_BOUND = 280 * 3 /* XOF bytes per while iteration */;
+
    public:
+      // NOLINTBEGIN(*-use-enum-class)
+
       enum KyberEta : uint8_t { _2 = 2, _3 = 3 };
 
       enum KyberDu : uint8_t { _10 = 10, _11 = 11 };
 
       enum KyberDv : uint8_t { _4 = 4, _5 = 5 };
 
-      enum KyberStrength : uint32_t { _128 = 128, _192 = 192, _256 = 256 };
+      enum KyberStrength : uint16_t { _128 = 128, _192 = 192, _256 = 256 };
+
+      // NOLINTEND(*-use-enum-class)
 
    public:
-      KyberConstants(KyberMode mode);
+      /* NOLINT(*-explicit-conversions) */ KyberConstants(KyberMode mode);
 
       ~KyberConstants();
 
@@ -106,10 +113,12 @@ class KyberConstants final {
       /// byte length of an encoded public key
       size_t public_key_bytes() const { return polynomial_vector_bytes() + SEED_BYTES; }
 
-      /// byte length of an encoded private key
-      size_t private_key_bytes() const {
-         return polynomial_vector_bytes() + public_key_bytes() + PUBLIC_KEY_HASH_BYTES + SEED_BYTES;
-      }
+      /// byte length of a private key with expanded encoding as defined
+      //  in FIPS 203
+      size_t expanded_private_key_bytes() const { return m_expanded_private_key_bytes; }
+
+      /// byte length of an private key encoded as the seed: d || z
+      size_t seed_private_key_bytes() const { return m_seed_private_key_bytes; }
 
       /// @}
 
@@ -127,6 +136,9 @@ class KyberConstants final {
       uint32_t m_polynomial_vector_bytes;
       uint32_t m_polynomial_vector_compressed_bytes;
       uint32_t m_polynomial_compressed_bytes;
+
+      uint32_t m_expanded_private_key_bytes;
+      uint32_t m_seed_private_key_bytes;
 
       std::unique_ptr<Kyber_Symmetric_Primitives> m_symmetric_primitives;
 };

@@ -7,13 +7,14 @@
 
 #include <botan/internal/threefish_512.h>
 
-#include <botan/internal/cpuid.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/rotate.h>
 
 namespace Botan {
 
 namespace Threefish_F {
+
+namespace {
 
 template <size_t R1, size_t R2, size_t R3, size_t R4>
 BOTAN_FORCE_INLINE void e_round(
@@ -49,7 +50,7 @@ BOTAN_FORCE_INLINE void d_round(
    X3 -= X7;
 }
 
-class Key_Inserter {
+class Key_Inserter final {
    public:
       Key_Inserter(const uint64_t* K, const uint64_t* T) : m_K(K), m_T(T) {}
 
@@ -142,6 +143,8 @@ BOTAN_FORCE_INLINE void d8_rounds(uint64_t& X0,
    key.d_add(R2, X0, X1, X2, X3, X4, X5, X6, X7);
 }
 
+}  // namespace
+
 }  // namespace Threefish_F
 
 void Threefish_512::skein_feedfwd(const secure_vector<uint64_t>& M, const secure_vector<uint64_t>& T) {
@@ -197,7 +200,14 @@ void Threefish_512::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) 
    const Key_Inserter key(m_K.data(), m_T.data());
 
    for(size_t i = 0; i < blocks; ++i) {
-      uint64_t X0, X1, X2, X3, X4, X5, X6, X7;
+      uint64_t X0 = 0;
+      uint64_t X1 = 0;
+      uint64_t X2 = 0;
+      uint64_t X3 = 0;
+      uint64_t X4 = 0;
+      uint64_t X5 = 0;
+      uint64_t X6 = 0;
+      uint64_t X7 = 0;
       load_le(in + BLOCK_SIZE * i, X0, X1, X2, X3, X4, X5, X6, X7);
 
       key.e_add(0, X0, X1, X2, X3, X4, X5, X6, X7);
@@ -224,7 +234,14 @@ void Threefish_512::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) 
    const Key_Inserter key(m_K.data(), m_T.data());
 
    for(size_t i = 0; i < blocks; ++i) {
-      uint64_t X0, X1, X2, X3, X4, X5, X6, X7;
+      uint64_t X0 = 0;
+      uint64_t X1 = 0;
+      uint64_t X2 = 0;
+      uint64_t X3 = 0;
+      uint64_t X4 = 0;
+      uint64_t X5 = 0;
+      uint64_t X6 = 0;
+      uint64_t X7 = 0;
       load_le(in + BLOCK_SIZE * i, X0, X1, X2, X3, X4, X5, X6, X7);
 
       key.d_add(18, X0, X1, X2, X3, X4, X5, X6, X7);

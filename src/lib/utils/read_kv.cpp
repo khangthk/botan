@@ -16,10 +16,9 @@ std::map<std::string, std::string> read_kv(std::string_view kv) {
       return m;
    }
 
-   std::vector<std::string> parts;
-
    try {
-      parts = split_on(kv, ',');
+      // Validate input format before manual parsing
+      [[maybe_unused]] const auto _ = split_on(kv, ',');
    } catch(std::exception&) {
       throw Invalid_Argument("Bad KV spec");
    }
@@ -29,7 +28,7 @@ std::map<std::string, std::string> read_kv(std::string_view kv) {
    std::string cur_key;
    std::string cur_val;
 
-   for(char c : kv) {
+   for(const char c : kv) {
       if(c == '\\' && !escaped) {
          escaped = true;
       } else if(c == ',' && !escaped) {
@@ -37,7 +36,7 @@ std::map<std::string, std::string> read_kv(std::string_view kv) {
             throw Invalid_Argument("Bad KV spec empty key");
          }
 
-         if(m.find(cur_key) != m.end()) {
+         if(m.contains(cur_key)) {
             throw Invalid_Argument("Bad KV spec duplicated key");
          }
          m[cur_key] = cur_val;
@@ -45,7 +44,7 @@ std::map<std::string, std::string> read_kv(std::string_view kv) {
          cur_val = "";
          reading_key = true;
       } else if(c == '=' && !escaped) {
-         if(reading_key == false) {
+         if(!reading_key) {
             throw Invalid_Argument("Bad KV spec unexpected equals sign");
          }
          reading_key = false;
@@ -55,16 +54,13 @@ std::map<std::string, std::string> read_kv(std::string_view kv) {
          } else {
             cur_val += c;
          }
-
-         if(escaped) {
-            escaped = false;
-         }
+         escaped = false;
       }
    }
 
    if(!cur_key.empty()) {
-      if(reading_key == false) {
-         if(m.find(cur_key) != m.end()) {
+      if(!reading_key) {
+         if(m.contains(cur_key)) {
             throw Invalid_Argument("Bad KV spec duplicated key");
          }
          m[cur_key] = cur_val;

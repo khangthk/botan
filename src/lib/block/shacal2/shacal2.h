@@ -9,6 +9,7 @@
 #define BOTAN_SHACAL2_H_
 
 #include <botan/block_cipher.h>
+#include <botan/secmem.h>
 
 namespace Botan {
 
@@ -38,9 +39,14 @@ class SHACAL2 final : public Block_Cipher_Fixed_Params<32, 16, 64, 4> {
       void simd_decrypt_4(const uint8_t in[], uint8_t out[]) const;
 #endif
 
-#if defined(BOTAN_HAS_SHACAL2_AVX2)
-      void avx2_encrypt_8(const uint8_t in[], uint8_t out[]) const;
-      void avx2_decrypt_8(const uint8_t in[], uint8_t out[]) const;
+#if defined(BOTAN_HAS_SHACAL2_SIMD8X32)
+      void simd8x32_encrypt_8(const uint8_t in[], uint8_t out[]) const;
+      void simd8x32_decrypt_8(const uint8_t in[], uint8_t out[]) const;
+#endif
+
+#if defined(BOTAN_HAS_SHACAL2_AVX512)
+      size_t avx512_encrypt_blocks(const uint8_t in[], uint8_t out[], size_t blocks) const;
+      size_t avx512_decrypt_blocks(const uint8_t in[], uint8_t out[], size_t blocks) const;
 #endif
 
 #if defined(BOTAN_HAS_SHACAL2_X86)

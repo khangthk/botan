@@ -10,6 +10,7 @@
 
 #if defined(BOTAN_HAS_ECGDSA)
    #include "test_pubkey.h"
+   #include <botan/ec_group.h>
    #include <botan/ecgdsa.h>
 #endif
 
@@ -25,6 +26,10 @@ class ECGDSA_Signature_KAT_Tests final : public PK_Signature_Generation_Test {
             PK_Signature_Generation_Test("ECGDSA", "pubkey/ecgdsa.vec", "Group,X,Hash,Msg,Nonce,Signature") {}
 
       bool clear_between_callbacks() const override { return false; }
+
+      bool skip_this_test(const std::string& /*header*/, const VarMap& vars) override {
+         return !Botan::EC_Group::supports_named_group(vars.get_req_str("Group"));
+      }
 
       std::unique_ptr<Botan::Private_Key> load_private_key(const VarMap& vars) override {
          const std::string group_id = vars.get_req_str("Group");
@@ -53,8 +58,8 @@ class ECGDSA_Keygen_Tests final : public PK_Key_Generation_Test {
                                                              std::string_view /* provider */,
                                                              std::span<const uint8_t> raw_pk) const override {
          const auto group = Botan::EC_Group(keygen_params);
-         const auto public_point = group.OS2ECP(raw_pk);
-         return std::make_unique<Botan::ECGDSA_PublicKey>(group, public_point);
+         const auto public_key = Botan::EC_AffinePoint(group, raw_pk);
+         return std::make_unique<Botan::ECGDSA_PublicKey>(group, public_key);
       }
 };
 

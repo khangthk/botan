@@ -19,7 +19,7 @@ Public Algorithm Specific Classes
 ------------------------------------
 
 Classes like AES_128 and SHA_256 should never have been exposed to applications.
-Intead such operations should have been accessible only via the higher level
+Instead such operations should have been accessible only via the higher level
 interfaces (here BlockCipher and HashFunction). This would substantially reduce
 the overall API and ABI surface.
 
@@ -48,6 +48,8 @@ Virtual inheritance
 This was used in the public key interfaces and the hierarchy is a tangle.
 Public and private keys should be distinct classes, with a function on private
 keys that creates a new object corresponding to the public key.
+
+[This is planned to be fixed in Botan4]
 
 Cipher Interface
 ------------------

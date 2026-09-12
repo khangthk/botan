@@ -1,23 +1,21 @@
 /*
- * SPHINCS+ Address
+ * SLH-DSA Address
  * (C) 2023 Jack Lloyd
  *     2023 Fabian Albert, René Meusel, Amos Treiber - Rohde & Schwarz Cybersecurity
  *
  * Botan is released under the Simplified BSD License (see license.txt)
- **/
+ */
 
 #ifndef BOTAN_SPHINCS_PLUS_ADDRESS_H_
 #define BOTAN_SPHINCS_PLUS_ADDRESS_H_
 
-#include <array>
-
-#include <botan/hash.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/sp_types.h>
+#include <array>
 
 namespace Botan {
 
-enum class Sphincs_Address_Type : uint32_t {
+enum class Sphincs_Address_Type : uint32_t /* NOLINT(*-enum-size) */ {
    WotsHash = 0,
    WotsPublicKeyCompression = 1,
    HashTree = 2,
@@ -28,11 +26,12 @@ enum class Sphincs_Address_Type : uint32_t {
 };
 
 /**
- * Representation of a SPHINCS+ hash function address as specified in
- * SPHINCS+ Specification Round 3.1, Section 2.7.3
+ * Representation of a SLH-DSA hash function address as specified in
+ * FIPS 205, Section 4.2
  */
 class BOTAN_TEST_API Sphincs_Address final {
    private:
+      // Offsets of the address fields in the address array. Counted in 32-bit words.
       static constexpr size_t layer_offset = 0;
       static constexpr size_t tree_offset = 1;  // tree address is 3 words wide
       static constexpr size_t type_offset = 4;
@@ -45,51 +44,52 @@ class BOTAN_TEST_API Sphincs_Address final {
    public:
       using enum Sphincs_Address_Type;
 
-      Sphincs_Address(Sphincs_Address_Type type) {
-         m_address.fill(0);
-         set_type(type);
+      explicit Sphincs_Address(Sphincs_Address_Type type) : m_address{} { set_type(type); }
+
+      explicit Sphincs_Address(std::array<uint32_t, 8> address) : m_address{} {
+         std::copy(address.begin(), address.end(), m_address.begin());
       }
 
-      Sphincs_Address(std::array<uint32_t, 8> address) { std::copy(address.begin(), address.end(), m_address.begin()); }
+      /* Setter member functions as specified in FIPS 205, Section 4.3 */
 
-      Sphincs_Address& set_layer(HypertreeLayerIndex layer) {
+      Sphincs_Address& set_layer_address(HypertreeLayerIndex layer) {
          m_address[layer_offset] = layer.get();
          return *this;
       }
 
-      Sphincs_Address& set_tree(XmssTreeIndexInLayer tree) {
+      Sphincs_Address& set_tree_address(XmssTreeIndexInLayer tree) {
          m_address[tree_offset + 0] = 0;  // not required by all current instances
          m_address[tree_offset + 1] = static_cast<uint32_t>(tree.get() >> 32);
          m_address[tree_offset + 2] = static_cast<uint32_t>(tree.get());
          return *this;
       }
 
+      /*
+       * Sets the type without clearing the other fields (contrary to the specs setTypeAndClear).
+       * This adaption is used for optimization purposes.
+       */
       Sphincs_Address& set_type(Sphincs_Address_Type type) {
          m_address[type_offset] = static_cast<uint32_t>(type);
          return *this;
       }
 
-      /* These functions are used for WOTS and FORS addresses. */
-
-      Sphincs_Address& set_keypair(TreeNodeIndex keypair) {
+      Sphincs_Address& set_keypair_address(TreeNodeIndex keypair) {
          m_address[keypair_offset] = keypair.get();
          return *this;
       }
 
-      Sphincs_Address& set_chain(WotsChainIndex chain) {
+      Sphincs_Address& set_chain_address(WotsChainIndex chain) {
          m_address[chain_offset] = chain.get();
          return *this;
       }
 
-      Sphincs_Address& set_hash(WotsHashIndex hash) {
-         m_address[hash_offset] = hash.get();
+      Sphincs_Address& set_tree_height(TreeLayerIndex tree_height) {
+         m_address[tree_height_offset] = tree_height.get();
          return *this;
       }
 
-      /* These functions are used for all hash tree addresses (including FORS). */
-
-      Sphincs_Address& set_tree_height(TreeLayerIndex tree_height) {
-         m_address[tree_height_offset] = tree_height.get();
+      Sphincs_Address& set_hash_address(WotsHashIndex hash) {
+         m_address[hash_offset] = hash.get();
          return *this;
       }
 
@@ -97,6 +97,8 @@ class BOTAN_TEST_API Sphincs_Address final {
          m_address[tree_index_offset] = tree_index.get();
          return *this;
       }
+
+      /* Custom helper member functions */
 
       Sphincs_Address& copy_subtree_from(const Sphincs_Address& other) {
          m_address[layer_offset] = other.m_address[layer_offset];
@@ -132,7 +134,7 @@ class BOTAN_TEST_API Sphincs_Address final {
       Sphincs_Address_Type get_type() const { return Sphincs_Address_Type(m_address[type_offset]); }
 
       std::array<uint8_t, 32> to_bytes() const {
-         std::array<uint8_t, sizeof(m_address)> result;
+         std::array<uint8_t, sizeof(m_address)> result{};
          for(unsigned int i = 0; i < m_address.size(); ++i) {
             store_be(m_address[i], result.data() + (i * 4));
          }
@@ -140,7 +142,7 @@ class BOTAN_TEST_API Sphincs_Address final {
       }
 
       std::array<uint8_t, 22> to_bytes_compressed() const {
-         std::array<uint8_t, 22> result;
+         std::array<uint8_t, 22> result{};
 
          result[0] = static_cast<uint8_t>(m_address[layer_offset]);
          store_be(m_address[tree_offset + 1], &result[1]);

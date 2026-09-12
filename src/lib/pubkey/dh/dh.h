@@ -48,7 +48,9 @@ class BOTAN_PUBLIC_API(2, 0) DH_PublicKey : public virtual Public_Key {
       size_t estimated_strength() const override;
       size_t key_length() const override;
 
-      std::vector<uint8_t> public_value() const;
+      BOTAN_DEPRECATED("Use raw_public_key_bits") std::vector<uint8_t> public_value() const {
+         return raw_public_key_bits();
+      }
 
       std::string algo_name() const override { return "DH"; }
 
@@ -65,7 +67,7 @@ class BOTAN_PUBLIC_API(2, 0) DH_PublicKey : public virtual Public_Key {
 
       DH_PublicKey() = default;
 
-      DH_PublicKey(std::shared_ptr<const DL_PublicKey> key) : m_public_key(std::move(key)) {}
+      explicit DH_PublicKey(std::shared_ptr<const DL_PublicKey> key) : m_public_key(std::move(key)) {}
 
       std::shared_ptr<const DL_PublicKey> m_public_key;
 };
@@ -78,7 +80,7 @@ BOTAN_DIAGNOSTIC_PUSH
 BOTAN_DIAGNOSTIC_IGNORE_INHERITED_VIA_DOMINANCE
 
 class BOTAN_PUBLIC_API(2, 0) DH_PrivateKey final : public DH_PublicKey,
-                                                   public PK_Key_Agreement_Key,
+                                                   public virtual PK_Key_Agreement_Key,
                                                    public virtual Private_Key {
    public:
       /**
@@ -105,6 +107,8 @@ class BOTAN_PUBLIC_API(2, 0) DH_PrivateKey final : public DH_PublicKey,
       std::unique_ptr<Public_Key> public_key() const override;
 
       std::vector<uint8_t> public_value() const override;
+
+      bool check_key(RandomNumberGenerator& rng, bool strong) const override;
 
       secure_vector<uint8_t> private_key_bits() const override;
 

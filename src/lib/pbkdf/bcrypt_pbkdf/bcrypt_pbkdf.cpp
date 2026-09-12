@@ -10,7 +10,8 @@
 #include <botan/internal/blowfish.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/timer.h>
+#include <botan/internal/mem_utils.h>
+#include <botan/internal/time_utils.h>
 
 namespace Botan {
 
@@ -26,12 +27,10 @@ std::string Bcrypt_PBKDF_Family::name() const {
    return "Bcrypt-PBKDF";
 }
 
-std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::tune(size_t output_length,
-                                                        std::chrono::milliseconds msec,
-                                                        size_t /*max_memory*/,
-                                                        std::chrono::milliseconds tune_time) const {
-   Timer timer("Bcrypt_PBKDF");
-
+std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::tune_params(size_t output_length,
+                                                               uint64_t desired_msec,
+                                                               std::optional<size_t> /*max_memory*/,
+                                                               uint64_t tune_msec) const {
    const size_t blocks = (output_length + 32 - 1) / 32;
 
    if(blocks == 0) {
@@ -42,20 +41,22 @@ std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::tune(size_t output_length,
 
    auto pwhash = this->from_iterations(starting_iter);
 
-   timer.run_until_elapsed(tune_time, [&]() {
+   auto tune_fn = [&]() {
       uint8_t output[32] = {0};
       pwhash->derive_key(output, sizeof(output), "test", 4, nullptr, 0);
-   });
+   };
 
-   if(timer.events() < blocks || timer.value() == 0) {
-      return default_params();
+   // Cost of deriving a single 32-byte block at starting_iter
+   const uint64_t measured_time = measure_cost(tune_msec, tune_fn);
+
+   if(measured_time == 0) {
+      return this->from_iterations(starting_iter);
    }
 
-   const uint64_t measured_time = timer.value() / (timer.events() / blocks);
+   const uint64_t target_nsec = desired_msec * static_cast<uint64_t>(1000000);
 
-   const uint64_t target_nsec = msec.count() * static_cast<uint64_t>(1000000);
-
-   const uint64_t desired_increase = target_nsec / measured_time;
+   // Output cost grows linearly in blocks, so divide the budget across them
+   const uint64_t desired_increase = target_nsec / measured_time / blocks;
 
    if(desired_increase == 0) {
       return this->from_iterations(starting_iter);
@@ -68,12 +69,12 @@ std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::default_params() const {
    return this->from_iterations(32);  // About 100 ms on fast machine
 }
 
-std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::from_iterations(size_t iter) const {
-   return std::make_unique<Bcrypt_PBKDF>(iter);
+std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::from_iterations(size_t iterations) const {
+   return std::make_unique<Bcrypt_PBKDF>(iterations);
 }
 
-std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::from_params(size_t iter, size_t /*t*/, size_t /*p*/) const {
-   return this->from_iterations(iter);
+std::unique_ptr<PasswordHash> Bcrypt_PBKDF_Family::from_params(size_t iterations, size_t /*t*/, size_t /*p*/) const {
+   return this->from_iterations(iterations);
 }
 
 namespace {
@@ -134,7 +135,7 @@ void Bcrypt_PBKDF::derive_key(uint8_t output[],
    const size_t blocks = (output_len + BCRYPT_BLOCK_SIZE - 1) / BCRYPT_BLOCK_SIZE;
 
    auto sha512 = HashFunction::create_or_throw("SHA-512");
-   const auto pass_hash = sha512->process(reinterpret_cast<const uint8_t*>(password), password_len);
+   const auto pass_hash = sha512->process(as_span_of_bytes(password, password_len));
 
    secure_vector<uint8_t> salt_hash(sha512->output_length());
 

@@ -8,6 +8,7 @@
 #include <botan/internal/ofb.h>
 
 #include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
 
 namespace Botan {
@@ -57,6 +58,8 @@ std::unique_ptr<StreamCipher> OFB::new_object() const {
 }
 
 void OFB::cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) {
+   assert_key_material_set();
+
    while(length >= m_buffer.size() - m_buf_pos) {
       xor_buf(out, in, &m_buffer[m_buf_pos], m_buffer.size() - m_buf_pos);
       length -= (m_buffer.size() - m_buf_pos);
@@ -76,7 +79,7 @@ void OFB::set_iv_bytes(const uint8_t iv[], size_t iv_len) {
 
    zeroise(m_buffer);
    BOTAN_ASSERT_NOMSG(m_buffer.size() >= iv_len);
-   copy_mem(&m_buffer[0], iv, iv_len);
+   copy_mem(m_buffer.data(), iv, iv_len);
 
    m_cipher->encrypt(m_buffer);
    m_buf_pos = 0;

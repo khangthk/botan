@@ -1,4 +1,20 @@
 [Modulo]
+In1 = 1
+In2 = 1
+Output = 0
+
+In1 = -129
+In2 = 31
+Output = 26
+
+In1 = 5
+In2 = 1
+Output = 0
+
+In1 = 2
+In2 = 2
+Output = 0
+
 In1 = 0x9
 In2 = 0x7
 Output = 0x2

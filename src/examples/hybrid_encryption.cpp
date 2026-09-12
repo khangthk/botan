@@ -1,5 +1,3 @@
-#include "botan/cipher_mode.h"
-#include "botan/hex.h"
 #include <botan/aead.h>
 #include <botan/auto_rng.h>
 #include <botan/pubkey.h>
@@ -20,7 +18,7 @@ std::unique_ptr<Botan::Private_Key> generate_keypair(const size_t bits, Botan::R
    return std::make_unique<Botan::RSA_PrivateKey>(rng, bits);
 }
 
-EncryptedData encrypt(const Botan::secure_vector<uint8_t>& data,
+EncryptedData encrypt(std::span<const uint8_t> data,
                       std::unique_ptr<Botan::Public_Key> pubkey,
                       Botan::RandomNumberGenerator& rng) {
    auto sym_cipher = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
@@ -30,7 +28,7 @@ EncryptedData encrypt(const Botan::secure_vector<uint8_t>& data,
    // prepare random key material for the symmetric encryption/authentication
    const auto key = rng.random_vec(sym_cipher->minimum_keylength());
    d.nonce = rng.random_vec<std::vector<uint8_t>>(sym_cipher->default_nonce_length());
-   d.ciphertext = data;
+   d.ciphertext.assign(data.begin(), data.end());
 
    // encrypt/authenticate the data symmetrically
    sym_cipher->set_key(key);
@@ -38,7 +36,7 @@ EncryptedData encrypt(const Botan::secure_vector<uint8_t>& data,
    sym_cipher->finish(d.ciphertext);
 
    // encrypt the symmetric key using RSA with a secure padding scheme
-   Botan::PK_Encryptor_EME asym_cipher(*pubkey, rng, "EME-OAEP(SHA-256,MGF1)");
+   const Botan::PK_Encryptor_EME asym_cipher(*pubkey, rng, "EME-OAEP(SHA-256,MGF1)");
    d.encryptedKey = asym_cipher.encrypt(key, rng);
 
    return d;
@@ -50,7 +48,7 @@ Botan::secure_vector<uint8_t> decrypt(const EncryptedData& encdata,
    Botan::secure_vector<uint8_t> plaintext = encdata.ciphertext;
 
    // decrypt the symmetric key
-   Botan::PK_Decryptor_EME asym_cipher(privkey, rng, "EME-OAEP(SHA-256,MGF1)");
+   const Botan::PK_Decryptor_EME asym_cipher(privkey, rng, "EME-OAEP(SHA-256,MGF1)");
    const auto key = asym_cipher.decrypt(encdata.encryptedKey);
 
    // decrypt the data symmetrically
@@ -74,7 +72,7 @@ int main() {
 
    const auto privkey = generate_keypair(2048 /*  bits */, rng);
 
-   const std::string plaintext = "The quick brown fox jumps over the lazy dog.";
+   const std::string_view plaintext = "The quick brown fox jumps over the lazy dog.";
    const auto ciphertext = encrypt(as<Botan::secure_vector<uint8_t>>(plaintext), privkey->public_key(), rng);
    const auto new_plaintext = decrypt(ciphertext, *privkey, rng);
 

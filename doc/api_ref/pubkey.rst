@@ -21,7 +21,7 @@ removed in a future major release.
   .. cpp:function:: std::string algo_name()
 
      Return a short string identifying the algorithm of this key,
-     eg "RSA" or "Dilithium".
+     eg "RSA" or "ML-DSA".
 
   .. cpp:function:: size_t estimated_strength() const
 
@@ -37,7 +37,6 @@ removed in a future major release.
   .. cpp:function:: bool supports_operation(PublicKeyOperation op) const
 
      Check if this key could be used for the queried operation type.
-
 
 .. cpp:class:: Public_Key
 
@@ -82,11 +81,47 @@ removed in a future major release.
 
    .. cpp:function:: std::vector<uint8_t> subject_public_key() const;
 
-      Return the X.509 SubjectPublicKeyInfo encoding of this key
+      Return the X.509 ``SubjectPublicKeyInfo`` encoding of this key. See
+      :rfc:`5280` for details.
 
    .. cpp:function:: std::string fingerprint_public(const std::string& alg = "SHA-256") const;
 
       Return a hashed fingerprint of this public key.
+
+.. cpp:class:: Private_Key
+
+   .. cpp:function:: std::unique_ptr<Public_Key> public_key() const
+
+      Return an object containing the public key corresponding to this private key.
+
+      Prefer this over the (deprecated) implicit conversion of a private key to
+      a public key currently possible due to an inheritance relation.
+
+   .. cpp:function:: secure_vector<uint8_t> private_key_info() const
+
+      Return the key encoded as a PKCS #8 `PrivateKeyInfo` structure. See
+      :rfc:`5208` for details.
+
+      Further functions relating to encoding and encrypting PKCS #8 private are
+      detailed in :ref:`serializing_private_keys`.
+
+   .. cpp:function:: secure_vector<uint8_t> private_key_bits() const
+
+      Return the serialization of the private key, corresponding to the
+      `PrivateKey` field of a PKCS #8 `PrivateKeyInfo` structure. See
+      :rfc:`5208` for details.
+
+   .. cpp:function:: bool stateful_operation() const;
+
+      Returns true if this keys operation is stateful, that is if updating the
+      key is required after each private operation. Currently the only stateful
+      schemes included are XMSS and LMS.
+
+   .. cpp:function:: std::optional<uint64_t> remaining_operations() const
+
+      If this algorithm is stateful, returns the number of private operations
+      remaining before this key is exhausted. Returns `nullopt` if the key is
+      not stateful.
 
 Public Key Algorithms
 ------------------------
@@ -110,24 +145,54 @@ ECDH, DH, X25519 and X448
 Key agreement schemes. DH uses arithmetic over finite fields and is slower and
 with larger keys. ECDH, X25519 and X448 use elliptic curves instead.
 
-Dilithium
-~~~~~~~~~~
+ML-DSA (FIPS 204)
+~~~~~~~~~~~~~~~~~
 
-Post-quantum secure signature scheme based on lattice problems.
+Post-quantum secure signature scheme based on (structured) lattices.
+This algorithm is standardized in FIPS 204. Signing keys are always stored and
+expanded from the 32-byte private random seed (`xi`), loading the expanded key
+format specified in FIPS 204 is explicitly not supported.
 
-Kyber
-~~~~~~~~~~~
+Support for ML-DSA is implemented in the module ``ml_dsa``
 
-Post-quantum key encapsulation scheme based on (structured) lattices.
+Additionally, support for the pre-standardized version "Dilithium" is retained
+for the time being. The implemented specification is commonly referred to as
+version 3.1 of the CRYSTALS-Dilithium submission to NIST's third round of the
+PQC competition. This is not compatible to the "Initial Public Draft" version of
+FIPS 204 for which Botan does not offer an implementation.
 
-.. note::
+Currently two flavors of Dilithium are implemented in separate Botan modules:
 
-   Currently two modes for Kyber are defined: the round3 specification
-   from the NIST PQC competition, and the "90s mode" (which uses
-   AES/SHA-2 instead of SHA-3 based primitives). The 90s mode Kyber is
-   deprecated and will be removed in a future release.
+ * ``dilithium``, that uses Keccak (SHAKE), and that saw some public usage
+   by early adopters.
+ * ``dilithium_aes``, that uses AES instead of Keccak-based primitives.
+   This mode is deprecated and will be removed in a future release.
 
-   The final NIST specification version of Kyber is not yet implemented.
+ML-KEM (FIPS 203)
+~~~~~~~~~~~~~~~~~
+
+Post-quantum key encapsulation scheme based on (structured) lattices. This
+algorithm is standardized in FIPS 203. New decapsulation keys are stored and
+expanded from the 64-byte private random seeds (``d || z``).
+Keys imported as seeds are always serialized as seeds, while keys imported in
+expanded format (as specified in FIPS 203) are serialized in expanded format.
+Exporting seeds as expanded keys is supported using ML-KEM private key-specific
+methods.
+
+Support for ML-KEM is implemented in the module ``ml_kem``.
+
+Additionally, support for the pre-standardized version "Kyber" is retained for
+the time being. The implemented specification is commonly referred to as version
+3.01 of the CRYSTALS-Kyber submission to NIST's third round of the PQC
+competition. This is not compatible to the "Initial Public Draft" version of
+FIPS 203 for which Botan does not offer an implementation.
+
+Currently two flavors of Kyber are implemented in separate Botan modules:
+
+ * ``kyber``, that uses Keccak (SHAKE and SHA-3), and that saw some public
+   usage by early adopters.
+ * ``kyber_90s``, that uses AES/SHA-2 instead of Keccak-based primitives.
+   This mode is deprecated and will be removed in a future release.
 
 Ed25519 and Ed448
 ~~~~~~~~~~~~~~~~~
@@ -144,20 +209,52 @@ signatures can be created. If the same state is ever used to generate two
 signatures, then the whole scheme becomes insecure, and signatures can be
 forged.
 
+ .. warning::
+
+    Maintaining consistent state without replays is extremely difficult,
+    especially when multiple machines are involved. Even a single error will
+    compromise the entire signature scheme. XMSS should only be used in an
+    environment carefully designed to maintain consistent state. Prefer
+    the stateless SLH-DSA in new designs.
+
 HSS-LMS
--------
+~~~~~~~
 
 A post-quantum secure hash-based signature scheme similar to XMSS. Contains
 support for multitrees. It is stateful, meaning the private key changes after
-each signature.
+each signature. If the same state is ever used to generate two signatures, then
+the whole scheme becomes insecure, and signatures can be forged.
 
-SPHINCS+
-~~~~~~~~~
+ .. warning::
 
-A post-quantum secure signature scheme whose security is based (only) on the
-security of a hash function. Unlike XMSS, it is a stateless signature
-scheme, meaning that the private key does not change with each signature. It
-has high security but very long signatures and high runtime.
+    Maintaining consistent state without replays is extremely difficult,
+    especially when multiple machines are involved. Even a single error will
+    compromise the entire signature scheme. HSS-LMS should only be used in an
+    environment carefully designed to maintain consistent state. Prefer
+    the stateless SLH-DSA in new designs.
+
+SLH-DSA (FIPS 205)
+~~~~~~~~~~~~~~~~~~
+
+The Stateless Hash-Based Digital Signature Standard (SLH-DSA)
+is the FIPS 205 post-quantum secure signature scheme whose security is solely
+based on the security of a hash function. Unlike XMSS, it is a stateless
+signature scheme, meaning that the private key does not change with each
+signature. It has high security but very long signatures and high runtime.
+
+Support for SLH-DSA is implemented in the modules ``slh_dsa_sha2`` and ``slh_dsa_shake``.
+
+Additionally, support for the pre-standardized version "SPHINCS+" is retained
+for the time being. The implemented specification is commonly referred to as
+version 3.1 of the SPHINCS+ submission to NIST's third round of the
+PQC competition. This is not compatible with the "Initial Public Draft" version of
+FIPS 205 for which Botan does not offer an implementation. Also, Botan does not
+support the Haraka hash function.
+
+Currently, two flavors of SPHINCS+ are implemented in separate Botan modules:
+
+ * ``sphincsplus_shake``, that uses Keccak (SHAKE) hash functions
+ * ``sphincsplus_sha2``, that uses SHA-256
 
 FrodoKEM
 ~~~~~~~~
@@ -167,8 +264,15 @@ A post-quantum secure key encapsulation scheme based on (unstructured) lattices.
 McEliece
 ~~~~~~~~~~
 
+.. deprecated:: 3.0.0
+
 Post-quantum secure key encapsulation scheme based on the hardness of certain
-decoding problems.
+decoding problems. Deprecated; use Classic McEliece
+
+Classic McEliece
+~~~~~~~~~~~~~~~~
+
+Post-quantum secure, code-based key encapsulation scheme.
 
 ElGamal
 ~~~~~~~~
@@ -179,6 +283,8 @@ except in PGP.
 DSA
 ~~~~
 
+.. deprecated:: 3.7.0
+
 Finite field based signature scheme. A NIST standard but now quite obsolete.
 
 ECGDSA, ECKCDSA, SM2, GOST-34.10
@@ -188,17 +294,41 @@ A set of signature schemes based on elliptic curves. All are national standards
 in their respective countries (Germany, South Korea, China, and Russia, resp),
 and are completely obscure and unused outside of that context.
 
+GOST-34.10 support is deprecated.
+
 .. _creating_new_private_keys:
 
 Creating New Private Keys
 ----------------------------------------
 
-Creating a new private key requires two things: a source of random numbers
-(see :ref:`random_number_generators`) and some algorithm specific parameters
-that define the *security level* of the resulting key. For instance, the
-security level of an RSA key is (at least in part) defined by the length of
-the public key modulus in bits. So to create a new RSA private key, you would
-call
+Creating a new private key requires two things: a source of random numbers (see
+:ref:`random_number_generators`) and potentially some algorithm specific
+parameters.
+
+Generic Method
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There is a generic method which can create keys of any algorithm type, defined
+in ``pk_algs.h``
+
+.. cpp:function:: std::unique_ptr<Private_Key> create_private_key(std::string_view algo, \
+                                                RandomNumberGenerator& rng, \
+                                                std::string_view params)
+
+    Examples of algorithm/parameter pairs that can be provided here:
+
+    * "RSA" / "3072"
+    * "ECDSA" / "secp256r1"
+    * "Ed5519" / ""
+    * "ML-KEM" / "ML-KEM-768"
+    * "DH" / "modp/ietf/2048"
+
+    If *params* is left empty then a suitable algorithm-specific default
+    will be chosen. This default may change from release to release, but
+    generally tries to reflect a conservative setting.
+
+Creating A New RSA Private Key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. cpp:function:: RSA_PrivateKey::RSA_PrivateKey(RandomNumberGenerator& rng, size_t bits)
 
@@ -216,49 +346,87 @@ call
   users documented their approach in
   `a blog post <https://medium.com/nexenio/indicating-progress-of-rsa-key-pair-generation-the-practical-approach-a049ba829dbe>`_.
 
-Algorithms based on the discrete-logarithm problem use what is called a
-*group*; a group can safely be used with many keys, and for some operations,
-like key agreement, the two keys *must* use the same group.  There are
-currently two kinds of discrete logarithm groups supported in botan: the
-integers modulo a prime, represented by :ref:`dl_group`, and elliptic curves
-in GF(p), represented by :ref:`ec_group`. A rough generalization is that the
-larger the group is, the more secure the algorithm is, but correspondingly the
-slower the operations will be.
+Creating A New EC Private Key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Given a ``DL_Group``, you can create new DSA, Diffie-Hellman and ElGamal key pairs with
+For a few schemes, the curve and signature scheme come as a package, and there
+are no extra parameters:
 
-.. cpp:function:: DSA_PrivateKey::DSA_PrivateKey(RandomNumberGenerator& rng, \
-   const DL_Group& group, const BigInt& x = 0)
+.. cpp:function:: Ed25519_PrivateKey::Ed25519_PrivateKey(RandomNumberGenerator& rng)
 
-.. cpp:function:: DH_PrivateKey::DH_PrivateKey(RandomNumberGenerator& rng, \
-   const DL_Group& group, const BigInt& x = 0)
+   Generate a new Ed25519 private key
 
-.. cpp:function:: ElGamal_PrivateKey::ElGamal_PrivateKey(RandomNumberGenerator& rng, \
-   const DL_Group& group, const BigInt& x = 0)
+.. cpp:function:: Ed448_PrivateKey::Ed448_PrivateKey(RandomNumberGenerator& rng)
 
-  The optional *x* parameter to each of these constructors is a private key
-  value. This allows you to create keys where the private key is formed by
-  some special technique; for instance you can use the hash of a password (see
-  :ref:`pbkdf` for how to do that) as a private key value. Normally, you would
-  leave the value as zero, letting the class generate a new random key.
+   Generate a new Ed448 private key
 
-Finally, given an ``EC_Group`` object, you can create a new ECDSA, ECKCDSA, ECGDSA,
-ECDH, or GOST 34.10-2001 private key with
+.. cpp:function:: X25519_PrivateKey::X25519_PrivateKey(RandomNumberGenerator& rng)
 
-.. cpp:function:: ECDSA_PrivateKey::ECDSA_PrivateKey(RandomNumberGenerator& rng, \
-   const EC_Group& domain, const BigInt& x = 0)
+   Generate a new X25519 private key
 
-.. cpp:function:: ECKCDSA_PrivateKey::ECKCDSA_PrivateKey(RandomNumberGenerator& rng, \
-      const EC_Group& domain, const BigInt& x = 0)
+.. cpp:function:: X448_PrivateKey::X448_PrivateKey(RandomNumberGenerator& rng)
 
-.. cpp:function:: ECGDSA_PrivateKey::ECGDSA_PrivateKey(RandomNumberGenerator& rng, \
-   const EC_Group& domain, const BigInt& x = 0)
+   Generate a new X448 private key
 
-.. cpp:function:: ECDH_PrivateKey::ECDH_PrivateKey(RandomNumberGenerator& rng, \
-   const EC_Group& domain, const BigInt& x = 0)
+Others require additionally specifying which curve to use. First create a
+relevant :cpp:class:`EC_Group` using for example :cpp:func:`EC_Group::from_name`
+or :cpp:func:`EC_Group::from_OID`. Then pass it to the private key
+constructor. If the choice of group is not otherwise mandated by your
+application, use "secp256r1" (aka P-256) or "secp384r1" (aka P-384) as they are
+fastest, widely implemented, and considered secure.
 
-.. cpp:function:: GOST_3410_PrivateKey::GOST_3410_PrivateKey(RandomNumberGenerator& rng, \
-   const EC_Group& domain, const BigInt& x = 0)
+.. cpp:function:: ECDH_PrivateKey::ECDH_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new ECDH private key
+
+.. cpp:function:: ECDSA_PrivateKey::ECDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new ECDSA private key
+
+.. cpp:function:: ECKCDSA_PrivateKey::ECKCDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new ECKCDSA private key
+
+.. cpp:function:: ECGDSA_PrivateKey::ECGDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new ECGDSA private key
+
+.. cpp:function:: GOST_3410_PrivateKey::GOST_3410_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new GOST-34.10 private key
+
+.. cpp:function:: SM2_PrivateKey::SM2_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group)
+
+   Generate a new SM2 private key
+
+Creating A New Finite Field DL Private Key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Instead of elliptic curves, some older algorithms are based on the security of
+discrete logarithms in the group of integers modulo a prime. For security, these
+require much larger keys than elliptic curve schemes, and are typically much slower.
+
+.. warning::
+
+   Avoid such algorithms in new code
+
+.. cpp:function:: DH_PrivateKey::DH_PrivateKey(RandomNumberGenerator& rng, const DL_Group& group)
+
+   Create a new Diffie-Hellman private key. In most protocols that still support
+   finite field DH, it is used with a set of pre-created and trusted groups. These
+   were specified in :rfc:`3526` and are usually called the IETF MODP groups.
+
+   The MODP groups are built into the library and can be accessed by name for
+   example ``DL_Group::from_name("modp/ietf/3072")``, where 3072 refers to the
+   number of bits in the prime modulus.
+
+.. cpp:function:: DSA_PrivateKey::DSA_PrivateKey(RandomNumberGenerator& rng, const DL_Group& group)
+
+   Create a new DSA private key. DSA requires groups of a special form. The best way to create
+   such a group is to create a new ``DL_Group`` at random for each key, using the "DSA kosherizer"
+   algorithm. See :ref:`dl_group` for more information.
+
+.. cpp:function:: ElGamal_PrivateKey::ElGamal_PrivateKey(RandomNumberGenerator& rng, const DL_Group& group)
 
 .. _serializing_private_keys:
 
@@ -382,51 +550,60 @@ To import and export public keys, use:
 DL_Group
 ------------------------------
 
-As described in :ref:`creating_new_private_keys`, a discrete logarithm group
-can be shared among many keys, even keys created by users who do not trust
-each other. However, it is necessary to trust the entity who created the
-group; that is why organization like NIST use algorithms which generate groups
-in a deterministic way such that creating a bogus group would require breaking
-some trusted cryptographic primitive like SHA-2.
+.. cpp:class:: DL_Group
 
-Instantiating a ``DL_Group`` simply requires calling
+   Represents parameters for finite field discrete logarithm algorithms
 
-.. cpp:function:: DL_Group::DL_Group(const std::string& name)
+.. cpp:function:: static DL_Group DL_Group::from_name(std::string_view name)
 
-  The *name* parameter is a specially formatted string that consists of three
-  things, the type of the group ("modp" or "dsa"), the creator of the group,
-  and the size of the group in bits, all delimited by '/' characters.
+  The name here is a (Botan specific) identifier which maps to one of the
+  standard discrete logarithm groups.
 
-  Currently all "modp" groups included in botan are ones defined by the
-  Internet Engineering Task Force, so the provider is "ietf", and the strings
-  look like "modp/ietf/N" where N can be any of 1024, 1536, 2048, 3072,
-  4096, 6144, or 8192. This group type is used for Diffie-Hellman and ElGamal
-  algorithms.
+  For the groups from :rfc:`5208` (often called the MODP groups, the
+  IETF groups, or the IPsec groups) use "modp/ietf/N" where N can be
+  any of 1024, 1536, 2048, 3072, 4096, 6144, or 8192. This group type
+  is used for Diffie-Hellman and ElGamal algorithms, but *cannot*
+  be used with DSA.
 
-  The other type, "dsa" is used for DSA keys. They can also be used with
-  Diffie-Hellman and ElGamal, but this is less common. The currently available
-  groups are "dsa/jce/1024" and "dsa/botan/N" with N being 2048 or 3072.  The
-  "jce" groups are the standard DSA groups used in the Java Cryptography
-  Extensions, while the "botan" groups were randomly generated using the
-  FIPS 186-3 algorithm by the library maintainers.
+  For the groups from :rfc:`7919` (often called the TLS FFDHE groups)
+  use "ffdhe/ietf/N" where N is any of 2048, 3072, 4096, 6144, or 8192.
+  These groups are typically only used in TLS, but can be used with
+  Diffie-Hellman more generally. They *cannot* be used with DSA.
+
+  For the groups from :rfc:`5054` (the SRP6 groups) use "modp/srp/N"
+  where N can be any of 1024, 1536, 2048, 3072, 4096, 6144, or 8192.
+  These groups *should only be used with SRP6*.
+
+  Finally a small number of pre-created groups usable for DSA are available.
+  These are "dsa/jce/1024", "dsa/botan/2048", and "dsa/botan/3072". Support for
+  these groups is deprecated and they will be removed in a future major release.
+  Should DSA be required, create a new random group for each key.
 
 You can generate a new random group using
 
 .. cpp:function:: DL_Group::DL_Group(RandomNumberGenerator& rng, \
    PrimeType type, size_t pbits, size_t qbits = 0)
 
-  The *type* can be either ``Strong``, ``Prime_Subgroup``, or
-  ``DSA_Kosherizer``. *pbits* specifies the size of the prime in
-  bits. If the *type* is ``Prime_Subgroup`` or ``DSA_Kosherizer``,
-  then *qbits* specifies the size of the subgroup.
+  The *type* can be
+
+  * ``Strong``: A group where (p-1)/2 is also prime. Best for Diffie-Hellman,
+    but very slow to generate.
+  * ``Prime_Subgroup``: A group where (p-1) is divided by a large prime q,
+    of size ``qbits``. Faster to generate than ``Strong``, suitable for
+    Diffie-Hellman.
+  * ``DSA_Kosherizer``: Generate a group suitable for DSA using the
+    algorithm specified in FIPS 186-3.
+
+  If *qbits* is set to zero then a suitable value is chosen relative to the
+  value of *pbits* and the type of group being created.
 
 You can serialize a ``DL_Group`` using
 
-.. cpp:function:: secure_vector<uint8_t> DL_Group::DER_Encode(Format format)
+.. cpp:function:: std::vector<uint8_t> DL_Group::DER_encode(Format format) const
 
 or
 
-.. cpp:function:: std::string DL_Group::PEM_encode(Format format)
+.. cpp:function:: std::string DL_Group::PEM_encode(Format format) const
 
 where *format* is any of
 
@@ -435,11 +612,11 @@ where *format* is any of
 * ``PKCS_3`` is an older format for modp groups; it should only
   be used for backwards compatibility.
 
-You can reload a serialized group using
+You can reload a serialized group from BER or PEM formats using
 
-.. cpp:function:: void DL_Group::BER_decode(DataSource& source, Format format)
+.. cpp:function:: DL_Group::DL_Group(std::span<const uint8_t> ber, DL_Group_Format format)
 
-.. cpp:function:: void DL_Group::PEM_decode(DataSource& source)
+.. cpp:function:: static DL_Group DL_Group::from_PEM(std::string_view pem)
 
 Code Example: DL_Group
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -451,15 +628,6 @@ parameters and ANSI_X9_42 encodes the created group for further usage with DH.
    :language: cpp
 
 
-.. _ec_group:
-
-EC_Group
-------------------------------
-
-An ``EC_Group`` is initialized by passing the name of the
-group to be used to the constructor. These groups have
-semi-standardized names like "secp256r1" and "brainpool512r1".
-
 Key Checking
 ---------------------------------
 
@@ -469,7 +637,7 @@ based on the discrete logarithm problem need a generator > 1.
 
 Each public key type has a function
 
-.. cpp:function:: bool Public_Key::check_key(RandomNumberGenerator& rng, bool strong)
+.. cpp:function:: bool Asymmetric_Key::check_key(RandomNumberGenerator& rng, bool strong)
 
   This function performs a number of algorithm-specific tests that the key
   seems to be mathematically valid and consistent, and returns true if all of
@@ -481,12 +649,13 @@ Each public key type has a function
   entity. If *strong* is ``true``, then it does "strong" checking, which
   includes expensive operations like primality checking.
 
-As key checks are not automatically performed they must be called
-manually after loading keys from untrusted sources. If a key from an untrusted source
-is not checked, the implementation might be vulnerable to algorithm specific attacks.
+As key checks are not automatically performed they must be called manually after
+loading keys from untrusted sources. If a key from an untrusted source is not
+checked, the implementation might be vulnerable to algorithm specific attacks.
 
-The following example loads the Subject Public Key from the x509 certificate ``cert.pem`` and checks the
-loaded key. If the key check fails a respective error is thrown.
+The following example loads the Subject Public Key from the x509
+certificate ``cert.pem`` and checks the loaded key. If the key check
+fails a respective error is thrown.
 
 .. literalinclude:: /../src/examples/check_key.cpp
    :language: cpp
@@ -535,16 +704,26 @@ support it directly, such as RSA or ElGamal; these use the EME class:
 
 .. cpp:class:: PK_Encryptor_EME
 
-   .. cpp:function:: PK_Encryptor_EME(const Public_Key& key, std::string padding)
+   .. cpp:function:: PK_Encryptor_EME(const Public_Key& key, \
+         RandomNumberGenerator& rng, \
+         std::string_view padding, \
+         std::string_view provider = "")
 
      With *key* being the key you want to encrypt messages to. The padding
      method to use is specified in *padding*.
 
      If you are not sure what padding to use, use "OAEP(SHA-256)". If you need
      compatibility with protocols using the PKCS #1 v1.5 standard, you can also
-     use "EME-PKCS1-v1_5".
+     use "PKCS1v15".
+
+     For SM2 encryption, the padding string specifies which hash function to
+     use; normally this would be "SM3".
 
 .. cpp:class:: DLIES_Encryptor
+
+   .. deprecated:: 2.13.0
+
+      DLIES should no longer be used
 
    Available in the header ``dlies.h``
 
@@ -573,6 +752,13 @@ support it directly, such as RSA or ElGamal; these use the EME class:
 
    Available in the header ``ecies.h``.
 
+   .. warning::
+
+      ECIES is standardized by various organizations (including IEEE and ISO)
+      but unfortunately has dozens of different options which greatly hinder
+      interoperability. ECDH key exchange with a static receiver key is much
+      simpler, and provides similar security properties.
+
    Parameters for encryption and decryption are set by the
    :cpp:class:`ECIES_System_Params` class which stores the EC domain parameters,
    the KDF (see :ref:`key_derivation_function`), the cipher (see
@@ -591,15 +777,60 @@ support it directly, such as RSA or ElGamal; these use the EME class:
 
       Creates an ephemeral private key which is used for the key agreement.
 
-The decryption classes are named :cpp:class:`PK_Decryptor`,
-:cpp:class:`PK_Decryptor_EME`, :cpp:class:`DLIES_Decryptor` and
-:cpp:class:`ECIES_Decryptor`. They are created in the exact same way, except
-they take the private key, and the processing function is named ``decrypt``.
+   .. cpp:function:: void ECIES_Encryptor::set_initialization_vector(const InitializationVector& iv)
+
+      Set a new initialization vector for the encryptor. This must be called
+      before each message with a random nonce suitable for the chosen cipher. In
+      the ECIES message format the nonce is not conveyed with the produced
+      ciphertext, so it must be set separately.
+
+.. cpp:class:: PK_Decryptor
+
+   Interface for public key decryption.
+
+   .. cpp:function:: secure_vector<uint8_t> decrypt(std::span<const uint8_t> in) const
+
+      Decrypts a message, throwing an exception in the case of failure.
+
+      .. warning::
+
+         If using PKCS1v1.5 encryption padding this function is not safe since
+         it exposes via a side channel if the decryption succeeded or not. This
+         side channel *is sufficient for an attacker to decrypt arbitrary
+         messages and forge arbitrary signatures*. Use
+         :cpp:func:`PK_Decryptor::decrypt_or_random` to avoid this situation.
+
+   .. cpp:function:: secure_vector<uint8_t> decrypt_or_random(const uint8_t in[], \
+                                               size_t length, \
+                                               size_t expected_pt_len, \
+                                               RandomNumberGenerator& rng) const
+
+         Similar to `decrypt` except that if the decryption fails, or if the
+         decrypted key is not of the expected length, then it returns a random
+         string of the expected length. This hides the PKCS1v1.5 oracle.
+
+   .. cpp:function:: secure_vector<uint8_t> decrypt_or_random(const uint8_t in[], \
+                                               size_t length, \
+                                               size_t expected_pt_len, \
+                                               RandomNumberGenerator& rng, \
+                                               const uint8_t required_content_bytes[], \
+                                               const uint8_t required_content_offsets[], \
+                                               size_t required_contents) const
+
+         Similar to `decrypt` except that if the decryption fails, or if the
+         decrypted key is not of the expected length, then it returns a random
+         string of the expected length. This hides the PKCS1v1.5 oracle.
+
+         This variant of the function is used if there are specific bytes within
+         the message which must take on a certain value, rather than the
+         encrypted "message" just being a random key, which is the more typical
+         usage. If any of the required values are incorrect, then again a
+         randomly generated key is returned to hide the PKCS1v1.5 oracle.
 
 Botan implements the following encryption algorithms:
 
 1. RSA. Requires a :ref:`padding scheme <eme>` as parameter.
-#. DLIES
+#. DLIES (deprecated)
 #. ECIES
 #. SM2. Takes an optional ``HashFunction`` as parameter which defaults to SM3.
 #. ElGamal. Requires a :ref:`padding scheme <eme>` as parameter.
@@ -633,7 +864,8 @@ OAEP
 OAEP (called EME1 in IEEE 1363 and in earlier versions of the library)
 as specified in PKCS#1 v2.0 (RFC 2437) or PKCS#1 v2.1 (RFC 3447).
 
-- Names: ``OAEP`` / ``EME-OAEP`` / ``EME1``
+- Name: ``OAEP``,
+- Deprecated aliases: ``EME-OAEP``, ``EME1``
 - Parameters specification:
 
   - ``(<HashFunction>)``
@@ -641,12 +873,12 @@ as specified in PKCS#1 v2.0 (RFC 2437) or PKCS#1 v2.1 (RFC 3447).
   - ``(<HashFunction>,MGF1(<HashFunction>))``
   - ``(<HashFunction>,MGF1(<HashFunction>),<optional label>)``
 
-- The only Mask generation function available is MGF1
-  which is also the default.
+- The only Mask generation function available is MGF1, which is also the default.
 - By default the same hash function will be used for the label and MGF1.
+- By default the OAEP label is the empty string
 - Examples:
   ``OAEP(SHA-256)``,
-  ``EME-OAEP(SHA-256,MGF1)``,
+  ``OAEP(SHA-256,MGF1)``,
   ``OAEP(SHA-256,MGF1(SHA-512))``,
   ``OAEP(SHA-512,MGF1(SHA-512),TCPA)``
 
@@ -655,67 +887,334 @@ PKCS #1 v1.5 Type 2 (encryption)
 
 PKCS #1 v1.5 Type 2 (encryption) padding.
 
-Names: ``PKCS1v15`` / ``EME-PKCS1-v1_5``
+Name: ``PKCS1v15``
+Deprecated alias: ``EME-PKCS1-v1_5``
+
+.. warning::
+
+   PKCS v1.5 encryption padding is prone to oracle attacks (the Bleichenbacher
+   attack, and the many variations thereof). Avoid it if at all possible. If you
+   must use it, use :cpp:func:`PK_Decryptor::decrypt_or_random` function which
+   can hide the decryption failures.
 
 Raw EME
 """""""
 
-Does not change the input during padding.
-Don't use this unless you know what you are doing.
-Un-padding will strip leading zeros.
+Does not change the input during padding. Unpadding will strip leading zero bytes.
+
+.. warning::
+
+   This is extremely unsafe and only necessary in specialized situations. Don't
+   use this unless you know what you are doing.
 
 Name: ``Raw``
 
-
 Public Key Signature Schemes
 ---------------------------------
+
+Signatures are generated using :cpp:class:`PK_Signer` and verified using
+:cpp:class:`PK_Verifier`. Both are configured with a
+:cpp:class:`PK_Signature_Options` object, which specifies every detail of how the
+signature is formed: the hash function, any padding scheme, the signature
+encoding, and so on.
+
+.. _pk_signature_options:
+
+Signature Options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 3.14.0
+
+.. cpp:class:: PK_Signature_Options
+
+   Describes how a signature is to be generated or verified. The object is
+   built up in a builder style; each ``with_xxx`` function returns a new
+   options object with that option added, so the calls can be chained::
+
+      auto opts = Botan::PK_Signature_Options()
+                     .with_hash("SHA-256")
+                     .with_der_encoded_signature();
+
+      Botan::PK_Signer signer(key, rng, opts);
+      Botan::PK_Verifier verifier(key, opts);
+
+   Every option that is set must be understood and acted upon by the signature
+   scheme in use. If a scheme does not support an option (for example a context
+   for RSA, or a padding scheme for Ed25519) then constructing the
+   :cpp:class:`PK_Signer` or :cpp:class:`PK_Verifier` throws an exception which
+   names the offending option(s); an option is never silently ignored. The
+   options are validated when the signer or verifier is constructed, not when
+   they are set.
+
+   Each option can be set at most once; attempting to set an option a second time
+   throws ``Invalid_State``.
+
+   The signer and verifier must be configured compatibly. Most options (the
+   hash, padding, encoding, context, and the prehash options) affect the
+   signature itself and so must match on both sides. The exception is
+   :cpp:func:`PK_Signature_Options::with_deterministic_signature`, which only
+   affects signature generation and is ignored by :cpp:class:`PK_Verifier`.
+
+   .. cpp:function:: PK_Signature_Options()
+
+      Creates an empty set of options. This is sufficient for schemes which
+      take no parameters (such as Ed25519, ML-DSA, or XMSS).
+
+   .. cpp:function:: PK_Signature_Options with_hash(std::string_view hash)
+
+      Specify the hash function used for signing and verification. Most, but not
+      all, schemes require this; RSA, DSA, ECDSA, ECGDSA, ECKCDSA and GOST 34.10
+      must be given a hash, while SM2 defaults to SM3 if none is given.
+
+      Schemes where the hash is fixed by the key (XMSS, HSS-LMS, SLH-DSA) accept
+      this option only if it names the hash the operation uses, as reported by
+      :cpp:func:`PK_Signer::hash_function`; so that name can always be passed
+      to a verifier. Note that for SLH-DSA this is the function used to hash
+      the message, which for the larger parameter sets is not the one named in
+      the parameter set (for example SLH-DSA-SHA2-192s reports ``SHA-512``).
+      Schemes which have no hash function parameter at all (Ed25519, Ed448,
+      ML-DSA) reject it.
+
+      An empty string is ignored, which allows passing through a possibly-unset
+      user configuration.
+
+   .. cpp:function:: PK_Signature_Options with_padding(std::string_view padding)
+
+      Specify a padding scheme. This is only used for RSA, which requires it;
+      see :ref:`rsa_padding` for the available schemes. All other schemes reject
+      this option.
+
+      An empty string is ignored.
+
+   .. cpp:function:: PK_Signature_Options with_der_encoded_signature(bool der = true)
+
+      Produce, or expect, a signature encoded as an ASN.1 ``SEQUENCE`` of two
+      integers, rather than the default fixed-length concatenation of the two
+      signature elements. This formatting is used in protocols such as TLS and
+      in X.509 certificates.
+
+      Supported by DSA, ECDSA, ECGDSA, ECKCDSA, GOST 34.10 and SM2; rejected by
+      all other schemes.
+
+   .. cpp:function:: PK_Signature_Options with_deterministic_signature(bool deterministic = true)
+
+      Request a deterministic signature, that is one which depends only on the
+      key and the message and not on the random number generator.
+
+      Some schemes are always deterministic (for example RSA PKCS #1 v1.5,
+      Ed25519, XMSS, HSS-LMS); these accept the option as it is trivially
+      satisfied. DSA and ECDSA are randomized by default but can produce
+      deterministic signatures using the RFC 6979 nonce derivation; this
+      requires the ``rfc6979`` module, and if it is not included in the build
+      the option is rejected with ``Not_Implemented``. ML-DSA and SLH-DSA use
+      their "hedged" (randomized) variants by default, and this option selects
+      the deterministic variant instead. Schemes which cannot produce a
+      deterministic signature (for example RSA-PSS with a non-zero salt) reject
+      the option.
+
+      This option is ignored for verification.
+
+   .. cpp:function:: PK_Signature_Options with_salt_size(size_t salt_size)
+
+      Specify the size in bytes of the random salt. This applies to RSA with the
+      ``PSS`` and ``ISO_9796_DS2`` padding schemes, where the salt size
+      otherwise defaults to the output length of the hash function. When
+      verifying a ``PSS`` signature, if a salt size is specified then the
+      signature is only accepted if its salt has exactly that size; otherwise
+      any salt size is accepted. For ``ISO_9796_DS2`` the salt size is part of
+      the encoding, so the verifier must use the same size as the signer.
+
+      ML-DSA also accepts this option, but only if the size equals the 32 bytes
+      of randomness the scheme uses (64 for Dilithium), and not in combination
+      with a deterministic signature.
+
+   .. cpp:function:: PK_Signature_Options with_context(std::span<const uint8_t> context)
+   .. cpp:function:: PK_Signature_Options with_context(std::string_view context)
+
+      Specify a context which is bound into the signature. Currently this is
+      only supported by SM2, where the context is the user identifier
+      ``IDA``; if no context is given SM2 uses the default identifier
+      ``1234567812345678`` specified in GM/T 0009-2012.
+
+   .. cpp:function:: PK_Signature_Options with_prehash(std::optional<std::string> prehash = std::nullopt)
+
+      Request that the library hash the message before signing it, for schemes
+      which normally sign the entire message directly. Ed25519 and Ed448 are
+      such schemes; they sign the full message (which consequently must be
+      buffered in memory), but also define prehashed variants Ed25519ph and
+      Ed448ph. Calling this with no argument selects the scheme's standard
+      prehash (SHA-512 for Ed25519ph, SHAKE-256(512) for Ed448ph). Naming a
+      hash function instead uses that function; for Ed25519 this selects the
+      hash-then-sign construction used by GnuPG, which is not compatible with
+      Ed25519ph even if SHA-512 is named. See :ref:`Ed25519_Ed448_variants`.
+
+      The caller still provides the complete message, and the library computes
+      the hash. Schemes which always hash the message as part of signing (DSA,
+      ECDSA, RSA, ...) do not offer a separate prehash mode and reject this
+      option, with the exception that DSA, ECDSA, ECGDSA and GOST 34.10 accept
+      it if the named prehash is the same as the signature hash.
+
+      This cannot be combined with
+      :cpp:func:`PK_Signature_Options::with_externally_computed_prehash`.
+
+   .. cpp:function:: PK_Signature_Options with_externally_computed_prehash(std::optional<std::string> hash = std::nullopt)
+
+      Specify that the caller has already hashed the message. The data passed
+      to the signer or verifier is then not the message but a digest of it, and
+      is signed (or verified) directly without being hashed again.
+
+      .. warning::
+
+         This is intended for situations where the hash is computed by another
+         component and only the digest is available for signing. Many ways of
+         doing this are insecure. Don't use this unless you know what you are
+         doing.
+
+      The hash function the caller used may be named, either as the argument
+      here or using :cpp:func:`PK_Signature_Options::with_hash` (if both are
+      given they must agree). Naming it allows the scheme to check that the
+      input has the correct length, and to identify the hash in the signature
+      where the format requires it; for example a signature created with RSA
+      ``PKCS1v15`` and an externally computed SHA-256 digest is identical to one
+      created over the original message with ``PKCS1v15`` and ``SHA-256``. If no
+      hash is named the input is signed as an opaque byte string of any length.
+
+      This is supported by DSA, ECDSA, ECGDSA, GOST 34.10 (these four require
+      the ``raw_hash`` module, and reject the option with ``Lookup_Error`` if
+      it is not included in the build), SM2 (where the ``ZA`` identifier hash
+      is then not computed and any context is rejected) and RSA with the
+      ``PKCS1v15`` or ``Raw`` padding schemes. It is rejected by
+      ECKCDSA (whose hash input includes a key-derived prefix), by the RSA
+      padding schemes which must hash the message themselves, and by all other
+      schemes.
+
+      This cannot be combined with :cpp:func:`PK_Signature_Options::with_prehash`.
+
+   .. cpp:function:: PK_Signature_Options with_explicit_trailer_field(bool trailer = true)
+
+      Use the "explicit" trailer field, which identifies the hash function,
+      rather than the "implicit" one. This only applies to the RSA
+      ``ISO_9796_DS2`` and ``ISO_9796_DS3`` padding schemes, which default to
+      the explicit trailer; all other schemes reject it.
+
+   .. cpp:function:: PK_Signature_Options with_provider(std::string_view provider)
+
+      Request a specific implementation. This is rarely needed; the main use is
+      with keys held in hardware (providers ``pkcs11``, ``tpm2``), which accept
+      only their own provider name. The default (an empty string, or ``base``)
+      selects the software implementation.
+
+      Hardware providers support a subset of the options described here. For
+      RSA they require a padding scheme and a hash (PKCS#11 additionally
+      accepts ``Raw`` padding, and an unnamed externally computed prehash with
+      ``PKCS1v15``, ``PSS`` or ``X9.31``), accept a deterministic signature
+      only for the deterministic padding schemes (not ``PSS``), and do not
+      allow choosing the PSS salt size (TPM2) beyond the sizes the token
+      supports (PKCS#11).
+
+   .. cpp:function:: std::string to_string() const
+
+      Formats the options as a string, for debugging and error messages. The
+      format is not fixed.
+
+Options Accepted by Each Scheme
+""""""""""""""""""""""""""""""""""""
+
+The following summarizes which options each signature scheme accepts; any
+option not listed is rejected when the signer or verifier is constructed.
+
+- **RSA**: requires a padding scheme, and (except for ``Raw`` padding) a hash.
+  See :ref:`rsa_padding`. Additionally accepts a salt size (``PSS``,
+  ``ISO_9796_DS2``), an explicit trailer field (``ISO_9796_DS2``,
+  ``ISO_9796_DS3``), an externally computed prehash (``PKCS1v15``, ``Raw``),
+  and a deterministic signature (``PKCS1v15``, ``X9.31``, ``ISO_9796_DS3``,
+  and ``PSS`` or ``ISO_9796_DS2`` with a salt size of zero).
+- **DSA** and **ECDSA**: require a hash. Accept DER encoding, a deterministic
+  signature (RFC 6979), and an externally computed prehash.
+- **ECGDSA** and **GOST 34.10**: require a hash. Accept DER encoding and an
+  externally computed prehash.
+- **ECKCDSA**: requires a hash. Accepts DER encoding.
+- **SM2**: accepts a hash (default SM3), a context (the user identifier), DER
+  encoding, and an externally computed prehash.
+- **Ed25519** and **Ed448**: take no hash. Accept a prehash and a deterministic
+  signature (they are always deterministic).
+- **ML-DSA** (and Dilithium): accept a deterministic signature, and a salt size
+  equal to the scheme's randomness length.
+- **SLH-DSA**, **XMSS**, **HSS-LMS**: accept a hash only if it names the hash
+  the operation reports, and a deterministic signature (SLH-DSA is randomized
+  by default; XMSS and HSS-LMS are always deterministic).
+
+Signing and Verifying
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Signature generation is performed using
 
 .. cpp:class:: PK_Signer
 
    .. cpp:function:: PK_Signer(const Private_Key& key, \
-      const std::string& padding, \
-      Signature_Format format = Siganture_Format::Standard)
+      RandomNumberGenerator& rng, \
+      const PK_Signature_Options& options = PK_Signature_Options())
 
-     Constructs a new signer object for the private key *key* using the
-     hash/padding specified in *padding*. The key must support signature operations. In
-     the current version of the library, this includes e.g. RSA, ECDSA, Dilithium,
-     ECKCDSA, ECGDSA, GOST 34.10-2001, and SM2.
+      Constructs a new signer object for the private key *key*, configured as
+      described by *options* (see :ref:`pk_signature_options`). The key must
+      support signature operations. In the current version of the library, this
+      includes RSA, ECDSA, ML-DSA, ECKCDSA, ECGDSA, SM2, and others.
 
-     .. note::
+      Most common algorithms, including RSA and ECDSA, require the options to
+      specify at least a hash function (and for RSA, a padding scheme). Schemes
+      without any parameters, such as Ed25519, ML-DSA or XMSS, can be used with
+      the default options.
 
-       Botan both supports non-deterministic and deterministic (as per RFC
-       6979) DSA and ECDSA signatures. Either type of signature can be verified
-       by any other (EC)DSA library, regardless of which mode it prefers. If the
-       ``rfc6979`` module is enabled at build time, deterministic DSA and ECDSA
-       signatures will be created.
+      Any option not supported by the key's algorithm causes an exception.
 
-     The proper value of *padding* depends on the algorithm. For many signature
-     schemes including ECDSA and DSA, simply naming a hash function like "SHA-256"
-     is all that is required.
+   .. cpp:function:: PK_Signer(const Private_Key& key, \
+      RandomNumberGenerator& rng, \
+      std::string_view padding, \
+      Signature_Format format = Signature_Format::Standard, \
+      std::string_view provider = "")
 
-     For RSA, more complicated padding is required. The two most common schemes
-     for RSA signature padding are PSS and PKCS1v1.5, so you must specify both
-     the padding mechanism as well as a hash, for example "PSS(SHA-256)"
-     or "PKCS1v15(SHA-256)".
+      Constructs a new signer using the hash/padding specified by the string
+      *padding*, which is the interface available in previous versions of
+      Botan. The string is translated into the equivalent
+      :cpp:class:`PK_Signature_Options`; new code should prefer to construct
+      the options directly.
 
-     Certain newer signature schemes, especially post-quantum based ones, hardcode the
-     hash function associated with their signatures, and no configuration is
-     possible. There *padding* should be left blank, or may possibly be used to identify
-     some algorithm-specific option. For instance Dilithium may be parameterized with
-     "Randomized" or "Deterministic" to choose if the generated signature is randomized or
-     not. If left blank, a default is chosen.
+      The proper value of *padding* depends on the algorithm. For many signature
+      schemes including ECDSA and DSA, simply naming a hash function like
+      "SHA-256" is all that is required.
 
-     Another available option, usable in certain specialized scenarios, is using
-     padding scheme "Raw", where the provided input is treated as if it was
-     already hashed, and directly signed with no other processing.
+      For RSA, more complicated padding is required. The two most common schemes
+      for RSA signature padding are PSS and PKCS1v1.5, so you must specify both
+      the padding mechanism as well as a hash, for example "PSS(SHA-256)"
+      or "PKCS1v15(SHA-256)".
 
-     The *format* defaults to ``Standard`` which is either the usual, or the
-     only, available formatting method, depending on the algorithm. For certain
-     signature schemes including ECDSA, DSA, ECGDSA and ECKCDSA you can also use
-     ``DerSequence``, which will format the signature as an ASN.1 SEQUENCE
-     value. This formatting is used in protocols such as TLS and Bitcoin.
+      Certain newer signature schemes, especially post-quantum based ones, hardcode the
+      hash function associated with their signatures, and no configuration is
+      possible. In this case *padding* should be left blank, or may possibly be used to identify
+      some algorithm-specific option. For instance ML-DSA may be parameterized with
+      "Randomized" or "Deterministic" to choose if the generated signature is randomized or
+      not. If left blank, a default is chosen.
+
+      Another available option, usable in certain specialized scenarios, is using
+      padding scheme "Raw", where the provided input is treated as if it was
+      already hashed, and directly signed with no other processing. This
+      corresponds to :cpp:func:`PK_Signature_Options::with_externally_computed_prehash`.
+
+      The *format* defaults to ``Standard`` which is either the usual, or the
+      only, available formatting method, depending on the algorithm. For certain
+      signature schemes including ECDSA, DSA, ECGDSA and ECKCDSA you can also use
+      ``DerSequence``, which will format the signature as an ASN.1 SEQUENCE
+      value. This formatting is used in protocols such as TLS and Bitcoin. This
+      corresponds to :cpp:func:`PK_Signature_Options::with_der_encoded_signature`.
+
+      .. note::
+
+         Botan both supports non-deterministic and deterministic (as per RFC
+         6979) DSA and ECDSA signatures. Either type of signature can be verified
+         by any other (EC)DSA library, regardless of which mode it prefers. With
+         the string interface, a deterministic signature can be requested by
+         appending ",Deterministic" to the hash name, eg "SHA-256,Deterministic";
+         this requires the ``rfc6979`` module.
 
    .. cpp:function:: void update(const uint8_t* in, size_t length)
    .. cpp:function:: void update(std::span<const uint8_t> in)
@@ -757,10 +1256,22 @@ Signatures are verified using
 .. cpp:class:: PK_Verifier
 
    .. cpp:function:: PK_Verifier(const Public_Key& pub_key, \
-          const std::string& padding, Signature_Format format = Signature_Format::Standard)
+          const PK_Signature_Options& options = PK_Signature_Options())
+
+      Construct a new verifier for signatures associated with public key
+      *pub_key*. The *options* should be the same as those used by the signer
+      (see :ref:`pk_signature_options`); the deterministic signature option is
+      ignored, as it does not affect verification.
+
+   .. cpp:function:: PK_Verifier(const Public_Key& pub_key, \
+          std::string_view padding, \
+          Signature_Format format = Signature_Format::Standard, \
+          std::string_view provider = "")
 
       Construct a new verifier for signatures associated with public key *pub_key*. The
-      *padding* and *format* should be the same as that used by the signer.
+      *padding* and *format* should be the same as that used by the signer. As
+      with :cpp:class:`PK_Signer`, the string is translated into the equivalent
+      :cpp:class:`PK_Signature_Options`.
 
    .. cpp:function:: void update(const uint8_t* in, size_t length)
    .. cpp:function:: void update(std::span<const uint8_t> in)
@@ -787,9 +1298,11 @@ Signatures are verified using
       calling :cpp:func:`PK_Verifier::check_signature` on *sig*. Any data previously
       provided to :cpp:func:`PK_Verifier::update` will also be included.
 
-Botan implements the following signature algorithms:
+Botan implements the following signature algorithms. The string parameter
+each accepts in the string based constructors is described below; the
+equivalent options are listed in :ref:`pk_signature_options`.
 
-1. RSA. Requires a :ref:`padding scheme <emsa>` as parameter.
+1. RSA. Requires a :ref:`padding scheme <rsa_padding>` as parameter.
 #. DSA. Requires a :ref:`hash function <sig_with_hash>` as parameter.
 #. ECDSA. Requires a :ref:`hash function <sig_with_hash>` as parameter.
 #. ECGDSA. Requires a :ref:`hash function <sig_with_hash>` as parameter.
@@ -805,9 +1318,9 @@ Botan implements the following signature algorithms:
    - ``<user ID>`` (uses ``SM3``)
    - ``<user ID>,<HashFunction>``
 
-#. Dilithium.
+#. ML-DSA (Dilithium).
    Takes the optional parameter ``Deterministic`` (default) or ``Randomized``.
-#. SPHINCS+.
+#. SLH-DSA.
    Takes the optional parameter ``Deterministic`` (default) or ``Randomized``.
 #. XMSS. Takes no parameter.
 #. HSS-LMS. Takes no parameter.
@@ -824,10 +1337,15 @@ signature is validated.
 .. literalinclude:: /../src/examples/ecdsa.cpp
    :language: cpp
 
-.. _emsa:
+.. _rsa_padding:
 
-Available signature padding schemes
+RSA signature padding schemes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These signature padding mechanisms are specific to RSA; no other public
+key algorithms included in Botan make use of then. For historical reasons,
+many different padding schemes have been defined for RSA over the years.
+The most common are PSS and the (now obsolete) PKCS1v15.
 
 .. note::
 
@@ -837,27 +1355,36 @@ Available signature padding schemes
 PKCS #1 v1.5 Type 1 (signature)
 """""""""""""""""""""""""""""""
 
-PKCS #1 v1.5 Type 1 (signature) padding or EMSA3 from IEEE 1363.
+PKCS #1 v1.5 Type 1 (signature) padding, aka EMSA3 in IEEE 1363.
 
-- Names: ``PKCS1v15`` / ``EMSA_PKCS1`` / ``EMSA-PKCS1-v1_5`` / ``EMSA3``
+.. note::
+
+   While not as actively unsafe as PKCS1v15 encryption padding is,
+   PKCS1 signature padding is considered quite obsolete.
+
+- Name: ``PKCS1v15``
+- Deprecated aliases: ``EMSA_PKCS1``, ``EMSA-PKCS1-v1_5``, ``EMSA3``
 - Parameters specification:
 
   - ``(<HashFunction>)``
   - ``(Raw,<optional HashFunction>)``
 
 - The raw variant encodes a precomputed hash,
-  optionally with the digest ID of the given hash.
+  optionally with the digest ID of the given hash. With
+  :cpp:class:`PK_Signature_Options` this is selected using
+  :cpp:func:`PK_Signature_Options::with_externally_computed_prehash`.
 - Examples:
   ``PKCS1v15(SHA-256)``,
   ``PKCS1v15(Raw)``,
   ``PKCS1v15(Raw,MD5)``,
 
-EMSA-PSS
-""""""""
+Probabilistic signature scheme (PSS)
+"""""""""""""""""""""""""""""""""""""""
 
-Probabilistic signature scheme (PSS) (called EMSA4 in IEEE 1363).
+Called EMSA4 in IEEE 1363.
 
-- Names: ``PSS`` / ``EMSA-PSS`` / ``PSSR`` / ``PSS-MGF1`` / ``EMSA4``
+- Name: ``PSS``
+- Deprecated aliases: ``EMSA-PSS``, ``PSSR``, ``PSS-MGF1``, ``EMSA4``
 - Parameters specification:
 
   - ``(<HashFunction>)``
@@ -871,7 +1398,8 @@ There also exists a raw version,
 which accepts a pre-hashed buffer instead of the message.
 Don't use this unless you know what you are doing.
 
-- Names: ``PSS_Raw`` / ``PSSR_Raw``
+- Name: ``PSS_Raw``
+- Deprecated alias: ``PSSR_Raw``
 - Parameters specification:
 
   - ``(<HashFunction>)``
@@ -879,6 +1407,9 @@ Don't use this unless you know what you are doing.
 
 ISO-9796-2
 """"""""""
+
+The ISO-9796-2 padding schemes are used for signatures in the EMV contactless
+payment card system. There is likely no reason to use it in other contexts.
 
 ISO-9796-2 - Digital signature scheme 2 (probabilistic).
 
@@ -910,18 +1441,28 @@ i.e. DS2 without a salt.
 X9.31
 """""
 
-EMSA from X9.31 (EMSA2 in IEEE 1363).
+Padding scheme from ANSI X9.31. Called EMSA2 in IEEE 1363.
 
-- Names: ``EMSA2`` / ``EMSA_X931`` / ``X9.31``
+.. deprecated:: 3.7.0
+
+   X9.31 signatures are obsolete, and support for it is deprecated
+
+- Name: ``X9.31``
+- Deprecated aliases: ``EMSA2``, ``EMSA_X931``
 - Parameters specification:
   ``(<HashFunction>)``
-- Example: ``EMSA2(SHA-256)``
+- Example: ``X9.31(SHA-256)``
 
-Raw EMSA
+Raw
 """"""""
 
-Sign inputs directly.
-Don't use this unless you know what you are doing.
+Sign inputs directly with no hashing or padding
+
+.. warning::
+
+   This exists as an escape hatch allowing an application to define some
+   protocol-specific padding scheme, and using it in a naive way is completely
+   insecure. Don't use this unless you know what you are doing.
 
 - Name: ``Raw``
 - Parameters specification:
@@ -929,6 +1470,8 @@ Don't use this unless you know what you are doing.
 - Examples:
   ``Raw``,
   ``Raw(SHA-256)``
+- With :cpp:class:`PK_Signature_Options`, the optional hash is given using
+  :cpp:func:`PK_Signature_Options::with_externally_computed_prehash`.
 
 .. _sig_with_hash:
 
@@ -938,29 +1481,46 @@ Signature with Hash
 For many signature schemes including ECDSA and DSA,
 simply naming a hash function like ``SHA-256`` is all that is required.
 
-Previous versions of Botan required using a hash specifier
-like ``EMSA1(SHA-256)`` when generating or verifying ECDSA/DSA signatures,
-with the specified hash.
-The ``EMSA1`` was a reference to a now obsolete IEEE standard.
+.. note::
+
+   Previous versions of Botan required using a hash specifier like
+   ``EMSA1(SHA-256)`` when generating or verifying ECDSA/DSA signatures, with
+   the specified hash. The ``EMSA1`` was a reference to a now obsolete IEEE
+   standard.
 
 Parameters specification:
 
 - ``<HashFunction>``
-- ``EMSA1(<HashFunction>)``
+- ``EMSA1(<HashFunction>)`` [deprecated]
 
-There also exists a raw mode,
-which accepts a pre-hashed buffer instead of the message.
-Don't use this unless you know what you are doing.
+There also exists a raw mode, which accepts a pre-hashed buffer
+instead of the message.
+
+.. warning::
+
+   This is used for situations where somehow the hash is computed by another
+   module and then signed. Many ways of doing this are insecure. Don't use this
+   unless you know what you are doing.
 
 Parameters specification:
 
 - ``Raw``
 - ``Raw(<HashFunction>)``
 
+With :cpp:class:`PK_Signature_Options`, this mode is selected using
+:cpp:func:`PK_Signature_Options::with_externally_computed_prehash`.
+
 .. _Ed25519_Ed448_variants:
 
 Ed25519 and Ed448 Variants
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. warning::
+
+   Ed25519 and Ed448 have different verification criteria, depending
+   on the implementation. This can be problematic in systems which rely on
+   consensus - see `It’s 255:19AM. Do you know what your validation criteria
+   are? <https://hdevalence.ca/blog/2020-10-04-its-25519am>`_ for details.
 
 Most signature schemes in Botan follow a hash-then-sign paradigm. That is, the
 entire message is digested to a fixed length representative using a collision
@@ -978,15 +1538,16 @@ Parameter specification:
 
 Ed25519ph (or Ed448) (pre-hashed) instead hashes the message with SHA-512 (or SHAKE256(512))
 and then signs the digest plus a special prefix specified in RFC 8032. To use it, specify
-padding name "Ed25519ph" (or "Ed448ph").
+padding name "Ed25519ph" (or "Ed448ph"), or with :cpp:class:`PK_Signature_Options`
+call :cpp:func:`PK_Signature_Options::with_prehash` with no argument.
 
 Parameter specification:
 ``Ed25519ph``
 
 Another variant of pre-hashing is used by GnuPG. There the message is digested
 with any hash function, then the digest is signed. To use it, specify any valid
-hash function. Even if SHA-512 is used, this variant is not compatible with
-Ed25519ph.
+hash function (or pass its name to :cpp:func:`PK_Signature_Options::with_prehash`).
+Even if SHA-512 is used, this variant is not compatible with Ed25519ph.
 
 Parameter specification:
 ``<HashFunction>``
@@ -1017,7 +1578,7 @@ key agreement will use a :ref:`key_derivation_function` on the shared secret to
 produce an output of the desired length.
 
 1. ECDH over GF(p) Weierstrass curves
-#. ECDH over x25519
+#. ECDH over x25519 or x448
 #. DH over prime fields
 
 .. cpp:class:: PK_Key_Agreement
@@ -1029,35 +1590,50 @@ produce an output of the desired length.
 
       Set up to perform key derivation using the given private key and specified KDF.
 
-  .. cpp:function:: SymmetricKey derive_key(size_t key_len, \
-                    const uint8_t in[], \
-                    size_t in_len, \
-                    const uint8_t params[], \
-                    size_t params_len) const
+  .. size_t agreed_value_size() const
+
+      Return the byte length of what the underlying key agreement outputs.
+      For example ECDH with secp256r1 will return 32, while finite field
+      Diffie-Hellman with a 2048 bit modulus will return 256.
 
   .. cpp:function:: SymmetricKey derive_key(size_t key_len, \
-                    std::span<const uint8_t> in, \
-                    const uint8_t params[], size_t params_len) const
+                    const uint8_t peer_key[], \
+                    size_t peer_key_len, \
+                    const uint8_t salt[], \
+                    size_t salt_len) const
 
   .. cpp:function:: SymmetricKey derive_key(size_t key_len, \
-                    const uint8_t in[], size_t in_len, \
-                    const std::string& params = "") const
+                    std::span<const uint8_t> peer_key, \
+                    const uint8_t salt[], size_t salt_len) const
 
   .. cpp:function:: SymmetricKey derive_key(size_t key_len, \
-                    const std::span<const uint8_t> in, \
-                    const std::string& params = "") const
+                    const uint8_t peer_key[], size_t peer_key_len, \
+                    const std::string& salt = "") const
 
-     Return a shared key. The *params* will be hashed along with the shared secret by the
-     KDF; this can be useful to bind the shared secret to a specific usage.
+  .. cpp:function:: SymmetricKey derive_key(size_t key_len, \
+                    std::span<const uint8_t> peer_key, \
+                    const std::string& salt = "") const
 
-     The *in* parameter must be the public key associated with the other party.
+     Return a shared secret key.
+
+     The *peer_key* parameter must be the public key associated with the other party.
+
+     The shared key will be of length *key_len*. If the KDF cannot accommodate
+     outputs of this size (only likely for very large values, or if using KDF1),
+     an exception will be thrown. If a KDF is not in use ("Raw" KDF), *key_len*
+     is ignored and this function will always return directly what the agreement
+     scheme output, of length equal to :cpp:func:`agreed_value_size`.
+
+     The *salt* will be hashed along with the shared secret by the KDF; this can
+     be useful to bind the shared secret to a specific usage. If a KDF is not
+     being used ("Raw" KDF) then any non-empty salt will be rejected.
 
 .. _ecdh_example:
 
 Code Example: ECDH Key Agreement
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The code below performs an unauthenticated ECDH key agreement using the secp521r elliptic
+The code below performs an unauthenticated ECDH key agreement using the secp521r1 elliptic
 curve and applies the key derivation function KDF2(SHA-256) with 256 bit output length to
 the computed shared secret.
 
@@ -1154,24 +1730,26 @@ encapsulated key and returns the shared secret.
 Botan implements the following KEM schemes:
 
 1. RSA
-#. Kyber
+#. ML-KEM (formerly known as Kyber)
 #. FrodoKEM
-#. McEliece
+#. Classic McEliece
+#. HyMES McEliece (deprecated)
 
-.. _kyber_example:
+.. _mlkem_example:
 
-Code Example: Kyber
+Code Example: ML-KEM
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The code below demonstrates key encapsulation using the Kyber post-quantum scheme.
+The code below demonstrates key encapsulation using ML-KEM (FIPS 203), formerly
+known as Kyber.
 
-.. literalinclude:: /../src/examples/kyber.cpp
+.. literalinclude:: /../src/examples/ml_kem.cpp
    :language: cpp
 
 .. _mceliece:
 
-McEliece cryptosystem
---------------------------
+HyMES McEliece cryptosystem
+------------------------------
 
 McEliece is a cryptographic scheme based on error correcting codes which is
 thought to be resistant to quantum computers. First proposed in 1978, it is fast
@@ -1200,15 +1778,16 @@ plaintext is represented directly in the ciphertext, with only a small number of
 bit errors. Thus it is absolutely essential to only use McEliece with a CCA2
 secure scheme.
 
-For a given security level (SL) a McEliece key would use
-parameters n and t, and have the corresponding key sizes listed:
+The deprecated McEliece implementation only supports the following parameter
+sets. For a given security level (SL) a McEliece key would use parameters n and
+t, and have the corresponding key sizes listed:
 
 +-----+------+-----+---------------+----------------+
 | SL  |   n  |   t | public key KB | private key KB |
 +=====+======+=====+===============+================+
 |  80 | 1632 |  33 |            59 |            140 |
 +-----+------+-----+---------------+----------------+
-| 107 | 2280 |  45 |           128 |            300 |
+| 107 | 2480 |  45 |           128 |            300 |
 +-----+------+-----+---------------+----------------+
 | 128 | 2960 |  57 |           195 |            459 |
 +-----+------+-----+---------------+----------------+
@@ -1221,6 +1800,52 @@ parameters n and t, and have the corresponding key sizes listed:
 
 You can check the speed of McEliece with the suggested parameters above
 using ``botan speed McEliece``
+
+Classic McEliece KEM
+--------------------
+
+`Classic McEliece <https://classic.mceliece.org/>`_ is an IND-CCA2 secure key
+encapsulation algorithm based on the McEliece cryptosystem introduced in 1978.
+It is a code-based scheme that relies on conservative security assumptions and
+is considered secure against quantum computers. It is an alternative to
+lattice-based schemes.
+
+Other advantages of Classic McEliece are the small ciphertext size and the fast
+encapsulation. Key generation and decapsulation are slower than in lattice-based
+schemes. The main disadvantage of Classic McEliece is the large public key size,
+ranging from 0.26 MB to 1.36 MB, depending on the instance. Due to its large key
+size, Classic McEliece is recommended for applications where the public key is
+stored for a long time, and memory is not a critical resource. Usage with
+ephemeral keys is not recommended.
+
+Botan's implementation covers the parameter sets of the `NIST round 4
+specification <https://classic.mceliece.org/mceliece-spec-20221023.pdf#page=15>`_
+and of ISO/IEC 18033-2:2006/Amd 2 (published June 2026), which standardized
+Classic McEliece. The ISO document itself is not freely available; the `official
+Classic McEliece specification <https://classic.mceliece.org/>`_, which the
+Classic McEliece team states is `compatible with the ISO standard
+<https://classic.mceliece.org/iso.html>`_, serves as a freely available
+reference. Botan implements the following parameter sets:
+
++------------------+-------------------+-------------------+--------------------+-------------------+
+| Set without f/pc | Set with f        | Set with pc       | Set with pcf       | Public Key Size   |
++==================+===================+===================+====================+===================+
+|  mceliece348864  | mceliece348864f   |                   |                    | 0.26 MB           |
++------------------+-------------------+-------------------+--------------------+-------------------+
+| mceliece460896   | mceliece460896f   |                   |                    | 0.52 MB           |
++------------------+-------------------+-------------------+--------------------+-------------------+
+| mceliece6688128  | mceliece6688128f  | mceliece6688128pc | mceliece6688128pcf | 1.04 MB           |
++------------------+-------------------+-------------------+--------------------+-------------------+
+| mceliece6960119  | mceliece6960119f  | mceliece6960119pc | mceliece6960119pcf | 1.05 MB           |
++------------------+-------------------+-------------------+--------------------+-------------------+
+| mceliece8192128  | mceliece8192128f  | mceliece8192128pc | mceliece8192128pcf | 1.36 MB           |
++------------------+-------------------+-------------------+--------------------+-------------------+
+
+The instances with the suffix 'f' use a faster key generation algorithm that is more consistent in
+runtime. The instances with the suffix 'pc' use plaintext confirmation, which is only specified in
+the ISO standard. The instances mceliece348864(f) are only defined in the NIST round 4 submission.
+The ISO standard additionally defines the instances mceliece460896pc(f), which are not currently
+implemented by Botan.
 
 
 eXtended Merkle Signature Scheme (XMSS)
@@ -1255,6 +1880,15 @@ The following algorithms are implemented:
 #. XMSS-SHAKE_10_512
 #. XMSS-SHAKE_16_512
 #. XMSS-SHAKE_20_512
+#. XMSS-SHA2_10_192
+#. XMSS-SHA2_16_192
+#. XMSS-SHA2_20_192
+#. XMSS-SHAKE256_10_256
+#. XMSS-SHAKE256_16_256
+#. XMSS-SHAKE256_20_256
+#. XMSS-SHAKE256_10_192
+#. XMSS-SHAKE256_16_192
+#. XMSS-SHAKE256_20_192
 
 The algorithm name contains the hash function name, tree height and digest
 width defined by the corresponding parameter set. Choosing `XMSS-SHA2_10_256`
@@ -1312,4 +1946,3 @@ and `draft-fluhrer-lms-more-parm-sets-11 <https://datatracker.ietf.org/doc/html/
 - hash: ``SHA-256``, ``Truncated(SHA-256,192)``, ``SHAKE-256(256)``, ``SHAKE-256(192)``
 - h: ``5``, ``10``, ``15``, ``20``, ``25``
 - w: ``1``, ``2``, ``4``, ``8``
-

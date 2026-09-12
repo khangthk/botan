@@ -10,7 +10,6 @@
 #include <botan/exceptn.h>
 #include <botan/internal/charset.h>
 #include <botan/internal/codec_base.h>
-#include <botan/internal/ct_utils.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/int_utils.h>
 #include <botan/internal/loadstor.h>
@@ -22,26 +21,28 @@ namespace {
 
 class Base64 final {
    public:
-      static std::string name() noexcept { return "base64"; }
+      static std::string name() { return "base64"; }
 
-      static size_t encoding_bytes_in() noexcept { return m_encoding_bytes_in; }
+      static constexpr size_t encoding_bytes_in() noexcept { return m_encoding_bytes_in; }
 
-      static size_t encoding_bytes_out() noexcept { return m_encoding_bytes_out; }
+      static constexpr size_t encoding_bytes_out() noexcept { return m_encoding_bytes_out; }
 
-      static size_t decoding_bytes_in() noexcept { return m_encoding_bytes_out; }
+      static constexpr size_t decoding_bytes_in() noexcept { return m_encoding_bytes_out; }
 
-      static size_t decoding_bytes_out() noexcept { return m_encoding_bytes_in; }
+      static constexpr size_t decoding_bytes_out() noexcept { return m_encoding_bytes_in; }
 
-      static size_t bits_consumed() noexcept { return m_encoding_bits; }
+      static constexpr size_t bits_consumed() noexcept { return m_encoding_bits; }
 
-      static size_t remaining_bits_before_padding() noexcept { return m_remaining_bits_before_padding; }
+      static constexpr size_t remaining_bits_before_padding() noexcept { return m_remaining_bits_before_padding; }
 
-      static size_t encode_max_output(size_t input_length) {
-         return (round_up(input_length, m_encoding_bytes_in) / m_encoding_bytes_in) * m_encoding_bytes_out;
+      static constexpr size_t encode_max_output(size_t input_length) {
+         const size_t encoding_blocks = round_up(input_length, m_encoding_bytes_in) / m_encoding_bytes_in;
+         return mul_or_throw(encoding_blocks, m_encoding_bytes_out, "Input too large to base64 encode");
       }
 
-      static size_t decode_max_output(size_t input_length) {
-         return (round_up(input_length, m_encoding_bytes_out) * m_encoding_bytes_in) / m_encoding_bytes_out;
+      static constexpr size_t decode_max_output(size_t input_length) {
+         // Divide before multiply to avoid overflow; round_up makes the division exact.
+         return (round_up(input_length, m_encoding_bytes_out) / m_encoding_bytes_out) * m_encoding_bytes_in;
       }
 
       static void encode(char out[4], const uint8_t in[3]) noexcept;
@@ -59,11 +60,11 @@ class Base64 final {
       static size_t bytes_to_remove(size_t final_truncate) { return final_truncate; }
 
    private:
-      static const size_t m_encoding_bits = 6;
-      static const size_t m_remaining_bits_before_padding = 8;
+      static constexpr size_t m_encoding_bits = 6;
+      static constexpr size_t m_remaining_bits_before_padding = 8;
 
-      static const size_t m_encoding_bytes_in = 3;
-      static const size_t m_encoding_bytes_out = 4;
+      static constexpr size_t m_encoding_bytes_in = 3;
+      static constexpr size_t m_encoding_bytes_out = 4;
 };
 
 uint32_t lookup_base64_chars(uint32_t x32) {
@@ -133,7 +134,7 @@ uint8_t Base64::lookup_binary_value(char input) noexcept {
    // This is the offset added to x to get the value
    const uint64_t val_v = 0xbfb904 ^ (0xFF000000 - (x << 24));
 
-   uint8_t z = x + static_cast<uint8_t>(val_v >> (8 * index_of_first_set_byte(v_mask)));
+   const uint8_t z = x + static_cast<uint8_t>(val_v >> (8 * index_of_first_set_byte(v_mask)));
 
    // Valid base64 special characters, and some whitespace chars
    constexpr uint64_t specials_i = make_uint64(0, '+', '/', '=', ' ', '\n', '\t', '\r');

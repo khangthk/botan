@@ -8,9 +8,9 @@
 #ifndef BOTAN_PUBKEY_H_
 #define BOTAN_PUBKEY_H_
 
-#include <botan/asn1_obj.h>
 #include <botan/pk_keys.h>
 #include <botan/pk_ops_fwd.h>
+#include <botan/pk_options.h>
 #include <botan/symkey.h>
 #include <span>
 #include <string>
@@ -57,7 +57,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_Encryptor {
       /**
       * Return an upper bound on the ciphertext length
       */
-      virtual size_t ciphertext_length(size_t ctext_len) const = 0;
+      virtual size_t ciphertext_length(size_t ptext_len) const = 0;
 
       PK_Encryptor() = default;
       virtual ~PK_Encryptor() = default;
@@ -134,6 +134,12 @@ class BOTAN_PUBLIC_API(2, 0) PK_Decryptor {
       */
       virtual size_t plaintext_length(size_t ctext_len) const = 0;
 
+      /**
+      * Return an upper bound on the ciphertext length for a particular
+      * plaintext input length.
+      */
+      virtual size_t ciphertext_length(size_t ptext_len) const = 0;
+
       PK_Decryptor() = default;
       virtual ~PK_Decryptor() = default;
 
@@ -155,10 +161,25 @@ class BOTAN_PUBLIC_API(2, 0) PK_Decryptor {
 class BOTAN_PUBLIC_API(2, 0) PK_Signer final {
    public:
       /**
+      * Construct a PK signer
+      *
+      * @param key the key to use to generate signatures
+      * @param rng the random generator to use
+      * @param options controls the behavior of the signature generation, eg which hash function to use
+      *
+      * Note that most common algorithms (eg RSA or ECDSA) require an options
+      * parameter to specify at least which hash function to use. Schemes without
+      * any parameters (eg Ed25519, ML-DSA, XMSS) can be used with the default.
+      */
+      PK_Signer(const Private_Key& key,
+                RandomNumberGenerator& rng,
+                const PK_Signature_Options& options = PK_Signature_Options());
+
+      /**
       * Construct a PK Signer.
       * @param key the key to use inside this signer
       * @param rng the random generator to use
-      * @param padding the padding/hash to use, eg "EMSA_PKCS1(SHA-256)"
+      * @param padding the padding/hash to use, eg "SHA-512" or "PSS(SHA-256)"
       * @param format the signature format to use
       * @param provider the provider to use
       */
@@ -261,7 +282,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_Signer final {
    private:
       std::unique_ptr<PK_Ops::Signature> m_op;
       Signature_Format m_sig_format;
-      size_t m_parts, m_part_size;
+      std::optional<size_t> m_sig_element_size;
 };
 
 /**
@@ -271,6 +292,14 @@ class BOTAN_PUBLIC_API(2, 0) PK_Signer final {
 */
 class BOTAN_PUBLIC_API(2, 0) PK_Verifier final {
    public:
+      /**
+      * Construct a PK Verifier.
+      * @param pub_key the public key to verify against
+      * @param options relating to the signature; schemes without any parameters
+      * (eg Ed25519, ML-DSA, XMSS) can be used with the default.
+      */
+      explicit PK_Verifier(const Public_Key& pub_key, const PK_Signature_Options& options = PK_Signature_Options());
+
       /**
       * Construct a PK Verifier.
       * @param pub_key the public key to verify against
@@ -375,7 +404,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_Verifier final {
       * Set the format of the signatures fed to this verifier.
       * @param format the signature format to use
       */
-      void set_input_format(Signature_Format format);
+      BOTAN_DEPRECATED("Provide Signature_Format to the constructor") void set_input_format(Signature_Format format);
 
       /**
       * Return the hash function which is being used to verify signatures.
@@ -388,7 +417,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_Verifier final {
    private:
       std::unique_ptr<PK_Ops::Verification> m_op;
       Signature_Format m_sig_format;
-      size_t m_parts, m_part_size;
+      std::optional<size_t> m_sig_element_size;
 };
 
 /**
@@ -419,44 +448,57 @@ class BOTAN_PUBLIC_API(2, 0) PK_Key_Agreement final {
       /**
       * Perform Key Agreement Operation
       * @param key_len the desired key output size (ignored if "Raw" KDF is used)
-      * @param in the other parties key
-      * @param in_len the length of in in bytes
-      * @param params extra derivation params
-      * @param params_len the length of params in bytes
+      * @param peer_key the other parties key
+      * @param salt extra derivation salt
       */
-      SymmetricKey derive_key(
-         size_t key_len, const uint8_t in[], size_t in_len, const uint8_t params[], size_t params_len) const;
+      SymmetricKey derive_key(size_t key_len, std::span<const uint8_t> peer_key, std::span<const uint8_t> salt) const;
 
       /**
       * Perform Key Agreement Operation
       * @param key_len the desired key output size (ignored if "Raw" KDF is used)
-      * @param in the other parties key
-      * @param params extra derivation params
-      * @param params_len the length of params in bytes
+      * @param peer_key the other parties key
+      * @param peer_key_len the length of peer_key in bytes
+      * @param salt extra derivation salt
+      * @param salt_len the length of salt in bytes
       */
-      SymmetricKey derive_key(size_t key_len,
-                              std::span<const uint8_t> in,
-                              const uint8_t params[],
-                              size_t params_len) const {
-         return derive_key(key_len, in.data(), in.size(), params, params_len);
+      SymmetricKey derive_key(
+         size_t key_len, const uint8_t peer_key[], size_t peer_key_len, const uint8_t salt[], size_t salt_len) const {
+         return this->derive_key(key_len, {peer_key, peer_key_len}, {salt, salt_len});
       }
 
       /**
       * Perform Key Agreement Operation
       * @param key_len the desired key output size (ignored if "Raw" KDF is used)
-      * @param in the other parties key
-      * @param in_len the length of in in bytes
-      * @param params extra derivation params
+      * @param peer_key the other parties key
+      * @param salt extra derivation salt
+      * @param salt_len the length of salt in bytes
       */
-      SymmetricKey derive_key(size_t key_len, const uint8_t in[], size_t in_len, std::string_view params = "") const;
+      SymmetricKey derive_key(size_t key_len,
+                              std::span<const uint8_t> peer_key,
+                              const uint8_t salt[],
+                              size_t salt_len) const {
+         return derive_key(key_len, peer_key.data(), peer_key.size(), salt, salt_len);
+      }
 
       /**
       * Perform Key Agreement Operation
       * @param key_len the desired key output size (ignored if "Raw" KDF is used)
-      * @param in the other parties key
-      * @param params extra derivation params
+      * @param peer_key the other parties key
+      * @param peer_key_len the length of peer_key in bytes
+      * @param salt extra derivation info
       */
-      SymmetricKey derive_key(size_t key_len, const std::span<const uint8_t> in, std::string_view params = "") const;
+      SymmetricKey derive_key(size_t key_len,
+                              const uint8_t peer_key[],
+                              size_t peer_key_len,
+                              std::string_view salt = "") const;
+
+      /**
+      * Perform Key Agreement Operation
+      * @param key_len the desired key output size (ignored if "Raw" KDF is used)
+      * @param peer_key the other parties key
+      * @param salt extra derivation info
+      */
+      SymmetricKey derive_key(size_t key_len, std::span<const uint8_t> peer_key, std::string_view salt = "") const;
 
       /**
       * Return the underlying size of the value that is agreed.
@@ -504,13 +546,15 @@ class BOTAN_PUBLIC_API(2, 0) PK_Encryptor_EME final : public PK_Encryptor {
       size_t ciphertext_length(size_t ptext_len) const override;
 
    private:
-      std::vector<uint8_t> enc(const uint8_t[], size_t, RandomNumberGenerator& rng) const override;
+      std::vector<uint8_t> enc(const uint8_t ptext[], size_t len, RandomNumberGenerator& rng) const override;
 
       std::unique_ptr<PK_Ops::Encryption> m_op;
 };
 
 /**
-* Decryption with an MR algorithm and an EME.
+* Decryption with a padding scheme.
+*
+* This is typically only used with RSA
 */
 class BOTAN_PUBLIC_API(2, 0) PK_Decryptor_EME final : public PK_Decryptor {
    public:
@@ -518,15 +562,17 @@ class BOTAN_PUBLIC_API(2, 0) PK_Decryptor_EME final : public PK_Decryptor {
       * Construct an instance.
       * @param key the key to use inside the decryptor
       * @param rng the random generator to use
-      * @param eme the EME to use
+      * @param padding the padding scheme to use
       * @param provider the provider to use
       */
       PK_Decryptor_EME(const Private_Key& key,
                        RandomNumberGenerator& rng,
-                       std::string_view eme,
+                       std::string_view padding,
                        std::string_view provider = "");
 
-      size_t plaintext_length(size_t ptext_len) const override;
+      size_t plaintext_length(size_t ctext_len) const override;
+
+      size_t ciphertext_length(size_t ptext_len) const override;
 
       ~PK_Decryptor_EME() override;
 
@@ -563,7 +609,8 @@ class KEM_Encapsulation final {
       /**
        * @returns the pair (encapsulated key, key) extracted from @p kem
        */
-      static std::pair<std::vector<uint8_t>, secure_vector<uint8_t>> destructure(KEM_Encapsulation&& kem) {
+      static std::pair<std::vector<uint8_t>, secure_vector<uint8_t>> destructure(
+         KEM_Encapsulation&& kem) /* NOLINT(*param-not-moved*) */ {
          return std::make_pair(std::exchange(kem.m_encapsulated_shared_key, {}), std::exchange(kem.m_shared_key, {}));
       }
 
@@ -589,7 +636,9 @@ class BOTAN_PUBLIC_API(2, 0) PK_KEM_Encryptor final {
       * @param kem_param additional KEM parameters
       * @param provider the provider to use
       */
-      PK_KEM_Encryptor(const Public_Key& key, std::string_view kem_param = "", std::string_view provider = "");
+      BOTAN_FUTURE_EXPLICIT PK_KEM_Encryptor(const Public_Key& key,
+                                             std::string_view kem_param = "",
+                                             std::string_view provider = "");
 
       /**
       * Construct an instance.
@@ -602,10 +651,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_KEM_Encryptor final {
       PK_KEM_Encryptor(const Public_Key& key,
                        RandomNumberGenerator& rng,
                        std::string_view kem_param = "",
-                       std::string_view provider = "") :
-            PK_KEM_Encryptor(key, kem_param, provider) {
-         BOTAN_UNUSED(rng);
-      }
+                       std::string_view provider = "");
 
       ~PK_KEM_Encryptor();
 
@@ -703,7 +749,7 @@ class BOTAN_PUBLIC_API(2, 0) PK_KEM_Encryptor final {
          this->encrypt(out_encapsulated_key, out_shared_key, rng, desired_shared_key_len, {salt, salt_len});
       }
 
-      BOTAN_DEPRECATED("use overload where rng comes after the out-paramters")
+      BOTAN_DEPRECATED("use overload where rng comes after the out-parameters")
       void encrypt(secure_vector<uint8_t>& out_encapsulated_key,
                    secure_vector<uint8_t>& out_shared_key,
                    size_t desired_shared_key_len,

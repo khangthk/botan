@@ -8,8 +8,8 @@
 
 #include <botan/tls_session_manager_hybrid.h>
 
-#include <botan/rng.h>
-
+#include <botan/assert.h>
+#include <botan/tls_session.h>
 #include <functional>
 
 namespace Botan::TLS {
@@ -23,6 +23,12 @@ Session_Manager_Hybrid::Session_Manager_Hybrid(std::unique_ptr<Session_Manager> 
       m_stateless(credentials_manager, rng),
       m_prefer_tickets(prefer_tickets) {
    BOTAN_ASSERT_NONNULL(m_stateful);
+}
+
+std::vector<Session_with_Handle> Session_Manager_Hybrid::find(const Server_Information& info,
+                                                              Callbacks& callbacks,
+                                                              const Policy& policy) {
+   return m_stateful->find(info, callbacks, policy);
 }
 
 std::optional<Session_Handle> Session_Manager_Hybrid::establish(const Session& session,
@@ -82,6 +88,15 @@ std::optional<Session> Session_Manager_Hybrid::retrieve(const Session_Handle& ha
 
 bool Session_Manager_Hybrid::emits_session_tickets() {
    return m_stateless.emits_session_tickets() || m_stateful->emits_session_tickets();
+}
+
+std::optional<Session> Session_Manager_Hybrid::retrieve_one(const Session_Handle& /*handle*/) {
+   BOTAN_ASSERT(false, "This should never be called");
+}
+
+std::vector<Session_with_Handle> Session_Manager_Hybrid::find_some(const Server_Information& /*info*/,
+                                                                   size_t /*max_sessions_hint*/) {
+   BOTAN_ASSERT(false, "This should never be called");
 }
 
 }  // namespace Botan::TLS

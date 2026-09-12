@@ -17,18 +17,19 @@ BOTAN_FFI_DECLARE_STRUCT(botan_mac_struct, Botan::MessageAuthenticationCode, 0xA
 
 int botan_mac_init(botan_mac_t* mac, const char* mac_name, uint32_t flags) {
    return ffi_guard_thunk(__func__, [=]() -> int {
-      if(!mac || !mac_name || flags != 0) {
+      if(any_null_pointers(mac, mac_name)) {
          return BOTAN_FFI_ERROR_NULL_POINTER;
       }
 
-      std::unique_ptr<Botan::MessageAuthenticationCode> m = Botan::MessageAuthenticationCode::create(mac_name);
-
-      if(m == nullptr) {
-         return BOTAN_FFI_ERROR_NOT_IMPLEMENTED;
+      if(flags != 0) {
+         return BOTAN_FFI_ERROR_BAD_FLAG;
       }
 
-      *mac = new botan_mac_struct(std::move(m));
-      return BOTAN_FFI_SUCCESS;
+      if(auto m = Botan::MessageAuthenticationCode::create(mac_name)) {
+         return ffi_new_object(mac, std::move(m));
+      } else {
+         return BOTAN_FFI_ERROR_NOT_IMPLEMENTED;
+      }
    });
 }
 
@@ -37,14 +38,24 @@ int botan_mac_destroy(botan_mac_t mac) {
 }
 
 int botan_mac_set_key(botan_mac_t mac, const uint8_t* key, size_t key_len) {
+   if(key_len > 0 && key == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
    return BOTAN_FFI_VISIT(mac, [=](auto& m) { m.set_key(key, key_len); });
 }
 
 int botan_mac_set_nonce(botan_mac_t mac, const uint8_t* nonce, size_t nonce_len) {
+   if(nonce_len > 0 && nonce == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+
    return BOTAN_FFI_VISIT(mac, [=](auto& m) { m.start(nonce, nonce_len); });
 }
 
 int botan_mac_output_length(botan_mac_t mac, size_t* out) {
+   if(out == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
    return BOTAN_FFI_VISIT(mac, [=](const auto& m) { *out = m.output_length(); });
 }
 
@@ -53,10 +64,19 @@ int botan_mac_clear(botan_mac_t mac) {
 }
 
 int botan_mac_update(botan_mac_t mac, const uint8_t* buf, size_t len) {
+   if(len == 0) {
+      return BOTAN_FFI_SUCCESS;
+   }
+   if(buf == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
    return BOTAN_FFI_VISIT(mac, [=](auto& m) { m.update(buf, len); });
 }
 
 int botan_mac_final(botan_mac_t mac, uint8_t out[]) {
+   if(out == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
    return BOTAN_FFI_VISIT(mac, [=](auto& m) { m.final(out); });
 }
 
@@ -69,12 +89,15 @@ int botan_mac_get_keyspec(botan_mac_t mac,
                           size_t* out_maximum_keylength,
                           size_t* out_keylength_modulo) {
    return BOTAN_FFI_VISIT(mac, [=](auto& m) {
-      if(out_minimum_keylength)
+      if(out_minimum_keylength) {
          *out_minimum_keylength = m.minimum_keylength();
-      if(out_maximum_keylength)
+      }
+      if(out_maximum_keylength) {
          *out_maximum_keylength = m.maximum_keylength();
-      if(out_keylength_modulo)
+      }
+      if(out_keylength_modulo) {
          *out_keylength_modulo = m.key_spec().keylength_multiple();
+      }
    });
 }
 }

@@ -227,7 +227,7 @@ Maps:
        ``--disable-modules`` or ``--disable-deprecated-features``.
 
  * ``libs`` specifies additional libraries which should be linked if this module is
-   included. It maps from the OS name to a list of libraries (comma seperated).
+   included. It maps from the OS name to a list of libraries (comma separated).
  * ``frameworks`` is a macOS/iOS specific feature which maps from an OS name to
    a framework.
 
@@ -358,6 +358,8 @@ Maps:
    flags.
  * ``so_link_commands`` maps from operating system to the command to
    use to build a shared object.
+ * ``ct_value_barrier`` chooses how the compiler should implement
+   constant-time value barriers, see ct_utils.h for details.
 
 Variables:
   * ``binary_name`` the default name of the compiler binary.
@@ -410,7 +412,7 @@ Variables:
     takes this from the OS specific information.
   * ``ar_output_to`` gives the flag to pass to ``ar_command`` to specify where to
     output the static library.
-  * ``werror_flags`` gives the complier flags to treat warnings as errors.
+  * ``werror_flags`` gives the compiler flags to treat warnings as errors.
 
 Supporting a new OS
 ---------------------------

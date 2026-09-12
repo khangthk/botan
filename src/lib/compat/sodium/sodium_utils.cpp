@@ -11,7 +11,6 @@
 #include <botan/internal/chacha.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/os_utils.h>
 #include <cstdlib>
 
 namespace Botan {
@@ -26,7 +25,7 @@ uint32_t Sodium::randombytes_uniform(uint32_t upper_bound) {
    }
 
    // Not completely uniform
-   uint64_t x;
+   uint64_t x = 0;
    randombytes_buf(&x, sizeof(x));
    return x % upper_bound;
 }
@@ -41,15 +40,15 @@ void Sodium::randombytes_buf_deterministic(void* buf, size_t size, const uint8_t
 }
 
 int Sodium::crypto_verify_16(const uint8_t x[16], const uint8_t y[16]) {
-   return static_cast<int>(CT::is_equal(x, y, 16).select(1, 0));
+   return static_cast<int>(CT::is_equal(x, y, 16).select(1, 0)) - 1;
 }
 
 int Sodium::crypto_verify_32(const uint8_t x[32], const uint8_t y[32]) {
-   return static_cast<int>(CT::is_equal(x, y, 32).select(1, 0));
+   return static_cast<int>(CT::is_equal(x, y, 32).select(1, 0)) - 1;
 }
 
 int Sodium::crypto_verify_64(const uint8_t x[64], const uint8_t y[64]) {
-   return static_cast<int>(CT::is_equal(x, y, 64).select(1, 0));
+   return static_cast<int>(CT::is_equal(x, y, 64).select(1, 0)) - 1;
 }
 
 void Sodium::sodium_memzero(void* ptr, size_t len) {
@@ -90,15 +89,16 @@ void Sodium::sodium_increment(uint8_t b[], size_t len) {
    uint8_t carry = 1;
    for(size_t i = 0; i != len; ++i) {
       b[i] += carry;
-      carry &= (b[i] == 0);
+      carry &= CT::Mask<uint8_t>::is_zero(b[i]).if_set_return(1);
    }
 }
 
 void Sodium::sodium_add(uint8_t a[], const uint8_t b[], size_t len) {
-   uint8_t carry = 0;
+   uint16_t carry = 0;
    for(size_t i = 0; i != len; ++i) {
-      a[i] += b[i] + carry;
-      carry = (a[i] < b[i]);
+      carry += static_cast<uint16_t>(a[i]) + b[i];
+      a[i] = static_cast<uint8_t>(carry);
+      carry >>= 8;
    }
 }
 
@@ -109,8 +109,11 @@ void* Sodium::sodium_malloc(size_t size) {
       return nullptr;
    }
 
-   // NOLINTNEXTLINE(*-no-malloc)
+   // NOLINTNEXTLINE(*-no-malloc,*-owning-memory,*-const-correctness)
    uint8_t* p = static_cast<uint8_t*>(std::calloc(size + sizeof(len), 1));
+   if(p == nullptr) {
+      return nullptr;
+   }
    store_le(len, p);
    return p + 8;
 }
@@ -123,26 +126,25 @@ void Sodium::sodium_free(void* ptr) {
    uint8_t* p = static_cast<uint8_t*>(ptr) - 8;
    const uint64_t len = load_le<uint64_t>(p, 0);
    secure_scrub_memory(ptr, static_cast<size_t>(len));
-   // NOLINTNEXTLINE(*-no-malloc)
+   // NOLINTNEXTLINE(*-no-malloc,*-owning-memory)
    std::free(p);
 }
 
 void* Sodium::sodium_allocarray(size_t count, size_t size) {
-   const size_t bytes = count * size;
-   if(bytes < count || bytes < size) {
+   if(count > 0 && size > SIZE_MAX / count) {
       return nullptr;
    }
-   return sodium_malloc(bytes);
+   return sodium_malloc(count * size);
 }
 
 int Sodium::sodium_mprotect_noaccess(void* ptr) {
-   OS::page_prohibit_access(ptr);
-   return 0;
+   BOTAN_UNUSED(ptr);
+   return -1;
 }
 
 int Sodium::sodium_mprotect_readwrite(void* ptr) {
-   OS::page_allow_access(ptr);
-   return 0;
+   BOTAN_UNUSED(ptr);
+   return -1;
 }
 
 }  // namespace Botan

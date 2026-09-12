@@ -9,15 +9,15 @@
 #include <botan/bigint.h>
 #include <botan/numthry.h>
 
-void fuzz(const uint8_t in[], size_t len) {
-   if(len > 8192 / 8) {
+void fuzz(std::span<const uint8_t> in) {
+   if(in.size() > 8192 / 8) {
       return;
    }
 
-   Botan::BigInt x = Botan::BigInt::decode(in, len);
+   const Botan::BigInt x = Botan::BigInt::from_bytes(in);
 
-   Botan::BigInt x_sqr = square(x);
-   Botan::BigInt x_mul = x * x;
+   const Botan::BigInt x_sqr = square(x);
+   const Botan::BigInt x_mul = x * x;
 
    FUZZER_ASSERT_EQUAL(x_sqr, x_mul);
 }

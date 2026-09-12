@@ -6,9 +6,11 @@
 
 #include <botan/tls_algos.h>
 
-#include <botan/ec_group.h>
 #include <botan/exceptn.h>
 #include <botan/internal/fmt.h>
+
+#include <algorithm>
+#include <array>
 
 namespace Botan::TLS {
 
@@ -134,6 +136,142 @@ Auth_Method auth_method_from_string(std::string_view str) {
    throw Invalid_Argument(fmt("Unknown TLS signature method '{}'", str));
 }
 
+namespace {
+
+consteval auto available_group_params() {
+   auto codes = std::array {
+#if defined(BOTAN_HAS_PCURVES_SECP256R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+      Group_Params_Code::SECP256R1,
+#endif
+
+#if defined(BOTAN_HAS_PCURVES_SECP384R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::SECP384R1,
+#endif
+
+#if defined(BOTAN_HAS_PCURVES_SECP521R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::SECP521R1,
+#endif
+
+#if defined(BOTAN_HAS_PCURVES_BRAINPOOL256R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::BRAINPOOL256R1, Group_Params_Code::BRAINPOOL256R1TLS13,
+#endif
+
+#if defined(BOTAN_HAS_PCURVES_BRAINPOOL384R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::BRAINPOOL384R1, Group_Params_Code::BRAINPOOL384R1TLS13,
+#endif
+
+#if defined(BOTAN_HAS_PCURVES_BRAINPOOL512R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::BRAINPOOL512R1, Group_Params_Code::BRAINPOOL512R1TLS13,
+#endif
+
+#if defined(BOTAN_HAS_X25519)
+         Group_Params_Code::X25519,
+#endif
+
+#if defined(BOTAN_HAS_X448)
+         Group_Params_Code::X448,
+#endif
+
+#if defined(BOTAN_HAS_DIFFIE_HELLMAN)
+         Group_Params_Code::FFDHE_2048, Group_Params_Code::FFDHE_3072, Group_Params_Code::FFDHE_4096,
+         Group_Params_Code::FFDHE_6144, Group_Params_Code::FFDHE_8192,
+#endif
+
+#if defined(BOTAN_HAS_ML_KEM)
+         Group_Params_Code::ML_KEM_512, Group_Params_Code::ML_KEM_768, Group_Params_Code::ML_KEM_1024,
+
+   #if defined(BOTAN_HAS_PCURVES_SECP256R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768,
+   #endif
+
+   #if defined(BOTAN_HAS_PCURVES_SECP384R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
+   #endif
+
+   #if defined(BOTAN_HAS_X25519)
+         Group_Params_Code::HYBRID_X25519_ML_KEM_768,
+   #endif
+#endif
+
+#if defined(BOTAN_HAS_FRODOKEM)
+         Group_Params_Code::eFRODOKEM_640_SHAKE_OQS, Group_Params_Code::eFRODOKEM_976_SHAKE_OQS,
+         Group_Params_Code::eFRODOKEM_1344_SHAKE_OQS, Group_Params_Code::eFRODOKEM_640_AES_OQS,
+         Group_Params_Code::eFRODOKEM_976_AES_OQS, Group_Params_Code::eFRODOKEM_1344_AES_OQS,
+
+   #if defined(BOTAN_HAS_PCURVES_SECP256R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::HYBRID_SECP256R1_eFRODOKEM_640_SHAKE_OQS,
+         Group_Params_Code::HYBRID_SECP256R1_eFRODOKEM_640_AES_OQS,
+   #endif
+
+   #if defined(BOTAN_HAS_PCURVES_SECP384R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::HYBRID_SECP384R1_eFRODOKEM_976_SHAKE_OQS,
+         Group_Params_Code::HYBRID_SECP384R1_eFRODOKEM_976_AES_OQS,
+   #endif
+
+   #if defined(BOTAN_HAS_PCURVES_SECP521R1) || defined(BOTAN_HAS_PCURVES_GENERIC)
+         Group_Params_Code::HYBRID_SECP521R1_eFRODOKEM_1344_SHAKE_OQS,
+         Group_Params_Code::HYBRID_SECP521R1_eFRODOKEM_1344_AES_OQS,
+   #endif
+
+   #if defined(BOTAN_HAS_X25519)
+         Group_Params_Code::HYBRID_X25519_eFRODOKEM_640_SHAKE_OQS,
+         Group_Params_Code::HYBRID_X25519_eFRODOKEM_640_AES_OQS,
+   #endif
+
+   #if defined(BOTAN_HAS_X448)
+         Group_Params_Code::HYBRID_X448_eFRODOKEM_976_SHAKE_OQS, Group_Params_Code::HYBRID_X448_eFRODOKEM_976_AES_OQS,
+   #endif
+#endif
+   };
+
+   std::sort(codes.begin(), codes.end());
+
+   return codes;
+}
+
+}  // namespace
+
+bool Group_Params::is_available() const {
+   // For group codes we recognize, check the build-time availability table.
+   // Unknown codes may be user-supplied custom groups handled via callbacks.
+   if(to_string().has_value()) {
+      static constexpr auto codes = available_group_params();
+      return std::binary_search(codes.begin(), codes.end(), this->code());
+   }
+   return true;
+}
+
+std::optional<Group_Params_Code> Group_Params::pqc_hybrid_ecc() const {
+   switch(m_code) {
+      case Group_Params_Code::HYBRID_X25519_ML_KEM_768:
+
+      case Group_Params_Code::HYBRID_X25519_eFRODOKEM_640_SHAKE_OQS:
+      case Group_Params_Code::HYBRID_X25519_eFRODOKEM_640_AES_OQS:
+         return Group_Params_Code::X25519;
+
+      case Group_Params_Code::HYBRID_X448_eFRODOKEM_976_SHAKE_OQS:
+      case Group_Params_Code::HYBRID_X448_eFRODOKEM_976_AES_OQS:
+         return Group_Params_Code::X448;
+
+      case Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768:
+      case Group_Params_Code::HYBRID_SECP256R1_eFRODOKEM_640_SHAKE_OQS:
+      case Group_Params_Code::HYBRID_SECP256R1_eFRODOKEM_640_AES_OQS:
+         return Group_Params_Code::SECP256R1;
+
+      case Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024:
+      case Group_Params_Code::HYBRID_SECP384R1_eFRODOKEM_976_SHAKE_OQS:
+      case Group_Params_Code::HYBRID_SECP384R1_eFRODOKEM_976_AES_OQS:
+         return Group_Params_Code::SECP384R1;
+
+      case Group_Params_Code::HYBRID_SECP521R1_eFRODOKEM_1344_SHAKE_OQS:
+      case Group_Params_Code::HYBRID_SECP521R1_eFRODOKEM_1344_AES_OQS:
+         return Group_Params_Code::SECP521R1;
+
+      default:
+         return {};
+   }
+}
+
 std::optional<Group_Params> Group_Params::from_string(std::string_view group_name) {
    if(group_name == "secp256r1") {
       return Group_Params::SECP256R1;
@@ -159,6 +297,15 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
    if(group_name == "x448") {
       return Group_Params::X448;
    }
+   if(group_name == "brainpool256r1tls13") {
+      return Group_Params::BRAINPOOL256R1TLS13;
+   }
+   if(group_name == "brainpool384r1tls13") {
+      return Group_Params::BRAINPOOL384R1TLS13;
+   }
+   if(group_name == "brainpool512r1tls13") {
+      return Group_Params::BRAINPOOL512R1TLS13;
+   }
 
    if(group_name == "ffdhe/ietf/2048") {
       return Group_Params::FFDHE_2048;
@@ -176,14 +323,14 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
       return Group_Params::FFDHE_8192;
    }
 
-   if(group_name == "Kyber-512-r3") {
-      return Group_Params::KYBER_512_R3_OQS;
+   if(group_name == "ML-KEM-512") {
+      return Group_Params::ML_KEM_512;
    }
-   if(group_name == "Kyber-768-r3") {
-      return Group_Params::KYBER_768_R3_OQS;
+   if(group_name == "ML-KEM-768") {
+      return Group_Params::ML_KEM_768;
    }
-   if(group_name == "Kyber-1024-r3") {
-      return Group_Params::KYBER_1024_R3_OQS;
+   if(group_name == "ML-KEM-1024") {
+      return Group_Params::ML_KEM_1024;
    }
 
    if(group_name == "eFrodoKEM-640-SHAKE") {
@@ -205,18 +352,16 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
       return Group_Params::eFRODOKEM_1344_AES_OQS;
    }
 
-   if(group_name == "x25519/Kyber-512-r3/cloudflare") {
-      return Group_Params::HYBRID_X25519_KYBER_512_R3_CLOUDFLARE;
+   if(group_name == "x25519/ML-KEM-768") {
+      return Group_Params::HYBRID_X25519_ML_KEM_768;
    }
-   if(group_name == "x25519/Kyber-512-r3") {
-      return Group_Params::HYBRID_X25519_KYBER_512_R3_OQS;
+   if(group_name == "secp256r1/ML-KEM-768") {
+      return Group_Params::HYBRID_SECP256R1_ML_KEM_768;
    }
-   if(group_name == "x25519/Kyber-768-r3") {
-      return Group_Params::HYBRID_X25519_KYBER_768_R3_OQS;
+   if(group_name == "secp384r1/ML-KEM-1024") {
+      return Group_Params::HYBRID_SECP384R1_ML_KEM_1024;
    }
-   if(group_name == "x448/Kyber-768-r3") {
-      return Group_Params::HYBRID_X448_KYBER_768_R3_OQS;
-   }
+
    if(group_name == "x25519/eFrodoKEM-640-SHAKE") {
       return Group_Params::HYBRID_X25519_eFRODOKEM_640_SHAKE_OQS;
    }
@@ -230,12 +375,6 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
       return Group_Params::HYBRID_X448_eFRODOKEM_976_AES_OQS;
    }
 
-   if(group_name == "secp256r1/Kyber-512-r3") {
-      return Group_Params::HYBRID_SECP256R1_KYBER_512_R3_OQS;
-   }
-   if(group_name == "secp256r1/Kyber-768-r3") {
-      return Group_Params::HYBRID_SECP256R1_KYBER_768_R3_OQS;
-   }
    if(group_name == "secp256r1/eFrodoKEM-640-SHAKE") {
       return Group_Params::HYBRID_SECP256R1_eFRODOKEM_640_SHAKE_OQS;
    }
@@ -243,9 +382,6 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
       return Group_Params::HYBRID_SECP256R1_eFRODOKEM_640_AES_OQS;
    }
 
-   if(group_name == "secp384r1/Kyber-768-r3") {
-      return Group_Params::HYBRID_SECP384R1_KYBER_768_R3_OQS;
-   }
    if(group_name == "secp384r1/eFrodoKEM-976-SHAKE") {
       return Group_Params::HYBRID_SECP384R1_eFRODOKEM_976_SHAKE_OQS;
    }
@@ -253,9 +389,6 @@ std::optional<Group_Params> Group_Params::from_string(std::string_view group_nam
       return Group_Params::HYBRID_SECP384R1_eFRODOKEM_976_AES_OQS;
    }
 
-   if(group_name == "secp521r1/Kyber-1024-r3") {
-      return Group_Params::HYBRID_SECP521R1_KYBER_1024_R3_OQS;
-   }
    if(group_name == "secp521r1/eFrodoKEM-1344-SHAKE") {
       return Group_Params::HYBRID_SECP521R1_eFRODOKEM_1344_SHAKE_OQS;
    }
@@ -284,6 +417,12 @@ std::optional<std::string> Group_Params::to_string() const {
          return "x25519";
       case Group_Params::X448:
          return "x448";
+      case Group_Params::BRAINPOOL256R1TLS13:
+         return "brainpool256r1tls13";
+      case Group_Params::BRAINPOOL384R1TLS13:
+         return "brainpool384r1tls13";
+      case Group_Params::BRAINPOOL512R1TLS13:
+         return "brainpool512r1tls13";
 
       case Group_Params::FFDHE_2048:
          return "ffdhe/ietf/2048";
@@ -296,12 +435,12 @@ std::optional<std::string> Group_Params::to_string() const {
       case Group_Params::FFDHE_8192:
          return "ffdhe/ietf/8192";
 
-      case Group_Params::KYBER_512_R3_OQS:
-         return "Kyber-512-r3";
-      case Group_Params::KYBER_768_R3_OQS:
-         return "Kyber-768-r3";
-      case Group_Params::KYBER_1024_R3_OQS:
-         return "Kyber-1024-r3";
+      case Group_Params::ML_KEM_512:
+         return "ML-KEM-512";
+      case Group_Params::ML_KEM_768:
+         return "ML-KEM-768";
+      case Group_Params::ML_KEM_1024:
+         return "ML-KEM-1024";
 
       case Group_Params::eFRODOKEM_640_SHAKE_OQS:
          return "eFrodoKEM-640-SHAKE";
@@ -337,27 +476,54 @@ std::optional<std::string> Group_Params::to_string() const {
       case Group_Params::HYBRID_SECP521R1_eFRODOKEM_1344_AES_OQS:
          return "secp521r1/eFrodoKEM-1344-AES";
 
-      case Group_Params::HYBRID_X25519_KYBER_512_R3_CLOUDFLARE:
-         return "x25519/Kyber-512-r3/cloudflare";
-
-      case Group_Params::HYBRID_X25519_KYBER_512_R3_OQS:
-         return "x25519/Kyber-512-r3";
-      case Group_Params::HYBRID_X25519_KYBER_768_R3_OQS:
-         return "x25519/Kyber-768-r3";
-      case Group_Params::HYBRID_X448_KYBER_768_R3_OQS:
-         return "x448/Kyber-768-r3";
-
-      case Group_Params::HYBRID_SECP256R1_KYBER_512_R3_OQS:
-         return "secp256r1/Kyber-512-r3";
-      case Group_Params::HYBRID_SECP256R1_KYBER_768_R3_OQS:
-         return "secp256r1/Kyber-768-r3";
-      case Group_Params::HYBRID_SECP384R1_KYBER_768_R3_OQS:
-         return "secp384r1/Kyber-768-r3";
-      case Group_Params::HYBRID_SECP521R1_KYBER_1024_R3_OQS:
-         return "secp521r1/Kyber-1024-r3";
+      case Group_Params::HYBRID_X25519_ML_KEM_768:
+         return "x25519/ML-KEM-768";
+      case Group_Params::HYBRID_SECP256R1_ML_KEM_768:
+         return "secp256r1/ML-KEM-768";
+      case Group_Params::HYBRID_SECP384R1_ML_KEM_1024:
+         return "secp384r1/ML-KEM-1024";
 
       default:
          return std::nullopt;
+   }
+}
+
+std::optional<std::string> Group_Params::to_algorithm_spec() const {
+   switch(m_code) {
+      // Brainpool curves have two sets of code points. See RFCs 7027 and 8734.
+      case Group_Params::BRAINPOOL256R1:
+      case Group_Params::BRAINPOOL256R1TLS13:
+         return "brainpool256r1";
+      case Group_Params::BRAINPOOL384R1:
+      case Group_Params::BRAINPOOL384R1TLS13:
+         return "brainpool384r1";
+      case Group_Params::BRAINPOOL512R1:
+      case Group_Params::BRAINPOOL512R1TLS13:
+         return "brainpool512r1";
+
+      default:
+         return to_string();
+   }
+}
+
+std::string certificate_type_to_string(Certificate_Type type) {
+   switch(type) {
+      case Certificate_Type::X509:
+         return "X509";
+      case Certificate_Type::RawPublicKey:
+         return "RawPublicKey";
+   }
+
+   return "Unknown";
+}
+
+Certificate_Type certificate_type_from_string(const std::string& type_str) {
+   if(type_str == "X509") {
+      return Certificate_Type::X509;
+   } else if(type_str == "RawPublicKey") {
+      return Certificate_Type::RawPublicKey;
+   } else {
+      throw Decoding_Error("Unknown certificate type: " + type_str);
    }
 }
 

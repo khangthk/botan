@@ -1,11 +1,15 @@
-<defines>
+<internal_defines>
 AES_POWER8 -> 20180223
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "AES Power8"
 brief -> "AES using Power8 instructions"
 </module_info>
+
+<requires>
+cpuid
+</requires>
 
 <arch>
 ppc64

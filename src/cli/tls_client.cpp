@@ -4,11 +4,15 @@
 *     2017 René Korthaus, Rohde & Schwarz Cybersecurity
 *     2022 René Meusel, Hannes Rantzsch - neXenio GmbH
 *     2023 René Meusel, Rohde & Schwarz Cybersecurity
+*     2026 René Meusel, Rohde & Schwarz Networks and Cybersecurity
 *
 * Botan is released under the Simplified BSD License (see license.txt)
 */
 
 #include "cli.h"
+
+#include <botan/internal/stl_util.h>
+#include <botan/internal/target_info.h>
 
 #if defined(BOTAN_HAS_TLS) && defined(BOTAN_TARGET_OS_HAS_FILESYSTEM) && defined(BOTAN_TARGET_OS_HAS_SOCKETS)
 
@@ -20,7 +24,6 @@
    #include <botan/tls_policy.h>
    #include <botan/tls_session_manager_memory.h>
    #include <botan/x509path.h>
-   #include <fstream>
 
    #if defined(BOTAN_HAS_TLS_SQLITE3_SESSION_MANAGER)
       #include <botan/tls_session_manager_sqlite.h>
@@ -40,14 +43,14 @@ namespace {
 
 class Callbacks : public Botan::TLS::Callbacks {
    public:
-      Callbacks(TLS_Client& client_command) : m_client_command(client_command), m_peer_closed(false) {}
+      explicit Callbacks(TLS_Client& client_command) : m_client_command(client_command), m_peer_closed(false) {}
 
       std::ostream& output();
       bool flag_set(const std::string& flag_name) const;
       std::string get_arg(const std::string& arg_name) const;
       void send(std::span<const uint8_t> buffer);
 
-      int peer_closed() const { return m_peer_closed; }
+      bool peer_closed() const { return m_peer_closed; }
 
       void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>& cert_chain,
                                  const std::vector<std::optional<Botan::OCSP::Response>>& ocsp,
@@ -59,22 +62,34 @@ class Callbacks : public Botan::TLS::Callbacks {
             throw Botan::Invalid_Argument("Certificate chain was empty");
          }
 
-         Botan::Path_Validation_Restrictions restrictions(policy.require_cert_revocation_info(),
-                                                          policy.minimum_signature_strength());
+         // As a diagnostic tool we want to attempt OCSP but still connect if
+         // the responder was unavailable or the certs have no OCSP URL
+         const Botan::Path_Validation_Restrictions restrictions(policy.require_cert_revocation_info(),
+                                                                policy.minimum_signature_strength(),
+                                                                /* ocsp_all_intermediates */ false,
+                                                                std::chrono::hours(24 * 7),
+                                                                /* trusted_ocsp_responders */ nullptr,
+                                                                /* ignore_trusted_root_time_range */ false,
+                                                                /* require_self_signed_trust_anchors */ true,
+                                                                /* accept_ocsp_softfail */ true);
 
          auto ocsp_timeout = std::chrono::milliseconds(1000);
 
          const std::string checked_name = flag_set("skip-hostname-check") ? "" : std::string(hostname);
 
-         Botan::Path_Validation_Result result = Botan::x509_path_validate(
+         const Botan::Path_Validation_Result result = Botan::x509_path_validate(
             cert_chain, restrictions, trusted_roots, checked_name, usage, tls_current_timestamp(), ocsp_timeout, ocsp);
 
          if(result.successful_validation()) {
             output() << "Certificate validation status: " << result.result_string() << "\n";
-            auto status = result.all_statuses();
+            const auto& status = result.all_statuses();
 
             if(!status.empty() && status[0].contains(Botan::Certificate_Status_Code::OCSP_RESPONSE_GOOD)) {
                output() << "Valid OCSP response for this server\n";
+            }
+
+            if(!result.no_warnings()) {
+               output() << "Certificate validation warnings: " << result.warnings_string() << "\n";
             }
          } else {
             if(flag_set("ignore-cert-error")) {
@@ -99,14 +114,17 @@ class Callbacks : public Botan::TLS::Callbacks {
       void tls_session_activated() override { output() << "Handshake complete\n"; }
 
       void tls_session_established(const Botan::TLS::Session_Summary& session) override {
-         output() << "Handshake complete, " << session.version().to_string() << " using "
-                  << session.ciphersuite().to_string();
+         output() << "Handshake complete, " << session.version().to_string() << "\n";
 
          if(const auto& psk = session.external_psk_identity()) {
-            output() << " (utilized PSK identity: " << maybe_hex_encode(psk.value()) << ")";
+            output() << "Utilized PSK identity: " << maybe_hex_encode(psk.value()) << "\n";
          }
 
-         output() << std::endl;
+         output() << "Negotiated ciphersuite " << session.ciphersuite().to_string() << "\n";
+
+         if(auto kex_params = session.kex_parameters()) {
+            output() << "Key exchange using " << *kex_params << "\n";
+         }
 
          if(const auto& session_id = session.session_id(); !session_id.empty()) {
             output() << "Session ID " << Botan::hex_encode(session_id.get()) << "\n";
@@ -179,7 +197,10 @@ class TLS_Client final : public Command {
          init_sockets();
       }
 
-      ~TLS_Client() override { stop_sockets(); }
+      ~TLS_Client() override {
+         shutdown_socket();
+         stop_sockets();
+      }
 
       TLS_Client(const TLS_Client& other) = delete;
       TLS_Client(TLS_Client&& other) = delete;
@@ -200,7 +221,7 @@ class TLS_Client final : public Command {
          const uint16_t port = get_arg_u16("port");
          const std::string transport = get_arg("type");
          const std::string next_protos = get_arg("next-protocols");
-         const bool use_system_cert_store = flag_set("skip-system-cert-store") == false;
+         const bool use_system_cert_store = !flag_set("skip-system-cert-store");
          const std::string trusted_CAs = get_arg("trusted-cas");
          const auto tls_version = get_arg("tls-version");
 
@@ -287,7 +308,7 @@ class TLS_Client final : public Command {
             if(client.is_active()) {
                FD_SET(STDIN_FILENO, &readfds);
                if(first_active && !protocols_to_offer.empty()) {
-                  std::string app = client.application_protocol();
+                  const std::string app = client.application_protocol();
                   if(!app.empty()) {
                      output() << "Server choose protocol: " << client.application_protocol() << "\n";
                   }
@@ -302,7 +323,7 @@ class TLS_Client final : public Command {
             if(FD_ISSET(m_sockfd, &readfds)) {
                uint8_t buf[4 * 1024] = {0};
 
-               ssize_t got = ::read(m_sockfd, buf, sizeof(buf));
+               const ssize_t got = ::read(m_sockfd, buf, sizeof(buf));
 
                if(got == 0) {
                   output() << "EOF on socket\n";
@@ -321,7 +342,7 @@ class TLS_Client final : public Command {
 
             if(FD_ISSET(STDIN_FILENO, &readfds)) {
                uint8_t buf[1024] = {0};
-               ssize_t got = read(STDIN_FILENO, buf, sizeof(buf));
+               const ssize_t got = read(STDIN_FILENO, buf, sizeof(buf));
 
                if(got == 0) {
                   output() << "EOF on stdin\n";
@@ -334,7 +355,7 @@ class TLS_Client final : public Command {
                }
 
                if(got == 2 && buf[1] == '\n') {
-                  char cmd = buf[0];
+                  const char cmd = buf[0];
 
                   if(cmd == 'R' || cmd == 'r') {
                      output() << "Client initiated renegotiation\n";
@@ -356,7 +377,7 @@ class TLS_Client final : public Command {
 
          set_return_code((we_closed || callbacks->peer_closed()) ? 0 : 1);
 
-         ::close(m_sockfd);
+         shutdown_socket();
       }
 
    public:
@@ -382,23 +403,29 @@ class TLS_Client final : public Command {
 
    private:
       static socket_type connect_to_host(const std::string& host, uint16_t port, bool tcp) {
-         addrinfo hints;
-         Botan::clear_mem(&hints, 1);
+         addrinfo hints{};
          hints.ai_family = AF_UNSPEC;
          hints.ai_socktype = tcp ? SOCK_STREAM : SOCK_DGRAM;
-         addrinfo *res, *rp = nullptr;
 
-         if(::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0) {
+         unique_addr_info_ptr res = nullptr;
+
+         if(::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, Botan::out_ptr(res)) != 0) {
             throw CLI_Error("getaddrinfo failed for " + host);
          }
 
          socket_type fd = 0;
+         bool success = false;
 
-         for(rp = res; rp != nullptr; rp = rp->ai_next) {
+         for(const addrinfo* rp = res.get(); rp != nullptr; rp = rp->ai_next) {
             fd = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 
             if(fd == invalid_socket()) {
                continue;
+            }
+
+            if(fd >= FD_SETSIZE) {
+               ::close(fd);
+               throw CLI_Error("Socket descriptor exceeds FD_SETSIZE; select() would be unsafe");
             }
 
             if(::connect(fd, rp->ai_addr, rp->ai_addrlen) != 0) {
@@ -406,14 +433,13 @@ class TLS_Client final : public Command {
                continue;
             }
 
+            success = true;
             break;
          }
 
-         ::freeaddrinfo(res);
-
-         if(rp == nullptr)  // no address succeeded
-         {
-            throw CLI_Error("connect failed");
+         if(!success) {
+            // no address succeeded
+            throw CLI_Error("Connecting to host failed");
          }
 
          return fd;
@@ -427,7 +453,32 @@ class TLS_Client final : public Command {
          }
       }
 
+      void shutdown_socket() {
+         if(m_sockfd == invalid_socket()) {
+            return;
+         }
+
+         // Signal that we are done writing so pending alert records are
+         // delivered with a FIN rather than lost to a RST.
+         ::shutdown(m_sockfd, SHUT_WR);
+
+         // Drain unread incoming data; if the receive buffer is non-empty when
+         // we close(), the kernel sends RST which discards our outgoing data
+         // (including any alert we sent).
+         char buf[256];
+         while(::read(m_sockfd, buf, sizeof(buf)) > 0) {}
+         ::close(m_sockfd);
+
+         m_sockfd = invalid_socket();
+      }
+
       socket_type m_sockfd = invalid_socket();
+
+      using unique_addr_info_ptr = std::unique_ptr<addrinfo, decltype([](addrinfo* p) {
+                                                      if(p != nullptr) {
+                                                         ::freeaddrinfo(p);
+                                                      }
+                                                   })>;
 };
 
 namespace {

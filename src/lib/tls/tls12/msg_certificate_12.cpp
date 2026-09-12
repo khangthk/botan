@@ -5,31 +5,34 @@
 * Botan is released under the Simplified BSD License (see license.txt)
 */
 
-#include <botan/tls_messages.h>
+#include <botan/tls_messages_12.h>
 
 #include <botan/data_src.h>
 #include <botan/tls_alert.h>
 #include <botan/tls_exceptn.h>
 #include <botan/tls_extensions.h>
+#include <botan/tls_policy.h>
+#include <botan/x509cert.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/tls_handshake_hash.h>
 #include <botan/internal/tls_handshake_io.h>
-#include <botan/internal/tls_reader.h>
 
 namespace Botan::TLS {
+
+Certificate_12::~Certificate_12() = default;
 
 /**
 * Create a new Certificate message
 */
-Certificate_12::Certificate_12(Handshake_IO& io, Handshake_Hash& hash, const std::vector<X509_Certificate>& cert_list) :
-      m_certs(cert_list) {
+Certificate_12::Certificate_12(Handshake_IO& io, Handshake_Hash& hash, std::vector<X509_Certificate> cert_list) :
+      m_certs(std::move(cert_list)) {
    hash.update(io.send(*this));
 }
 
 /**
 * Deserialize a Certificate message
 */
-Certificate_12::Certificate_12(const std::vector<uint8_t>& buf, const Policy& policy) {
+Certificate_12::Certificate_12(std::span<const uint8_t> buf, const Policy& policy) {
    if(buf.size() < 3) {
       throw Decoding_Error("Certificate: Message malformed");
    }
@@ -47,7 +50,7 @@ Certificate_12::Certificate_12(const std::vector<uint8_t>& buf, const Policy& po
 
    const uint8_t* certs = buf.data() + 3;
 
-   while(size_t remaining_bytes = buf.data() + buf.size() - certs) {
+   while(const size_t remaining_bytes = buf.data() + buf.size() - certs) {
       if(remaining_bytes < 3) {
          throw Decoding_Error("Certificate: Message malformed");
       }
@@ -59,7 +62,12 @@ Certificate_12::Certificate_12(const std::vector<uint8_t>& buf, const Policy& po
       }
 
       DataSource_Memory cert_buf(&certs[3], cert_size);
-      m_certs.push_back(X509_Certificate(cert_buf));
+      try {
+         m_certs.push_back(X509_Certificate(cert_buf));
+      } catch(Exception& e) {
+         // bad_certificate would make more sense but BoGo expects decoding_error
+         throw TLS_Exception(Alert::DecodeError, e.what());
+      }
 
       certs += cert_size + 3;
    }
@@ -97,6 +105,10 @@ std::vector<uint8_t> Certificate_12::serialize() const {
    }
 
    return buf;
+}
+
+size_t Certificate_12::count() const {
+   return m_certs.size();
 }
 
 }  // namespace Botan::TLS

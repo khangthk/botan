@@ -8,7 +8,7 @@
 
 #include <botan/asio_context.h>
 
-#if defined(BOTAN_HAS_HAS_DEFAULT_TLS_CONTEXT)
+#if defined(BOTAN_HAS_DEFAULT_TLS_CONTEXT)
    #include <botan/auto_rng.h>
    #include <botan/certstor_system.h>
    #include <botan/tls_session_manager_memory.h>
@@ -16,7 +16,7 @@
 
 namespace Botan::TLS {
 
-#if defined(BOTAN_HAS_HAS_DEFAULT_TLS_CONTEXT)
+#if defined(BOTAN_HAS_DEFAULT_TLS_CONTEXT)
 
 namespace {
 
@@ -34,7 +34,8 @@ class Default_Credentials_Manager : public Credentials_Manager {
          }
       }
 
-      std::vector<Certificate_Store*> trusted_certificate_authorities(const std::string&, const std::string&) override {
+      std::vector<Certificate_Store*> trusted_certificate_authorities(const std::string& /*type*/,
+                                                                      const std::string& /*context*/) override {
          if(m_cert_store) {
             return {m_cert_store.get()};
          } else {

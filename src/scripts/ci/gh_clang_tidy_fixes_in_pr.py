@@ -6,6 +6,7 @@
 
 Botan is released under the Simplified BSD License (see license.txt)
 """
+from __future__ import annotations
 
 import argparse
 import glob
@@ -13,6 +14,7 @@ import os
 import sys
 
 import yaml
+
 
 class FileLocation:
     def __init__(self, line : int, column : int, endline : int | None = None, endcolumn : int | None = None):
@@ -37,9 +39,9 @@ class Diagnostic:
 
     def __map_file_path(self, file_path, base_path): # pylint: disable=unused-argument
         if file_path.endswith(".h"):
-            raise RuntimeError(f"Header file {file_path} cannot be handled")
-        # TODO: try to map include files (residing in build/include) onto their
-        #       origin path in src/lib etc.
+            # This only works for symlink builds, which is sufficient for CI reporting
+            return os.path.realpath(file_path)
+
         return file_path
 
 
@@ -47,12 +49,10 @@ class Diagnostic:
         """ For self.file determine the (line, column) given a byte offset """
         with open(self.file, encoding="utf-8") as srcfile:
             readoffset = 0
-            lineoffset = 0
-            for l in srcfile.readlines():
-                readoffset += len(l)
-                lineoffset += 1
+            for lineoffset, line in enumerate(srcfile, start=1):
+                readoffset += len(line)
                 if readoffset >= offset:
-                    coloffset = offset - readoffset + len(l)
+                    coloffset = offset - readoffset + len(line)
                     return (lineoffset, coloffset)
         raise RuntimeError(f"FileOffset {offset} out of range for {self.file}")
 

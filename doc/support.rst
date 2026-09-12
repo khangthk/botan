@@ -1,3 +1,5 @@
+.. _support_info:
+
 Support Information
 =======================
 
@@ -18,6 +20,7 @@ platforms are considered release blockers.
 
 For Botan 3, the tier-2 supported platforms are
 
+* macOS aarch64, latest XCode Clang
 * macOS x86-64, latest XCode Clang
 * iOS aarch64, latest XCode Clang
 * Windows x86-64, latest MinGW GCC
@@ -57,16 +60,16 @@ utilizes OpenBSD specific APIs was likely contributed by someone interested in
 that platform.
 
 In theory any working C++20 compiler is fine but in practice, we only regularly
-test with GCC, Clang, and Visual C++. Several other compilers (such as IBM XLC,
-Intel C++, and Sun Studio) are supported by the build system but are not tested
-by the developers and may have build or codegen problems. Patches to improve
-support for these compilers is welcome.
+test with GCC, Clang, and Visual C++. Several other compilers (such as IBM XLC
+and Intel C++) are supported by the build system but are not tested by the
+developers and may have build or codegen problems. Patches to improve support
+for these compilers is welcome.
 
 Branch Support Status
 -------------------------
 
 Following table provides the support status for Botan branches, as of
-May 2024.
+August 2025.
 
 "Active development" refers to adding new features and optimizations. At the
 conclusion of the active development phase, only bugfixes are applied.
@@ -76,10 +79,9 @@ End of life dates may be extended as circumstances warrant.
 ============== ============== ========================== ============
 Branch         First Release  End of Active Development  End of Life
 ============== ============== ========================== ============
-Botan 1.8      2008-12-08     2010-08-31                 2016-02-13
-Botan 1.10     2011-06-20     2012-07-10                 2018-12-31
-Botan 2        2017-01-06     2020-11-05                 2024-12-31 or later
-Botan 3        2023-04-11     ?                          2027-12-31 or later
+Botan2         2017-01-06     2020-11-05                 2024-12-31
+Botan3         2023-04-11     2027?                      2028-12-31 or later
+Botan4         2027?          ?                          ?
 ============== ============== ========================== ============
 
 Getting Help

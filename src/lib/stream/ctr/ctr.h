@@ -43,12 +43,24 @@ class CTR_BE final : public StreamCipher {
 
       void seek(uint64_t offset) override;
 
+      bool supports_seek() const override { return true; }
+
+      std::optional<uint64_t> remaining_keystream_bytes() const override;
+
    private:
       void key_schedule(std::span<const uint8_t> key) override;
       void cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) override;
       void generate_keystream(uint8_t out[], size_t length) override;
       void set_iv_bytes(const uint8_t iv[], size_t iv_len) override;
       void add_counter(uint64_t counter);
+
+#if defined(BOTAN_HAS_CTR_BE_SIMD8X32)
+      size_t ctr_proc_bs16_ctr4_simd8x32(const uint8_t in[], uint8_t out[], size_t length);
+#endif
+
+#if defined(BOTAN_HAS_CTR_BE_SIMD32)
+      size_t ctr_proc_bs16_ctr4_simd32(const uint8_t in[], uint8_t out[], size_t length);
+#endif
 
       std::unique_ptr<BlockCipher> m_cipher;
 
@@ -59,6 +71,9 @@ class CTR_BE final : public StreamCipher {
       secure_vector<uint8_t> m_counter, m_pad;
       std::vector<uint8_t> m_iv;
       size_t m_pad_pos;
+      // Valid only when m_ctr_size < 8: bytes the user can still
+      // generate before the narrow counter would wrap.
+      uint64_t m_bytes_remaining = 0;
 };
 
 }  // namespace Botan

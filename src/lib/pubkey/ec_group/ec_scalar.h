@@ -9,9 +9,10 @@
 
 #include <botan/concepts.h>
 #include <botan/types.h>
-
+#include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace Botan {
@@ -19,13 +20,12 @@ namespace Botan {
 class BigInt;
 class RandomNumberGenerator;
 class EC_Group;
-class EC_Group_Data;
 class EC_Scalar_Data;
 
 /**
 * Represents an integer modulo the prime group order of an elliptic curve
 */
-class BOTAN_UNSTABLE_API EC_Scalar final {
+class BOTAN_PUBLIC_API(3, 6) EC_Scalar final {
    public:
       /**
       * Deserialize a scalar
@@ -55,12 +55,22 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       static EC_Scalar from_bytes_mod_order(const EC_Group& group, std::span<const uint8_t> bytes);
 
       /**
+      * Hash to scalar following RFC 9380
+      *
+      * This requires XMD. Unlike hash2curve, any group is supported
+      */
+      static EC_Scalar hash(const EC_Group& group,
+                            std::string_view hash_fn,
+                            std::span<const uint8_t> input,
+                            std::span<const uint8_t> domain_sep);
+
+      /**
       * Convert a bytestring to an EC_Scalar
       *
       * This is similar to deserialize but instead of returning nullopt if the input
       * is invalid, it will throw an exception.
       */
-      EC_Scalar(const EC_Group& group, std::span<const uint8_t> bytes);
+      BOTAN_DEPRECATED("Use EC_Scalar::deserialize") EC_Scalar(const EC_Group& group, std::span<const uint8_t> bytes);
 
       /**
       * Deserialize a pair of scalars
@@ -92,10 +102,23 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       * Compute the elliptic curve scalar multiplication (g*k) where g is the
       * standard base point on the curve. Then extract the x coordinate of
       * the resulting point, and reduce it modulo the group order.
-      *
-      * Workspace argument is transitional
       */
-      static EC_Scalar gk_x_mod_order(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& ws);
+      static EC_Scalar gk_x_mod_order(const EC_Scalar& scalar, RandomNumberGenerator& rng);
+
+      /**
+      * Compute the elliptic curve scalar multiplication (g*k) where g is the
+      * standard base point on the curve. Then extract the x coordinate of
+      * the resulting point, and reduce it modulo the group order.
+      *
+      * @param scalar the scalar k to multiply the base point by
+      * @param rng a random number generator, used for blinding
+      * @return the x coordinate of g*k reduced modulo the group order
+      */
+      BOTAN_DEPRECATED("Use version without workspace arg")
+      static EC_Scalar
+         gk_x_mod_order(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& /*ws*/) {
+         return EC_Scalar::gk_x_mod_order(scalar, rng);
+      }
 
       /**
       * Return the byte size of this scalar
@@ -122,7 +145,7 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       /**
       * Write the fixed length serialization to bytes
       *
-      * The provided span must be exactly bytes() long
+      * The provided span must be exactly 2*bytes() long
       */
       static void serialize_pair_to(std::span<uint8_t> bytes, const EC_Scalar& r, const EC_Scalar& s);
 
@@ -147,6 +170,8 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       bool is_nonzero() const { return !is_zero(); }
 
       /**
+      * Constant time modular inversion
+      *
       * Return the modular inverse of this EC_Scalar
       *
       * If *this is zero, then invert() returns zero
@@ -154,21 +179,31 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       EC_Scalar invert() const;
 
       /**
+      * Variable time modular inversion
+      *
+      * Return the modular inverse of this EC_Scalar
+      *
+      * If *this is zero, then invert_vartime() returns zero
+      */
+      EC_Scalar invert_vartime() const;
+
+      /**
+      * Return the additive inverse of *this
       */
       EC_Scalar negate() const;
 
       /**
-      * Scalar addition (modulo p)
+      * Scalar addition (modulo group order)
       */
       EC_Scalar add(const EC_Scalar& x) const;
 
       /**
-      * Scalar subtraction (modulo p)
+      * Scalar subtraction (modulo group order)
       */
       EC_Scalar sub(const EC_Scalar& x) const;
 
       /**
-      * Scalar multiplication (modulo p)
+      * Scalar multiplication (modulo group order)
       */
       EC_Scalar mul(const EC_Scalar& x) const;
 
@@ -178,7 +213,14 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
       void assign(const EC_Scalar& x);
 
       /**
-      * Set *this to its own square modulo p
+      * Equivalent to assigning a zero value, but also does so in a way that
+      * attempts to ensure the write always occurs even if a compiler can deduce
+      * the assignment is otherwise unnecessary.
+      */
+      void zeroize();
+
+      /**
+      * Set *this to its own square modulo the group order
       */
       void square_self();
 
@@ -200,22 +242,51 @@ class BOTAN_UNSTABLE_API EC_Scalar final {
 
       friend bool operator==(const EC_Scalar& x, const EC_Scalar& y) { return x.is_eq(y); }
 
+      /**
+      * Copy constructor
+      * @param other the scalar to copy
+      */
       EC_Scalar(const EC_Scalar& other);
+
+      /**
+      * Move constructor
+      * @param other the scalar to move from
+      */
       EC_Scalar(EC_Scalar&& other) noexcept;
 
+      /**
+      * Copy assignment
+      * @param other the scalar to copy
+      * @return reference to this
+      */
       EC_Scalar& operator=(const EC_Scalar& other);
+
+      /**
+      * Move assignment
+      * @param other the scalar to move from
+      * @return reference to this
+      */
       EC_Scalar& operator=(EC_Scalar&& other) noexcept;
 
       ~EC_Scalar();
 
+      /**
+      * For internal use only
+      * @return the inner representation of this scalar
+      */
       const EC_Scalar_Data& _inner() const { return inner(); }
 
+      /**
+      * For internal use only
+      * @param inner the inner representation to wrap
+      * @return a scalar wrapping the provided inner representation
+      */
       static EC_Scalar _from_inner(std::unique_ptr<EC_Scalar_Data> inner);
 
    private:
       friend class EC_AffinePoint;
 
-      EC_Scalar(std::unique_ptr<EC_Scalar_Data> scalar);
+      explicit EC_Scalar(std::unique_ptr<EC_Scalar_Data> scalar);
 
       const EC_Scalar_Data& inner() const { return *m_scalar; }
 

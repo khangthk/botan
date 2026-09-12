@@ -9,11 +9,13 @@
 
 #include <botan/base64.h>
 #include <botan/hash.h>
+#include <botan/mem_ops.h>
 #include <botan/pubkey.h>
 #include <botan/rng.h>
+#include <botan/internal/buffer_slicer.h>
+#include <botan/internal/int_utils.h>
 #include <botan/internal/socket_udp.h>
 
-#include <cmath>
 #include <map>
 #include <sstream>
 
@@ -46,7 +48,7 @@ template <typename T>
 T copy(const uint8_t* t)
    requires(is_array<T>::value)
 {
-   return typecast_copy<T>(t);  //arrays are endianess independent, so we do a memcpy
+   return typecast_copy<T>(t);  //arrays are endianness independent, so we do a memcpy
 }
 
 template <typename T>
@@ -71,8 +73,14 @@ std::map<std::string, std::vector<uint8_t>> unpack_roughtime_packet(T bytes) {
    uint32_t start = start_content;
    std::map<std::string, std::vector<uint8_t>> tags;
    for(uint32_t i = 0; i < num_tags; ++i) {
-      const size_t end =
-         ((i + 1) == num_tags) ? bytes.size() : start_content + from_little_endian<uint32_t>(buf + 4 + i * 4);
+      size_t end = bytes.size();
+      if((i + 1) != num_tags) {
+         const auto tag_end = checked_add(start_content, from_little_endian<uint32_t>(buf + 4 + i * 4));
+         if(!tag_end.has_value()) {
+            throw Roughtime::Roughtime_Error("Tag end index out of bounds");
+         }
+         end = tag_end.value();
+      }
       if(end > bytes.size()) {
          throw Roughtime::Roughtime_Error("Tag end index out of bounds");
       }
@@ -113,10 +121,10 @@ const std::vector<uint8_t>& get_v(const std::map<std::string, std::vector<uint8_
 bool verify_signature(const std::array<uint8_t, 32>& pk,
                       const std::vector<uint8_t>& payload,
                       const std::array<uint8_t, 64>& signature) {
-   const char context[] = "RoughTime v1 response signature";
-   Ed25519_PublicKey key(std::vector<uint8_t>(pk.data(), pk.data() + pk.size()));
+   constexpr std::string_view context("RoughTime v1 response signature\0", 32);
+   const Ed25519_PublicKey key(std::vector<uint8_t>(pk.data(), pk.data() + pk.size()));
    PK_Verifier verifier(key, "Pure");
-   verifier.update(cast_char_ptr_to_uint8(context), sizeof(context));  //add context including \0
+   verifier.update(context);
    verifier.update(payload);
    return verifier.check_signature(signature.data(), signature.size());
 }
@@ -130,7 +138,7 @@ std::array<uint8_t, 64> hashLeaf(const std::array<uint8_t, 64>& leaf) {
    return ret;
 }
 
-void hashNode(std::array<uint8_t, 64>& hash, const std::array<uint8_t, 64>& node, bool reverse) {
+void hashNode(std::span<uint8_t, 64> hash, std::span<const uint8_t, 64> node, bool reverse) {
    auto h = HashFunction::create_or_throw("SHA-512");
    h->update(1);
    if(reverse) {
@@ -154,16 +162,14 @@ std::array<uint8_t, N> vector_to_array(std::vector<uint8_t, T> vec) {
 
 namespace Roughtime {
 
-Nonce::Nonce(const std::vector<uint8_t>& nonce) {
+Nonce::Nonce(const std::vector<uint8_t>& nonce) : m_nonce{} {
    if(nonce.size() != 64) {
       throw Invalid_Argument("Roughtime nonce must be 64 bytes long");
    }
    m_nonce = typecast_copy<std::array<uint8_t, 64>>(nonce.data());
 }
 
-Nonce::Nonce(RandomNumberGenerator& rng) {
-   rng.randomize(m_nonce.data(), m_nonce.size());
-}
+Nonce::Nonce(RandomNumberGenerator& rng) : m_nonce(rng.random_array<64>()) {}
 
 std::array<uint8_t, request_min_size> encode_request(const Nonce& nonce) {
    std::array<uint8_t, request_min_size> buf = {{2, 0, 0, 0, 64, 0, 0, 0, 'N', 'O', 'N', 'C', 'P', 'A', 'D', 0xff}};
@@ -193,19 +199,18 @@ Response Response::from_bits(const std::vector<uint8_t>& response, const Nonce& 
    const size_t size = path.size();
    const size_t levels = size / 64;
 
-   if(size % 64) {
+   if(size % 64 != 0) {
       throw Roughtime_Error("Merkle tree path size must be multiple of 64 bytes");
    }
-   if(indx >= (1U << levels)) {
+   if(levels >= 32 || indx >= (uint32_t(1) << levels)) {
       throw Roughtime_Error("Merkle tree path is too short");
    }
 
+   BufferSlicer slicer(path);
    auto hash = hashLeaf(nonce.get_nonce());
    auto index = indx;
-   size_t level = 0;
-   while(level < levels) {
-      hashNode(hash, typecast_copy<std::array<uint8_t, 64>>(path.data() + level * 64), index & 1);
-      ++level;
+   for(std::size_t level = 0; level < levels; ++level) {
+      hashNode(hash, slicer.take<64>(), index % 2 == 1);
       index >>= 1;
    }
 
@@ -227,9 +232,9 @@ Response Response::from_bits(const std::vector<uint8_t>& response, const Nonce& 
 }
 
 bool Response::validate(const Ed25519_PublicKey& pk) const {
-   const char context[] = "RoughTime v1 delegation signature--";
+   constexpr std::string_view context("RoughTime v1 delegation signature--\0", 36);
    PK_Verifier verifier(pk, "Pure");
-   verifier.update(cast_char_ptr_to_uint8(context), sizeof(context));  //add context including \0
+   verifier.update(context);
    verifier.update(m_cert_dele.data(), m_cert_dele.size());
    return verifier.check_signature(m_cert_sig.data(), m_cert_sig.size());
 }
@@ -243,14 +248,15 @@ Nonce nonce_from_blind(const std::vector<uint8_t>& previous_response, const Nonc
    hash->update(blind_arr.data(), blind_arr.size());
    hash->final(ret.data());
 
-   return ret;
+   return Nonce(ret);
 }
 
 Chain::Chain(std::string_view str) {
    std::istringstream ss{std::string(str)};  // FIXME C++23 avoid copy
    const std::string ERROR_MESSAGE = "Line does not have 4 space separated fields";
    for(std::string s; std::getline(ss, s);) {
-      size_t start = 0, end = 0;
+      size_t start = 0;
+      size_t end = 0;
       end = s.find(' ', start);
       if(end == std::string::npos) {
          throw Decoding_Error(ERROR_MESSAGE);
@@ -291,9 +297,9 @@ Chain::Chain(std::string_view str) {
 
 std::vector<Response> Chain::responses() const {
    std::vector<Response> responses;
-   for(unsigned i = 0; i < m_links.size(); ++i) {
+   for(size_t i = 0; i < m_links.size(); ++i) {
       const auto& l = m_links[i];
-      const auto nonce = i ? nonce_from_blind(m_links[i - 1].response(), l.nonce_or_blind()) : l.nonce_or_blind();
+      const auto nonce = i > 0 ? nonce_from_blind(m_links[i - 1].response(), l.nonce_or_blind()) : l.nonce_or_blind();
       const auto response = Response::from_bits(l.response(), nonce);
       if(!response.validate(l.public_key())) {
          throw Roughtime_Error("Invalid signature or public key");
@@ -365,7 +371,7 @@ std::vector<uint8_t> online_request(std::string_view uri, const Nonce& nonce, st
                                       //add one additional byte to be able to differentiate if datagram got truncated
    const auto n = socket->read(buffer.data(), buffer.size());
 
-   if(!n || std::chrono::system_clock::now() - start_time > timeout) {
+   if(n == 0 || std::chrono::system_clock::now() - start_time > timeout) {
       throw System_Error("Timeout waiting for response");
    }
 
@@ -383,7 +389,8 @@ std::vector<Server_Information> servers_from_str(std::string_view str) {
 
    const std::string ERROR_MESSAGE = "Line does not have at least 5 space separated fields";
    for(std::string s; std::getline(ss, s);) {
-      size_t start = 0, end = 0;
+      size_t start = 0;
+      size_t end = 0;
       end = s.find(' ', start);
       if(end == std::string::npos) {
          throw Decoding_Error(ERROR_MESSAGE);

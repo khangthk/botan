@@ -8,6 +8,7 @@
 
 #include <botan/block_cipher.h>
 #include <botan/internal/ffi_util.h>
+#include <utility>
 
 extern "C" {
 
@@ -28,8 +29,7 @@ int botan_block_cipher_init(botan_block_cipher_t* bc, const char* bc_name) {
          return BOTAN_FFI_ERROR_NOT_IMPLEMENTED;
       }
 
-      *bc = new botan_block_cipher_struct(std::move(cipher));
-      return BOTAN_FFI_SUCCESS;
+      return ffi_new_object(bc, std::move(cipher));
    });
 }
 
@@ -59,18 +59,29 @@ int botan_block_cipher_set_key(botan_block_cipher_t bc, const uint8_t key[], siz
 * indicate an error
 */
 int botan_block_cipher_block_size(botan_block_cipher_t bc) {
-   return BOTAN_FFI_VISIT(bc, [](const auto& b) { return static_cast<int>(b.block_size()); });
+   return BOTAN_FFI_VISIT(bc, [](const auto& b) -> int {
+      const size_t bs = b.block_size();
+      if(bs == 0) {
+         return BOTAN_FFI_ERROR_INVALID_OBJECT_STATE;
+      }
+
+      if(std::in_range<int>(bs)) {
+         return static_cast<int>(bs);
+      } else {
+         return BOTAN_FFI_ERROR_INVALID_OBJECT_STATE;
+      }
+   });
 }
 
 int botan_block_cipher_encrypt_blocks(botan_block_cipher_t bc, const uint8_t in[], uint8_t out[], size_t blocks) {
-   if(in == nullptr || out == nullptr) {
+   if(any_null_pointers(in, out)) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
    return BOTAN_FFI_VISIT(bc, [=](const auto& b) { b.encrypt_n(in, out, blocks); });
 }
 
 int botan_block_cipher_decrypt_blocks(botan_block_cipher_t bc, const uint8_t in[], uint8_t out[], size_t blocks) {
-   if(in == nullptr || out == nullptr) {
+   if(any_null_pointers(in, out)) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
    return BOTAN_FFI_VISIT(bc, [=](const auto& b) { b.decrypt_n(in, out, blocks); });
@@ -89,12 +100,15 @@ int botan_block_cipher_get_keyspec(botan_block_cipher_t cipher,
                                    size_t* out_maximum_keylength,
                                    size_t* out_keylength_modulo) {
    return BOTAN_FFI_VISIT(cipher, [=](const auto& bc) {
-      if(out_minimum_keylength)
+      if(out_minimum_keylength) {
          *out_minimum_keylength = bc.minimum_keylength();
-      if(out_maximum_keylength)
+      }
+      if(out_maximum_keylength) {
          *out_maximum_keylength = bc.maximum_keylength();
-      if(out_keylength_modulo)
+      }
+      if(out_keylength_modulo) {
          *out_keylength_modulo = bc.key_spec().keylength_multiple();
+      }
    });
 }
 }

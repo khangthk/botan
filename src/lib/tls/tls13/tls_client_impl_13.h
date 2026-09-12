@@ -12,7 +12,6 @@
 
 #include <botan/tls_server_info.h>
 #include <botan/internal/tls_channel_impl_13.h>
-#include <botan/internal/tls_cipher_state.h>
 #include <botan/internal/tls_handshake_state_13.h>
 #include <botan/internal/tls_handshake_transitions.h>
 
@@ -25,7 +24,7 @@ namespace TLS {
 /**
 * SSL/TLS Client 1.3 implementation
 */
-class Client_Impl_13 : public Channel_Impl_13 {
+class Client_Impl_13 final : public Channel_Impl_13 {
    public:
       /**
       * Set up a new TLS client session
@@ -45,13 +44,24 @@ class Client_Impl_13 : public Channel_Impl_13 {
       *
       * @param next_protocols specifies protocols to advertise with ALPN
       */
-      explicit Client_Impl_13(const std::shared_ptr<Callbacks>& callbacks,
-                              const std::shared_ptr<Session_Manager>& session_manager,
-                              const std::shared_ptr<Credentials_Manager>& creds,
-                              const std::shared_ptr<const Policy>& policy,
-                              const std::shared_ptr<RandomNumberGenerator>& rng,
-                              Server_Information server_info = Server_Information(),
-                              const std::vector<std::string>& next_protocols = {});
+      static std::shared_ptr<Client_Impl_13> create(const std::shared_ptr<Callbacks>& callbacks,
+                                                    const std::shared_ptr<Session_Manager>& session_manager,
+                                                    const std::shared_ptr<Credentials_Manager>& creds,
+                                                    const std::shared_ptr<const Policy>& policy,
+                                                    const std::shared_ptr<RandomNumberGenerator>& rng,
+                                                    Server_Information server_info = Server_Information(),
+                                                    const std::vector<std::string>& next_protocols = {});
+
+      Client_Impl_13([[maybe_unused]] Private dont_call_me,
+                     const std::shared_ptr<Callbacks>& callbacks,
+                     const std::shared_ptr<Session_Manager>& session_manager,
+                     const std::shared_ptr<Credentials_Manager>& creds,
+                     const std::shared_ptr<const Policy>& policy,
+                     const std::shared_ptr<RandomNumberGenerator>& rng,
+                     Server_Information server_info = Server_Information()) :
+            Channel_Impl_13(callbacks, session_manager, creds, rng, policy, false /* is_server */),
+            m_info(std::move(server_info)),
+            m_handshake(std::make_unique<Pending_Handshake>()) {}
 
       /**
       * @return network protocol as advertised by the TLS server, if server sent the ALPN extension
@@ -85,10 +95,10 @@ class Client_Impl_13 : public Channel_Impl_13 {
       void process_dummy_change_cipher_spec() override;
 
       void maybe_log_secret(std::string_view label, std::span<const uint8_t> secret) const override;
-      bool prepend_ccs() override;
+      void maybe_handle_compatibility_mode(Compat_Mode_Situation situation) override;
 
       using Channel_Impl_13::handle;
-      void handle(const Server_Hello_12& server_hello_msg);
+      void handle(const Server_Hello_12_Shim& server_hello_msg);
       void handle(const Server_Hello_13& server_hello_msg);
       void handle(const Hello_Retry_Request& hrr_msg);
       void handle(const Encrypted_Extensions& encrypted_extensions_msg);
@@ -104,13 +114,15 @@ class Client_Impl_13 : public Channel_Impl_13 {
    private:
       const Server_Information m_info;
 
-      Client_Handshake_State_13 m_handshake_state;
-      Handshake_Transitions m_transitions;
+      struct Pending_Handshake {
+            Client_Handshake_State_13 state;
+            Handshake_Transitions transitions;
+            std::optional<Session_with_Handle> resumed_session;
+            std::optional<std::string> psk_identity;
+      };
 
-      bool m_should_send_ccs;
-
-      std::optional<Session_with_Handle> m_resumed_session;
-      std::optional<std::string> m_psk_identity;
+      std::unique_ptr<Pending_Handshake> m_handshake;
+      size_t m_session_tickets_received = 0;
 };
 
 }  // namespace TLS

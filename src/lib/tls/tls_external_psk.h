@@ -10,10 +10,8 @@
 #define BOTAN_TLS_EXTERNAL_PSK_H_
 
 #include <botan/secmem.h>
-#include <botan/strong_type.h>
-
-#include <utility>
-#include <vector>
+#include <string>
+#include <string_view>
 
 namespace Botan::TLS {
 
@@ -21,7 +19,7 @@ namespace Botan::TLS {
  * This is an externally provided PreSharedKey along with its identity, master
  * secret and (in case of TLS 1.3) a pre-provisioned Pseudo Random Function.
  */
-class ExternalPSK {
+class BOTAN_PUBLIC_API(3, 2) ExternalPSK final {
    public:
       ExternalPSK(const ExternalPSK&) = delete;
       ExternalPSK& operator=(const ExternalPSK&) = delete;
@@ -30,7 +28,10 @@ class ExternalPSK {
       ~ExternalPSK() = default;
 
       ExternalPSK(std::string_view identity, std::string_view prf_algo, secure_vector<uint8_t> psk) :
-            m_identity(identity), m_prf_algo(prf_algo), m_master_secret(std::move(psk)) {}
+            m_identity(identity), m_prf_algo(prf_algo), m_master_secret(std::move(psk)), m_is_imported(false) {}
+
+      ExternalPSK(std::string_view identity, std::string_view prf_algo, secure_vector<uint8_t> psk, bool imported) :
+            m_identity(identity), m_prf_algo(prf_algo), m_master_secret(std::move(psk)), m_is_imported(imported) {}
 
       /**
        * Identity (e.g. username of the PSK owner) of the preshared key.
@@ -43,10 +44,7 @@ class ExternalPSK {
        * Returns the master secret by moving it out of this object. Do not call
        * this method more than once.
        */
-      secure_vector<uint8_t> extract_master_secret() {
-         BOTAN_STATE_CHECK(!m_master_secret.empty());
-         return std::exchange(m_master_secret, {});
-      }
+      secure_vector<uint8_t> extract_master_secret();
 
       /**
        * External preshared keys in TLS 1.3 must be provisioned with a
@@ -55,10 +53,18 @@ class ExternalPSK {
        */
       const std::string& prf_algo() const { return m_prf_algo; }
 
+      /**
+       * Returns true if this PSK was derived using the PSK importer
+       * mechanism from RFC 9258. Imported PSKs use the "imp binder"
+       * label for binder computation instead of "ext binder".
+       */
+      bool is_imported() const { return m_is_imported; }
+
    private:
       std::string m_identity;
       std::string m_prf_algo;
       secure_vector<uint8_t> m_master_secret;
+      bool m_is_imported;
 };
 
 }  // namespace Botan::TLS

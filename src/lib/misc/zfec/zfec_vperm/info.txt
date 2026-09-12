@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 ZFEC_VPERM -> 20211211
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "ZFEC Vector Permutation"
@@ -8,12 +8,12 @@ brief -> "ZFEC using Vector Permutation Instructions"
 </module_info>
 
 <isa>
-x86_32:sse2
-x86_64:sse2
 x86_32:ssse3
 x86_64:ssse3
 arm32:neon
 arm64:neon
+loongarch64:lsx
+wasm:simd128
 </isa>
 
 <arch>
@@ -21,8 +21,11 @@ x86_32
 x86_64
 arm32
 arm64
+loongarch64
+wasm
 </arch>
 
 <requires>
-simd
+cpuid
+simd_4x32
 </requires>

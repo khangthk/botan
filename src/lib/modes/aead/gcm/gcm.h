@@ -10,6 +10,7 @@
 #define BOTAN_AEAD_GCM_H_
 
 #include <botan/aead.h>
+
 #include <botan/block_cipher.h>
 #include <botan/sym_algo.h>
 
@@ -21,49 +22,48 @@ class GHASH;
 /**
 * GCM Mode
 */
-class GCM_Mode : public AEAD_Mode {
+class GCM_Mode : public AEAD_Mode /* NOLINT(*-special-member-functions) */ {
    public:
-      void set_associated_data_n(size_t idx, std::span<const uint8_t> ad) override final;
+      void set_associated_data_n(size_t idx, std::span<const uint8_t> ad) final;
 
-      std::string name() const override final;
+      std::string name() const final;
 
-      size_t update_granularity() const override final;
+      size_t update_granularity() const final;
 
-      size_t ideal_granularity() const override final;
+      size_t ideal_granularity() const final;
 
-      Key_Length_Specification key_spec() const override final;
+      Key_Length_Specification key_spec() const final;
 
-      bool valid_nonce_length(size_t len) const override final;
+      bool valid_nonce_length(size_t len) const final;
 
-      size_t tag_size() const override final { return m_tag_size; }
+      size_t tag_size() const final { return m_tag_size; }
 
-      void clear() override final;
+      void clear() final;
 
-      void reset() override final;
+      void reset() final;
 
-      std::string provider() const override final;
+      std::string provider() const final;
 
-      bool has_keying_material() const override final;
+      bool has_keying_material() const final;
 
-      ~GCM_Mode();
+      ~GCM_Mode() override;
 
    protected:
       GCM_Mode(std::unique_ptr<BlockCipher> cipher, size_t tag_size);
 
       static const size_t GCM_BS = 16;
 
-      const size_t m_tag_size;
-      const std::string m_cipher_name;
+      const size_t m_tag_size;          // NOLINT(*non-private-member-variable*)
+      const std::string m_cipher_name;  // NOLINT(*non-private-member-variable*)
 
-      std::unique_ptr<StreamCipher> m_ctr;
-      std::unique_ptr<GHASH> m_ghash;
+      std::unique_ptr<StreamCipher> m_ctr;  // NOLINT(*non-private-member-variable*)
+      std::unique_ptr<GHASH> m_ghash;       // NOLINT(*non-private-member-variable*)
+      bool m_in_msg = false;                // NOLINT(*non-private-member-variable*)
 
    private:
       void start_msg(const uint8_t nonce[], size_t nonce_len) override;
 
       void key_schedule(std::span<const uint8_t> key) override;
-
-      secure_vector<uint8_t> m_y0;
 };
 
 /**
@@ -75,10 +75,10 @@ class GCM_Encryption final : public GCM_Mode {
       * @param cipher the 128 bit block cipher to use
       * @param tag_size is how big the auth tag will be
       */
-      GCM_Encryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16) :
+      explicit GCM_Encryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16) :
             GCM_Mode(std::move(cipher), tag_size) {}
 
-      size_t output_length(size_t input_length) const override { return input_length + tag_size(); }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return 0; }
 
@@ -96,13 +96,10 @@ class GCM_Decryption final : public GCM_Mode {
       * @param cipher the 128 bit block cipher to use
       * @param tag_size is how big the auth tag will be
       */
-      GCM_Decryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16) :
+      explicit GCM_Decryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16) :
             GCM_Mode(std::move(cipher), tag_size) {}
 
-      size_t output_length(size_t input_length) const override {
-         BOTAN_ARG_CHECK(input_length >= tag_size(), "Sufficient input");
-         return input_length - tag_size();
-      }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return tag_size(); }
 

@@ -7,8 +7,13 @@ posix_mlock
 dev_random
 clock_gettime
 
+explicit_bzero
+getrandom
+getentropy
+
 atomics
 sockets
+system_clock
 threads
 thread_local
 filesystem

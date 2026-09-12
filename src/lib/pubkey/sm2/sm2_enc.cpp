@@ -9,8 +9,10 @@
 
 #include <botan/ber_dec.h>
 #include <botan/der_enc.h>
+#include <botan/ec_group.h>
 #include <botan/hash.h>
 #include <botan/kdf.h>
+#include <botan/mem_ops.h>
 #include <botan/pk_ops.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/fmt.h>
@@ -22,7 +24,7 @@ namespace {
 class SM2_Encryption_Operation final : public PK_Ops::Encryption {
    public:
       SM2_Encryption_Operation(const SM2_Encryption_PublicKey& key, std::string_view kdf_hash) :
-            m_group(key.domain()), m_peer(key._public_key()), m_ws(EC_Point::WORKSPACE_SIZE) {
+            m_group(key.domain()), m_peer(key._public_ec_point()) {
          m_hash = HashFunction::create_or_throw(kdf_hash);
          m_kdf = KDF::create_or_throw(fmt("KDF2({})", kdf_hash));
       }
@@ -40,39 +42,49 @@ class SM2_Encryption_Operation final : public PK_Ops::Encryption {
       }
 
       std::vector<uint8_t> encrypt(std::span<const uint8_t> msg, RandomNumberGenerator& rng) override {
-         const auto k = EC_Scalar::random(m_group, rng);
+         for(;;) {
+            const auto k = EC_Scalar::random(m_group, rng);
 
-         const EC_AffinePoint C1 = EC_AffinePoint::g_mul(k, rng, m_ws);
+            const EC_AffinePoint C1 = EC_AffinePoint::g_mul(k, rng);
 
-         const EC_AffinePoint kPB = m_peer.mul(k, rng, m_ws);
+            const EC_AffinePoint kPB = m_peer.mul(k, rng);
 
-         const auto x2_bytes = kPB.x_bytes();
-         const auto y2_bytes = kPB.y_bytes();
+            const auto x2_bytes = kPB.x_bytes();
+            const auto y2_bytes = kPB.y_bytes();
 
-         secure_vector<uint8_t> kdf_input;
-         kdf_input += x2_bytes;
-         kdf_input += y2_bytes;
+            secure_vector<uint8_t> kdf_input;
+            kdf_input += x2_bytes;
+            kdf_input += y2_bytes;
 
-         const auto kdf_output = m_kdf->derive_key(msg.size(), kdf_input);
+            const auto kdf_output = m_kdf->derive_key(msg.size(), kdf_input);
 
-         std::vector<uint8_t> masked_msg(msg.size());
-         xor_buf(masked_msg, msg, kdf_output);
+            /*
+            * According to GB/T 32918.4-2016 section 6.1 we must retry if the
+            * KDF output is the all-zero string.
+            */
+            if(!msg.empty() && CT::all_zeros(kdf_output.data(), kdf_output.size()).as_bool()) {
+               continue;
+            }
 
-         m_hash->update(x2_bytes);
-         m_hash->update(msg);
-         m_hash->update(y2_bytes);
-         const auto C3 = m_hash->final<std::vector<uint8_t>>();
+            std::vector<uint8_t> masked_msg(msg.size());
+            xor_buf(masked_msg, msg, kdf_output);
 
-         std::vector<uint8_t> ctext;
-         DER_Encoder(ctext)
-            .start_sequence()
-            .encode(BigInt(C1.x_bytes()))
-            .encode(BigInt(C1.y_bytes()))
-            .encode(C3, ASN1_Type::OctetString)
-            .encode(masked_msg, ASN1_Type::OctetString)
-            .end_cons();
+            m_hash->update(x2_bytes);
+            m_hash->update(msg);
+            m_hash->update(y2_bytes);
+            const auto C3 = m_hash->final<std::vector<uint8_t>>();
 
-         return ctext;
+            std::vector<uint8_t> ctext;
+            DER_Encoder(ctext)
+               .start_sequence()
+               .encode(BigInt(C1.x_bytes()))
+               .encode(BigInt(C1.y_bytes()))
+               .encode(C3, ASN1_Type::OctetString)
+               .encode(masked_msg, ASN1_Type::OctetString)
+               .end_cons();
+
+            return ctext;
+         }
       }
 
    private:
@@ -80,7 +92,6 @@ class SM2_Encryption_Operation final : public PK_Ops::Encryption {
       const EC_AffinePoint m_peer;
       std::unique_ptr<HashFunction> m_hash;
       std::unique_ptr<KDF> m_kdf;
-      std::vector<BigInt> m_ws;
 };
 
 class SM2_Decryption_Operation final : public PK_Ops::Decryption {
@@ -109,6 +120,13 @@ class SM2_Decryption_Operation final : public PK_Ops::Decryption {
          return ptext_len - (2 * elem_size + m_hash->output_length());
       }
 
+      size_t ciphertext_length(size_t ptext_len) const override {
+         const size_t elem_size = m_group.get_order_bytes();
+         const size_t der_overhead = 16;
+
+         return der_overhead + 2 * elem_size + m_hash->output_length() + ptext_len;
+      }
+
       secure_vector<uint8_t> decrypt(uint8_t& valid_mask, std::span<const uint8_t> ctext) override {
          const size_t p_bytes = m_group.get_p_bytes();
 
@@ -119,10 +137,12 @@ class SM2_Decryption_Operation final : public PK_Ops::Decryption {
             return secure_vector<uint8_t>();
          }
 
-         BigInt x1, y1;
-         secure_vector<uint8_t> C3, masked_msg;
+         BigInt x1;
+         BigInt y1;
+         secure_vector<uint8_t> C3;
+         secure_vector<uint8_t> masked_msg;
 
-         BER_Decoder(ctext)
+         BER_Decoder(ctext, BER_Decoder::Limits::DER())
             .start_sequence()
             .decode(x1)
             .decode(y1)
@@ -131,35 +151,30 @@ class SM2_Decryption_Operation final : public PK_Ops::Decryption {
             .end_cons()
             .verify_end();
 
-         std::vector<uint8_t> recode_ctext;
-         DER_Encoder(recode_ctext)
-            .start_sequence()
-            .encode(x1)
-            .encode(y1)
-            .encode(C3, ASN1_Type::OctetString)
-            .encode(masked_msg, ASN1_Type::OctetString)
-            .end_cons();
-
-         if(recode_ctext.size() != ctext.size()) {
-            return secure_vector<uint8_t>();
-         }
-
-         if(CT::is_equal(recode_ctext.data(), ctext.data(), ctext.size()).as_bool() == false) {
+         // Wrong length so certainly invalid, reject immediately
+         if(C3.size() != m_hash->output_length()) {
             return secure_vector<uint8_t>();
          }
 
          auto C1 = EC_AffinePoint::from_bigint_xy(m_group, x1, y1);
 
-         // Here C1 is publically invalid, so no problem with early return:
+         // Here C1 is publicly invalid, so no problem with early return:
          if(!C1) {
             return secure_vector<uint8_t>();
          }
 
-         const auto dbC1 = C1->mul(m_x, m_rng, m_ws);
+         const auto dbC1 = C1->mul(m_x, m_rng);
          const auto x2_bytes = dbC1.x_bytes();
          const auto y2_bytes = dbC1.y_bytes();
 
          const auto kdf_output = m_kdf->derive_key(masked_msg.size(), dbC1.xy_bytes());
+
+         /*
+         * GB/T 32918.4-2016 section 7.1 requires we reject a message which
+         * results in a KDF output which is the all-zero string.
+         */
+         const auto kdf_nonzero =
+            masked_msg.empty() ? CT::Mask<uint8_t>::set() : ~CT::all_zeros(kdf_output.data(), kdf_output.size());
 
          xor_buf(masked_msg.data(), kdf_output.data(), kdf_output.size());
 
@@ -168,11 +183,13 @@ class SM2_Decryption_Operation final : public PK_Ops::Decryption {
          m_hash->update(y2_bytes);
          const auto u = m_hash->final();
 
-         if(!CT::is_equal(u.data(), C3.data(), m_hash->output_length()).as_bool()) {
-            return secure_vector<uint8_t>();
-         }
+         const auto mac_ok = CT::is_equal<uint8_t>(u, C3) & kdf_nonzero;
+         valid_mask = mac_ok.if_set_return(0xFF);
 
-         valid_mask = 0xFF;
+         // Zero the plaintext if the MAC check failed
+         (~mac_ok).if_set_zero_out(masked_msg.data(), masked_msg.size());
+         const size_t output_len = CT::Mask<size_t>::expand(mac_ok).if_set_return(masked_msg.size());
+         masked_msg.resize(output_len);
          return masked_msg;
       }
 
@@ -180,7 +197,6 @@ class SM2_Decryption_Operation final : public PK_Ops::Decryption {
       const EC_Group m_group;
       const EC_Scalar m_x;
       RandomNumberGenerator& m_rng;
-      std::vector<BigInt> m_ws;
       std::unique_ptr<HashFunction> m_hash;
       std::unique_ptr<KDF> m_kdf;
 };

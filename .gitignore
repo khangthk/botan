@@ -1,6 +1,7 @@
 /Makefile
 build.ninja
 .ninja_log
+.ninja_deps
 libbotan*.so.*
 *.a
 *.so
@@ -27,10 +28,18 @@ vgcore.*
 \#*\#
 .\#*
 
+# Benchmark output in top level
+/*.json
+
+# Misc dev scripts in top level
+/*.sh
+
 # Editor configuration files (top level)
 /*.sublime-project
 /*.sublime-workspace
 /.editorconfig
+/.vscode
+/.clang-format
 
 # Archive files
 *.tgz
@@ -87,6 +96,8 @@ callgrind.*
 /*.crt
 /*.txt
 /*.rst
+/*.md
+/*.pdf
 
 # Add back files from the toplevel
 !/news.rst

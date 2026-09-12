@@ -11,16 +11,20 @@
 
 #include <botan/pk_keys.h>
 
-#include <array>
+#include <memory>
+#include <vector>
 
 namespace Botan {
+
+class Ed448_PublicKey_Data;
+class Ed448_PrivateKey_Data;
 
 /**
  * @brief A public key for Ed448/Ed448ph according to RFC 8032.
  *
  * By default, Ed448 without prehash is used (recommended). To use
  * Ed448ph, "Ed448ph" or a custom hash function identifier is passed
- * as a parameter to the create_verification_op method.
+ * as a parameter to the _create_verification_op method.
  *
  * Note that contexts (i.e. Ed448ctx) are not supported by this interface.
  */
@@ -54,17 +58,16 @@ class BOTAN_PUBLIC_API(3, 4) Ed448_PublicKey : public virtual Public_Key {
       /**
       * Create a Ed448 Public Key from bytes (57 Bytes).
       */
-      Ed448_PublicKey(std::span<const uint8_t> key_bits);
+      BOTAN_FUTURE_EXPLICIT Ed448_PublicKey(std::span<const uint8_t> key_bits);
 
-      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                   std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const override;
 
       std::unique_ptr<PK_Ops::Verification> create_x509_verification_op(const AlgorithmIdentifier& signature_algorithm,
                                                                         std::string_view provider) const override;
 
    protected:
       Ed448_PublicKey() = default;
-      std::array<uint8_t, 57> m_public;
+      std::shared_ptr<const Ed448_PublicKey_Data> m_public;  // NOLINT(*non-private-member-variable*)
 };
 
 BOTAN_DIAGNOSTIC_PUSH
@@ -75,7 +78,7 @@ BOTAN_DIAGNOSTIC_IGNORE_INHERITED_VIA_DOMINANCE
  *
  * By default, Ed448 without prehash is used (recommended). To use
  * Ed448ph, "Ed448ph" or a custom hash function identifier is passed
- * as a parameter to the create_verification_op method.
+ * as a parameter to the _create_verification_op method.
  *
  * Note that contexts (i.e. Ed448ctx) are not supported by this interface.
  */
@@ -95,7 +98,7 @@ class BOTAN_PUBLIC_API(3, 4) Ed448_PrivateKey final : public Ed448_PublicKey,
       *
       * @param key_bits private key bytes (57 Bytes)
       */
-      Ed448_PrivateKey(std::span<const uint8_t> key_bits);
+      BOTAN_FUTURE_EXPLICIT Ed448_PrivateKey(std::span<const uint8_t> key_bits);
 
       /**
       * Generate a new private key.
@@ -104,7 +107,7 @@ class BOTAN_PUBLIC_API(3, 4) Ed448_PrivateKey final : public Ed448_PublicKey,
       */
       explicit Ed448_PrivateKey(RandomNumberGenerator& rng);
 
-      secure_vector<uint8_t> raw_private_key_bits() const override { return {m_private.begin(), m_private.end()}; }
+      secure_vector<uint8_t> raw_private_key_bits() const override;
 
       secure_vector<uint8_t> private_key_bits() const override;
 
@@ -112,12 +115,11 @@ class BOTAN_PUBLIC_API(3, 4) Ed448_PrivateKey final : public Ed448_PublicKey,
 
       bool check_key(RandomNumberGenerator& rng, bool strong) const override;
 
-      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
-                                                             std::string_view params,
-                                                             std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                              const PK_Signature_Options& options) const override;
 
    private:
-      secure_vector<uint8_t> m_private;
+      std::shared_ptr<const Ed448_PrivateKey_Data> m_private;
 };
 
 BOTAN_DIAGNOSTIC_POP

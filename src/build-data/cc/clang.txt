@@ -21,6 +21,10 @@ size_optimization_flags "-Os"
 add_system_include_dir_option "-isystem"
 add_sysroot_option "--sysroot="
 
+pch_suffix "pch"
+pch_compile "-Xclang -fno-pch-timestamp -x c++-header"
+pch_include "-Xclang -fno-pch-timestamp -include"
+
 <sanitizers>
 default   -> address,undefined
 
@@ -28,6 +32,10 @@ address   -> "-fsanitize=address"
 undefined -> "-fsanitize=undefined -fno-sanitize-recover=undefined"
 coverage  -> "-fsanitize=fuzzer-no-link"
 memory    -> "-fsanitize=memory"
+fuzzer    -> "-fsanitize=fuzzer"
+thread    -> "-fsanitize=thread"
+
+iterator  -> "-D_LIBCPP_DEBUG=1 -D_GLIBCXX_DEBUG"
 </sanitizers>
 
 shared_flags "-fPIC"
@@ -65,6 +73,8 @@ sse41  -> "-msse4.1"
 avx2   -> "-mavx2"
 avx512  -> "-mavx512f -mavx512bw -mavx512dq -mavx512vbmi -mavx512vbmi2 -mavx512bitalg -mavx512vl -mavx512ifma"
 
+avx512_clmul -> "-mavx512f -mavx512bw -mavx512dq -mavx512vbmi -mavx512vbmi2 -mavx512bitalg -mavx512vl -mavx512ifma -mvpclmulqdq"
+
 vaes    -> "-mvaes -mavx2"
 sha512  -> "-msha512 -mavx2"
 sm3     -> "-msm3"
@@ -84,6 +94,11 @@ ppc64:power9 -> "-mcpu=power9"
 
 arm64:armv8crypto -> "-march=armv8+crypto"
 arm64:armv8sha512 -> "-march=armv8.2-a+sha3"
+arm64:armv8sm3 -> "-march=armv8.2-a+sm4"
+arm64:armv8sm4 -> "-march=armv8.2-a+sm4"
+
+loongarch64:lsx -> "-mlsx"
+loongarch64:lasx -> "-mlasx"
 
 arm32:neon    -> "-mfpu=neon"
 arm64:neon    -> ""
@@ -103,3 +118,7 @@ ppc64   -> "-m64"
 macos   -> "-stdlib=libc++"
 ios     -> "-stdlib=libc++"
 </mach_abi_linking>
+
+<ct_value_barrier>
+default -> asm
+</ct_value_barrier>

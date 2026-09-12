@@ -8,9 +8,19 @@
 #define BOTAN_ALLOCATOR_HELPERS_H_
 
 #include <botan/types.h>
-#include <cstring>
 
 namespace Botan {
+
+/*
+* Define BOTAN_MALLOC_FN
+*/
+#if defined(__clang__) || defined(__GNUG__)
+   #define BOTAN_MALLOC_FN __attribute__((malloc))
+#elif defined(_MSC_VER)
+   #define BOTAN_MALLOC_FN __declspec(restrict)
+#else
+   #define BOTAN_MALLOC_FN
+#endif
 
 /**
 * Allocate a memory buffer by some method. This should only be used for
@@ -35,8 +45,15 @@ BOTAN_PUBLIC_API(2, 3) void deallocate_memory(void* p, size_t elems, size_t elem
 */
 void BOTAN_UNSTABLE_API initialize_allocator();
 
+/**
+* Initializes the allocator as a side effect of construction
+*
+* Declare a static instance in a translation unit to ensure the allocator
+* is initialized before any other static initialization in that unit.
+*/
 class Allocator_Initializer final {
    public:
+      /// Initialize the allocator
       Allocator_Initializer() { initialize_allocator(); }
 };
 

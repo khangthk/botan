@@ -6,6 +6,8 @@
 */
 
 #include <botan/internal/shacal2.h>
+
+#include <botan/internal/isa_extn.h>
 #include <immintrin.h>
 
 namespace Botan {
@@ -15,7 +17,9 @@ Only encryption is supported since the inverse round function would
 require a different instruction
 */
 
-BOTAN_FUNC_ISA("sha,ssse3") void SHACAL2::x86_encrypt_blocks(const uint8_t in[], uint8_t out[], size_t blocks) const {
+void BOTAN_FN_ISA_SHANI SHACAL2::x86_encrypt_blocks(const uint8_t in[], uint8_t out[], size_t blocks) const {
+   // NOLINTBEGIN(portability-simd-intrinsics) TODO convert to SIMD_4x32 plus SHA-NI helpers
+
    const __m128i MASK1 = _mm_set_epi8(8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
    const __m128i MASK2 = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
 
@@ -66,11 +70,11 @@ BOTAN_FUNC_ISA("sha,ssse3") void SHACAL2::x86_encrypt_blocks(const uint8_t in[],
       out_mm += 4;
    }
 
-   while(blocks) {
+   while(blocks > 0) {
       __m128i B0 = _mm_loadu_si128(in_mm);
       __m128i B1 = _mm_loadu_si128(in_mm + 1);
 
-      __m128i TMP = _mm_shuffle_epi8(_mm_unpacklo_epi64(B0, B1), MASK2);
+      const __m128i TMP = _mm_shuffle_epi8(_mm_unpacklo_epi64(B0, B1), MASK2);
       B1 = _mm_shuffle_epi8(_mm_unpackhi_epi64(B0, B1), MASK2);
       B0 = TMP;
 
@@ -93,6 +97,8 @@ BOTAN_FUNC_ISA("sha,ssse3") void SHACAL2::x86_encrypt_blocks(const uint8_t in[],
       in_mm += 2;
       out_mm += 2;
    }
+
+   // NOLINTEND(portability-simd-intrinsics)
 }
 
 }  // namespace Botan

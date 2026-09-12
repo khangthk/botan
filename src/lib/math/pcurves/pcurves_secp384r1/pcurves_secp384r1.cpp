@@ -80,10 +80,7 @@ class Secp384r1Rep final {
 
          BOTAN_DEBUG_ASSERT(S <= 4);
 
-         const auto correction = p384_mul_mod_384(S);
-         W borrow = bigint_sub2(r.data(), N, correction.data(), N);
-
-         bigint_cnd_add(borrow, r.data(), N, P.data(), N);
+         solinas_correct_redc<N>(r, P, p384_mul_mod_384(S));
 
          return r;
       }
@@ -123,8 +120,9 @@ class Secp384r1Rep final {
       }
 };
 
-// clang-format off
 namespace secp384r1 {
+
+// clang-format off
 
 class Params final : public EllipticCurveParameters<
    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF",
@@ -141,7 +139,7 @@ class Params final : public EllipticCurveParameters<
 class Curve final : public EllipticCurve<Params, Secp384r1Rep> {
    public:
       // Return the square of the inverse of x
-      static FieldElement fe_invert2(const FieldElement& x) {
+      static constexpr FieldElement fe_invert2(const FieldElement& x) {
          // From https://briansmith.org/ecc-inversion-addition-chains-01
 
          FieldElement r = x.square();
@@ -182,7 +180,47 @@ class Curve final : public EllipticCurve<Params, Secp384r1Rep> {
          return r;
       }
 
-      static Scalar scalar_invert(const Scalar& x) {
+      static constexpr FieldElement fe_sqrt(const FieldElement& x) {
+         // Generated using https://github.com/mmcloughlin/addchain
+
+         auto z = x.square();
+         z *= x;
+         z = z.square();
+         auto t0 = x * z;
+         z = t0;
+         z.square_n(3);
+         auto t1 = t0 * z;
+         auto t2 = t1.square();
+         z = t2 * x;
+         t2.square_n(5);
+         t1 *= t2;
+         t2 = t1;
+         t2.square_n(12);
+         t1 *= t2;
+         t1.square_n(7);
+         t1 *= z;
+         z = t1.square();
+         z *= x;
+         t2 = z;
+         t2.square_n(31);
+         t1 *= t2;
+         t2 = t1;
+         t2.square_n(63);
+         t1 *= t2;
+         t2 = t1;
+         t2.square_n(126);
+         t1 *= t2;
+         t1.square_n(3);
+         t0 *= t1;
+         t0.square_n(33);
+         z *= t0;
+         z.square_n(64);
+         z *= x;
+         z.square_n(30);
+         return z;
+      }
+
+      static constexpr Scalar scalar_invert(const Scalar& x) {
          // Generated using https://github.com/mmcloughlin/addchain
 
          auto t3 = x.square();

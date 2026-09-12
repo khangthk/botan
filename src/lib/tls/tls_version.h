@@ -16,6 +16,8 @@
 namespace Botan::TLS {
 
 enum class Version_Code : uint16_t {
+   /// TLSv1.0 (no longer supported)
+   TLS_V10 = 0x0301,
    /// TLSv1.1 (no longer supported)
    TLS_V11 = 0x0302,
    /// TLSv1.2
@@ -36,26 +38,20 @@ class BOTAN_PUBLIC_API(2, 0) Protocol_Version final {
       using enum Version_Code;
 
       /**
-      * Returns the latest version of the TLS protocol known to the library
-      * (currently TLS v1.3)
+      * Returns the latest version of the TLS protocol known to the library and
+      * available in the current build.
       *
       * @return latest known TLS version
       */
-      static Protocol_Version latest_tls_version() {
-#if defined(BOTAN_HAS_TLS_13)
-         return Protocol_Version(TLS_V13);
-#else
-         return Protocol_Version(TLS_V12);
-#endif
-      }
+      static Protocol_Version latest_tls_version();
 
       /**
       * Returns the latest version of the DTLS protocol known to the library
-      * (currently DTLS v1.2)
+      * and available in the current build.
       *
       * @return latest known DTLS version
       */
-      static Protocol_Version latest_dtls_version() { return Protocol_Version(DTLS_V12); }
+      static Protocol_Version latest_dtls_version();
 
       Protocol_Version() : m_version(0) {}
 
@@ -64,7 +60,8 @@ class BOTAN_PUBLIC_API(2, 0) Protocol_Version final {
       /**
       * @param named_version a specific named version of the protocol
       */
-      Protocol_Version(Version_Code named_version) : Protocol_Version(static_cast<uint16_t>(named_version)) {}
+      Protocol_Version(Version_Code named_version) :  // NOLINT(*-explicit-conversions)
+            Protocol_Version(static_cast<uint16_t>(named_version)) {}
 
       /**
       * @param major the major version

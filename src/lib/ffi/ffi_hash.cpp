@@ -29,7 +29,7 @@ int botan_hash_init(botan_hash_t* hash, const char* hash_name, uint32_t flags) {
          return BOTAN_FFI_ERROR_NOT_IMPLEMENTED;
       }
 
-      *hash = new botan_hash_struct(std::move(h));
+      ffi_new_object(hash, std::move(h));
       return BOTAN_FFI_SUCCESS;
    });
 }
@@ -50,6 +50,13 @@ int botan_hash_block_size(botan_hash_t hash, size_t* out) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
    return BOTAN_FFI_VISIT(hash, [=](const auto& h) { *out = h.hash_block_size(); });
+}
+
+int botan_hash_security_level(botan_hash_t hash, size_t* out) {
+   if(out == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   return BOTAN_FFI_VISIT(hash, [=](const auto& h) { *out = h.security_level(); });
 }
 
 int botan_hash_clear(botan_hash_t hash) {
@@ -75,8 +82,12 @@ int botan_hash_final(botan_hash_t hash, uint8_t out[]) {
    return BOTAN_FFI_VISIT(hash, [=](auto& h) { h.final(out); });
 }
 
+// NOLINTNEXTLINE(misc-misplaced-const)
 int botan_hash_copy_state(botan_hash_t* dest, const botan_hash_t source) {
-   return BOTAN_FFI_VISIT(source, [=](const auto& src) { *dest = new botan_hash_struct(src.copy_state()); });
+   if(dest == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   return BOTAN_FFI_VISIT(source, [=](const auto& src) { return ffi_new_object(dest, src.copy_state()); });
 }
 
 int botan_hash_name(botan_hash_t hash, char* name, size_t* name_len) {

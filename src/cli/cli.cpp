@@ -7,7 +7,6 @@
 #include "cli.h"
 #include "argparse.h"
 #include <botan/rng.h>
-#include <botan/internal/os_utils.h>
 #include <fstream>
 #include <iostream>
 
@@ -21,6 +20,10 @@
 
 #if defined(BOTAN_HAS_BASE58_CODEC)
    #include <botan/base58.h>
+#endif
+
+#if defined(BOTAN_HAS_OS_UTILS)
+   #include <botan/internal/os_utils.h>
 #endif
 
 #ifdef _WIN32
@@ -173,14 +176,16 @@ std::ostream& Command::error_output() {
    return std::cerr;
 }
 
-std::vector<uint8_t> Command::slurp_file(const std::string& input_file, size_t buf_size) const {
+//static
+std::vector<uint8_t> Command::slurp_file(const std::string& input_file, size_t buf_size) {
    std::vector<uint8_t> buf;
    auto insert_fn = [&](const uint8_t b[], size_t l) { buf.insert(buf.end(), b, b + l); };
    Command::read_file(input_file, insert_fn, buf_size);
    return buf;
 }
 
-std::string Command::slurp_file_as_str(const std::string& input_file, size_t buf_size) const {
+//static
+std::string Command::slurp_file_as_str(const std::string& input_file, size_t buf_size) {
    std::string str;
    auto insert_fn = [&](const uint8_t b[], size_t l) { str.append(reinterpret_cast<const char*>(b), l); };
    Command::read_file(input_file, insert_fn, buf_size);
@@ -241,21 +246,27 @@ std::string Command::get_passphrase_arg(const std::string& prompt, const std::st
 namespace {
 
 bool echo_suppression_supported() {
+#if defined(BOTAN_HAS_OS_UTILS)
    auto echo = Botan::OS::suppress_echo_on_terminal();
    return (echo != nullptr);
+#else
+   return false;
+#endif
 }
 
 }  // namespace
 
 std::string Command::get_passphrase(const std::string& prompt) {
-   if(echo_suppression_supported() == false) {
+   if(!echo_suppression_supported()) {
       error_output() << "Warning: terminal echo suppression not enabled for this platform\n";
    }
 
    error_output() << prompt << ": " << std::flush;
    std::string pass;
 
+#if defined(BOTAN_HAS_OS_UTILS)
    auto echo_suppress = Botan::OS::suppress_echo_on_terminal();
+#endif
 
    std::getline(std::cin, pass);
 

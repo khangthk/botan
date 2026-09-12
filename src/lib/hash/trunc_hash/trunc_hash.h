@@ -29,6 +29,8 @@ class Truncated_Hash final : public HashFunction {
 
       size_t output_length() const override;
 
+      size_t security_level() const override;
+
       /**
       * @param hash   the underlying hash function whose output shall be truncated
       * @param length the number of bits the hash shall be truncated to
@@ -36,8 +38,8 @@ class Truncated_Hash final : public HashFunction {
       Truncated_Hash(std::unique_ptr<HashFunction> hash, size_t length);
 
    private:
-      void add_data(std::span<const uint8_t>) override;
-      void final_result(std::span<uint8_t>) override;
+      void add_data(std::span<const uint8_t> input) override;
+      void final_result(std::span<uint8_t> output) override;
 
       std::unique_ptr<HashFunction> m_hash;
       size_t m_output_bits;

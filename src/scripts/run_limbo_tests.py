@@ -4,18 +4,23 @@
 Runs the tests from https://github.com/C2SP/x509-limbo
 """
 
-from botan3 import X509Cert
-from dateutil import parser
 import json
-import datetime
-import optparse # pylint: disable=deprecated-module
+import optparse  # pylint: disable=deprecated-module
 import re
 import subprocess
 import sys
 
+from botan3 import X509Cert
+from dateutil import parser
+
 ignored_tests = {}
 
 tests_that_succeed_unexpectedly = {
+    'crl::revoked-certificate-with-crl': 'Need CRL support in this script',
+    'crl::crlnumber-missing': 'Need CRL support in this script',
+    'crl::crlnumber-critical': 'Need CRL support in this script',
+    'crl::issuer-missing-crlsign':  'Need CRL support in this script',
+
     'rfc5280::aki::critical-aki unexpected': 'Conflates CA and verifier requirements',
     'rfc5280::aki::critical-aki': 'Conflates CA and verifier requirements',
     'rfc5280::aki::intermediate-missing-aki': 'Conflates CA and verifier requirements',
@@ -31,18 +36,26 @@ tests_that_succeed_unexpectedly = {
     'rfc5280::ski::root-missing-ski': 'Conflates CA and verifier requirements',
 
     'webpki::aki::root-with-aki-missing-keyidentifier': 'Conflates CA and verifier requirements',
-    'webpki::aki::root-with-aki-authoritycertissuer': 'Conflates CA and verifier requirements',
-    'webpki::aki::root-with-aki-authoritycertserialnumber': 'Conflates CA and verifier requirements',
     'webpki::aki::root-with-aki-all-fields': 'Conflates CA and verifier requirements',
     'webpki::ee-basicconstraints-ca': 'Conflates CA and verifier requirements',
     'webpki::eku::ee-without-eku': 'Conflates CA and verifier requirements',
     'webpki::san::no-san': 'Conflates CA and verifier requirements',
     'webpki::san::san-critical-with-nonempty-subject': 'Conflates CA and verifier requirements',
     'webpki::v1-cert': 'Conflates CA and verifier requirements',
-    'webpki::forbidden-rsa-not-divisable-by-8-in-root': 'Conflates CA and verifier requirements',
-    'webpki::forbidden-rsa-key-not-divisable-by-8-in-leaf': 'Conflates CA and verifier requirements',
+    'webpki::forbidden-rsa-not-divisible-by-8-in-root': 'Conflates CA and verifier requirements',
+    'webpki::forbidden-rsa-key-not-divisible-by-8-in-leaf': 'Conflates CA and verifier requirements',
     'webpki::forbidden-dsa-leaf': 'Conflates CA and verifier requirements',
     'webpki::forbidden-dsa-root': 'Conflates CA and verifier requirements',
+
+    'webpki::cn::ipv4-hex-mismatch': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::ipv4-leading-zeros-mismatch': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::ipv6-uppercase-mismatch': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::ipv6-uncompressed-mismatch': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::ipv6-non-rfc5952-mismatch': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::punycode-not-in-san': 'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::utf8-vs-punycode-mismatch':  'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::not-in-san':  'CABF BR 7.1.4.3 applies to CAs not verifiers',
+    'webpki::cn::case-mismatch':  'CABF BR 7.1.4.3 applies to CAs not verifiers',
 
     'webpki::forbidden-p192-leaf': 'We do not place restrictions on the leaf key',
     'webpki::forbidden-weak-rsa-in-leaf': 'We do not place restrictions on the leaf key',
@@ -50,16 +63,20 @@ tests_that_succeed_unexpectedly = {
     'webpki::san::wildcard-embedded-leftmost-san': 'CABF rule not RFC 5280',
     'webpki::ca-as-leaf': 'Not applicable outside of webpki',
 
+    # Tests rejecting a wildcard issued for public suffixes; requires
+    # a Public Suffix List lookup which is out of scope for the library.
+    # (Also a CABF issuer rule that doesn't apply to verifiers in any case)
+    'webpki::san::public-suffix-multi-label-wildcard-san': 'Requires a full PSL, not just a label-count heuristic',
+    'webpki::san::public-suffix-private-namespace-wildcard-san': 'Same as public-suffix-multi-label-wildcard-san',
+
     'webpki::explicit-curve': 'Deprecated but not gone yet',
     'rfc5280::nc::invalid-dnsname-leading-period': 'Common extension',
 
-    'rfc5280::nc::nc-forbids-othername': 'Othername is a NULL which we drop',
-    'webpki::san::wildcard-embedded-ulabel-san': 'Needs investigation',
-    'webpki::malformed-aia': 'Needs investigation',
-
-    # A number of tests (736, 737, ...) seem to make the implicit assumption
-    # that if a name constraint applies to a certificate then we should not
-    # ever use the CN as the hostname, even if the ee cert does not have a SAN
+    # These tests are despite the nameconstraints prefix actually
+    # testing that no CN fallback exists - the end entity certs have a
+    # CN but no SAN, and are checking if we accept a DNS name that is
+    # set in the CN. Since currently we do consult the CN if (and only
+    # if) the SAN is completely absent, the tests fail
     'bettertls::nameconstraints::tc736': 'See comment above',
     'bettertls::nameconstraints::tc737': 'Same as 736',
     'bettertls::nameconstraints::tc738': 'Same as 736',
@@ -99,11 +116,8 @@ tests_that_succeed_unexpectedly = {
 }
 
 tests_that_fail_unexpectedly = {
-    'rfc5280::nc::permitted-ipv6-match': 'IPv6 name constraints not implemented',
-
     'cve::cve-2024-0567': 'Possible path building bug',
     'rfc5280::root-and-intermediate-swapped': 'Possible path building bug',
-    'rfc5280::nc::permitted-self-issued': 'Possible path building bug',
 }
 
 def report_success(test_id, modified_result, type):
@@ -124,7 +138,8 @@ def dump_x509(who, cert):
     dump_cmd = ['openssl', 'x509', '-text', '-noout']
     proc = subprocess.run(dump_cmd,
                           input=bytes(cert, 'utf8'),
-                          capture_output=True)
+                          capture_output=True,
+                          check=False)
 
     print(proc.stdout.decode('utf8'))
 
@@ -176,9 +191,8 @@ def main(args = None):
     modified = 0
 
     for test in limbo_json['testcases']:
-        if run_only is not None:
-            if run_only.match(test['id']) is None:
-                continue
+        if run_only is not None and run_only.match(test['id']) is None:
+            continue
 
         if test['extended_key_usage'] != [] or test['max_chain_depth'] is not None:
             # we have no way of expressing this here
@@ -225,7 +239,7 @@ def main(args = None):
             validation_time = int(parser.parse(test['validation_time']).timestamp())
 
         hostname = None
-        if test['expected_peer_name'] != None:
+        if test['expected_peer_name'] is not None:
             if test['expected_peer_name']['kind'] in ['DNS', 'IP']:
                 hostname = test['expected_peer_name']['value']
             else:

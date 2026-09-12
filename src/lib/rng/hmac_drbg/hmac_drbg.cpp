@@ -7,6 +7,10 @@
 
 #include <botan/hmac_drbg.h>
 
+#include <botan/assert.h>
+#include <botan/exceptn.h>
+#include <botan/mac.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
 #include <algorithm>
 
@@ -21,6 +25,10 @@ size_t hmac_drbg_security_level(size_t mac_output_length) {
    // SHA-224, SHA-512/224: 192 bits,
    // SHA-256, SHA-512/256, SHA-384, SHA-512: >= 256 bits
    // NIST SP 800-90A only supports up to 256 bits though
+
+   if(mac_output_length < 20) {
+      throw Invalid_Argument(fmt("HMAC_DRBG MAC output length {} is too small", mac_output_length));
+   }
 
    if(mac_output_length < 32) {
       return (mac_output_length - 4) * 8;
@@ -41,18 +49,24 @@ void check_limits(size_t reseed_interval, size_t max_number_of_bytes_per_request
    }
 }
 
+template <typename T>
+std::unique_ptr<T> check_not_null(std::unique_ptr<T> obj) {
+   BOTAN_ARG_CHECK(obj != nullptr, "Argument must not be null");
+   return obj;
+}
+
 }  // namespace
+
+HMAC_DRBG::~HMAC_DRBG() = default;
 
 HMAC_DRBG::HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                      RandomNumberGenerator& underlying_rng,
                      size_t reseed_interval,
                      size_t max_number_of_bytes_per_request) :
       Stateful_RNG(underlying_rng, reseed_interval),
-      m_mac(std::move(prf)),
+      m_mac(check_not_null(std::move(prf))),
       m_max_number_of_bytes_per_request(max_number_of_bytes_per_request),
       m_security_level(hmac_drbg_security_level(m_mac->output_length())) {
-   BOTAN_ASSERT_NONNULL(m_mac);
-
    check_limits(reseed_interval, max_number_of_bytes_per_request);
 
    clear();
@@ -64,11 +78,9 @@ HMAC_DRBG::HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                      size_t reseed_interval,
                      size_t max_number_of_bytes_per_request) :
       Stateful_RNG(underlying_rng, entropy_sources, reseed_interval),
-      m_mac(std::move(prf)),
+      m_mac(check_not_null(std::move(prf))),
       m_max_number_of_bytes_per_request(max_number_of_bytes_per_request),
       m_security_level(hmac_drbg_security_level(m_mac->output_length())) {
-   BOTAN_ASSERT_NONNULL(m_mac);
-
    check_limits(reseed_interval, max_number_of_bytes_per_request);
 
    clear();
@@ -79,27 +91,22 @@ HMAC_DRBG::HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                      size_t reseed_interval,
                      size_t max_number_of_bytes_per_request) :
       Stateful_RNG(entropy_sources, reseed_interval),
-      m_mac(std::move(prf)),
+      m_mac(check_not_null(std::move(prf))),
       m_max_number_of_bytes_per_request(max_number_of_bytes_per_request),
       m_security_level(hmac_drbg_security_level(m_mac->output_length())) {
-   BOTAN_ASSERT_NONNULL(m_mac);
-
    check_limits(reseed_interval, max_number_of_bytes_per_request);
 
    clear();
 }
 
 HMAC_DRBG::HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf) :
-      Stateful_RNG(),
-      m_mac(std::move(prf)),
+      m_mac(check_not_null(std::move(prf))),
       m_max_number_of_bytes_per_request(64 * 1024),
       m_security_level(hmac_drbg_security_level(m_mac->output_length())) {
-   BOTAN_ASSERT_NONNULL(m_mac);
    clear();
 }
 
 HMAC_DRBG::HMAC_DRBG(std::string_view hmac_hash) :
-      Stateful_RNG(),
       m_mac(MessageAuthenticationCode::create_or_throw(fmt("HMAC({})", hmac_hash))),
       m_max_number_of_bytes_per_request(64 * 1024),
       m_security_level(hmac_drbg_security_level(m_mac->output_length())) {
@@ -113,9 +120,7 @@ void HMAC_DRBG::clear_state() {
       m_T.resize(output_length);
    }
 
-   for(size_t i = 0; i != m_V.size(); ++i) {
-      m_V[i] = 0x01;
-   }
+   std::fill(m_V.begin(), m_V.end(), 0x01);
    m_mac->set_key(std::vector<uint8_t>(m_V.size(), 0x00));
 }
 
@@ -128,6 +133,7 @@ std::string HMAC_DRBG::name() const {
 * See NIST SP800-90A section 10.1.2.5
 */
 void HMAC_DRBG::generate_output(std::span<uint8_t> output, std::span<const uint8_t> input) {
+   // This is an internal function, callers should have validated this beforehand
    BOTAN_ASSERT_NOMSG(!output.empty());
 
    if(!input.empty()) {

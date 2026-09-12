@@ -10,6 +10,7 @@
 #define BOTAN_AEAD_CHACHA20_POLY1305_H_
 
 #include <botan/aead.h>
+
 #include <botan/mac.h>
 #include <botan/stream_cipher.h>
 
@@ -47,18 +48,18 @@ class ChaCha20Poly1305_Mode : public AEAD_Mode {
       bool has_keying_material() const final;
 
    protected:
-      std::unique_ptr<StreamCipher> m_chacha;
-      std::unique_ptr<MessageAuthenticationCode> m_poly1305;
+      std::unique_ptr<StreamCipher> m_chacha;                 // NOLINT(*non-private-member-variable*)
+      std::unique_ptr<MessageAuthenticationCode> m_poly1305;  // NOLINT(*non-private-member-variable*)
 
       ChaCha20Poly1305_Mode();
 
-      secure_vector<uint8_t> m_ad;
-      size_t m_nonce_len = 0;
-      size_t m_ctext_len = 0;
+      secure_vector<uint8_t> m_ad;  // NOLINT(*non-private-member-variable*)
+      size_t m_nonce_len = 0;       // NOLINT(*non-private-member-variable*)
+      uint64_t m_ctext_len = 0;     // NOLINT(*non-private-member-variable*)
 
       bool cfrg_version() const { return m_nonce_len == 12 || m_nonce_len == 24; }
 
-      void update_len(size_t len);
+      void update_len(uint64_t len);
 
    private:
       void start_msg(const uint8_t nonce[], size_t nonce_len) override;
@@ -71,7 +72,7 @@ class ChaCha20Poly1305_Mode : public AEAD_Mode {
 */
 class ChaCha20Poly1305_Encryption final : public ChaCha20Poly1305_Mode {
    public:
-      size_t output_length(size_t input_length) const override { return input_length + tag_size(); }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return 0; }
 
@@ -85,10 +86,7 @@ class ChaCha20Poly1305_Encryption final : public ChaCha20Poly1305_Mode {
 */
 class ChaCha20Poly1305_Decryption final : public ChaCha20Poly1305_Mode {
    public:
-      size_t output_length(size_t input_length) const override {
-         BOTAN_ARG_CHECK(input_length >= tag_size(), "Sufficient input");
-         return input_length - tag_size();
-      }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return tag_size(); }
 

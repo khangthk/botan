@@ -6,9 +6,9 @@
  * Botan is released under the Simplified BSD License (see license.txt)
  */
 
-#include <botan/tls_psk_identity_13.h>
+#include <botan/tls_psk_13.h>
 
-#include <botan/internal/stl_util.h>
+#include <botan/internal/mem_utils.h>
 
 namespace Botan::TLS {
 
@@ -21,6 +21,10 @@ uint32_t obfuscate_ticket_age(const uint64_t in, const uint64_t ticket_age_add) 
    //    milliseconds and adding the "ticket_age_add" value that was included
    //    with the ticket, modulo 2^32.
    return static_cast<uint32_t>(in + ticket_age_add);
+}
+
+inline std::vector<uint8_t> to_byte_vector(std::string_view s) {
+   return std::vector<uint8_t>(s.cbegin(), s.cend());
 }
 
 }  // namespace
@@ -39,11 +43,12 @@ PskIdentity::PskIdentity(PresharedKeyID identity) :
       m_obfuscated_age(0) {}
 
 std::chrono::milliseconds PskIdentity::age(const uint32_t ticket_age_add) const {
-   return std::chrono::milliseconds(obfuscate_ticket_age(m_obfuscated_age, ticket_age_add));
+   // De-obfuscate: subtract ticket_age_add (inverse of obfuscate_ticket_age)
+   return std::chrono::milliseconds(static_cast<uint32_t>(m_obfuscated_age - ticket_age_add));
 }
 
 std::string PskIdentity::identity_as_string() const {
-   return Botan::to_string(m_identity);
+   return bytes_to_string(m_identity);
 }
 
 }  // namespace Botan::TLS

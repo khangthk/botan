@@ -12,15 +12,18 @@
 
 #include <botan/exceptn.h>
 #include <botan/mem_ops.h>
-#include <botan/internal/cpuid.h>
 #include <cstring>
 #include <vector>
+
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
 
 namespace Botan {
 
 namespace {
 
-/* Tables for arithetic in GF(2^8) using 1+x^2+x^3+x^4+x^8
+/* Tables for arithmetic in GF(2^8) using 1+x^2+x^3+x^4+x^8
 *
 * See Lin & Costello, Appendix A, and Lee & Messerschmitt, p. 453.
 *
@@ -99,7 +102,7 @@ const uint8_t* GF_MUL_TABLE(uint8_t y) {
          std::vector<uint8_t> m_table;
    };
 
-   static GF_Table table;
+   static const GF_Table table;
    return table.ptr(y);
 }
 
@@ -108,7 +111,7 @@ const uint8_t* GF_MUL_TABLE(uint8_t y) {
 * (Gauss-Jordan algorithm, adapted from Numerical Recipes in C)
 */
 void invert_matrix(uint8_t matrix[], size_t K) {
-   class pivot_searcher {
+   class pivot_searcher final {
       public:
          explicit pivot_searcher(size_t K) : m_ipiv(K) {}
 
@@ -174,7 +177,7 @@ void invert_matrix(uint8_t matrix[], size_t K) {
       pivot_row[icol] = 1;
 
       if(c == 0) {
-         throw Invalid_Argument("ZFEC: singlar matrix");
+         throw Invalid_Argument("ZFEC: singular matrix");
       }
 
       if(c != 1) {
@@ -288,32 +291,6 @@ void ZFEC::addmul(uint8_t z[], const uint8_t x[], uint8_t y, size_t size) {
 
    const uint8_t* GF_MUL_Y = GF_MUL_TABLE(y);
 
-   // first align z to 16 bytes
-   while(size > 0 && reinterpret_cast<uintptr_t>(z) % 16) {
-      z[0] ^= GF_MUL_Y[x[0]];
-      ++z;
-      ++x;
-      size--;
-   }
-
-#if defined(BOTAN_HAS_ZFEC_VPERM)
-   if(size >= 16 && CPUID::has_vperm()) {
-      const size_t consumed = addmul_vperm(z, x, y, size);
-      z += consumed;
-      x += consumed;
-      size -= consumed;
-   }
-#endif
-
-#if defined(BOTAN_HAS_ZFEC_SSE2)
-   if(size >= 64 && CPUID::has_sse2()) {
-      const size_t consumed = addmul_sse2(z, x, y, size);
-      z += consumed;
-      x += consumed;
-      size -= consumed;
-   }
-#endif
-
    while(size >= 16) {
       z[0] ^= GF_MUL_Y[x[0]];
       z[1] ^= GF_MUL_Y[x[1]];
@@ -344,6 +321,33 @@ void ZFEC::addmul(uint8_t z[], const uint8_t x[], uint8_t y, size_t size) {
 }
 
 /*
+* linear_combination() computes z[] = x[0][] * y[0] + ... + x[k-1][] * y[k-1]
+*/
+void ZFEC::linear_combination(uint8_t z[], const uint8_t* const x[], const uint8_t y[], size_t k, size_t size) {
+#if defined(BOTAN_HAS_ZFEC_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      linear_combination_gfni(z, x, y, k, size);
+      return;
+   }
+#endif
+
+   size_t consumed = 0;
+
+#if defined(BOTAN_HAS_ZFEC_VPERM)
+   if(CPUID::has(CPUID::Feature::SIMD_4X32)) {
+      consumed = linear_combination_vperm(z, x, y, k, size);
+   }
+#endif
+
+   if(consumed < size) {
+      clear_mem(z + consumed, size - consumed);
+      for(size_t j = 0; j != k; ++j) {
+         addmul(z + consumed, x[j] + consumed, y[j], size - consumed);
+      }
+   }
+}
+
+/*
 * This section contains the proper FEC encoding/decoding routines.
 * The encoding matrix is computed starting with a Vandermonde matrix,
 * and then transforming it into a systematic matrix.
@@ -352,9 +356,9 @@ void ZFEC::addmul(uint8_t z[], const uint8_t x[], uint8_t y, size_t size) {
 /*
 * ZFEC constructor
 */
-ZFEC::ZFEC(size_t K, size_t N) : m_K(K), m_N(N), m_enc_matrix(N * K) {
-   if(m_K == 0 || m_N == 0 || m_K > 256 || m_N > 256 || m_K > N) {
-      throw Invalid_Argument("ZFEC: violated 1 <= K <= N <= 256");
+ZFEC::ZFEC(size_t K, size_t N) : m_K(K), m_N(N) {
+   if(m_K == 0 || m_N == 0 || m_K >= 256 || m_N >= 256 || m_K > N) {
+      throw Invalid_Argument("ZFEC: violated 1 <= K <= N < 256");
    }
 
    std::vector<uint8_t> temp_matrix(m_N * m_K);
@@ -364,7 +368,7 @@ ZFEC::ZFEC(size_t K, size_t N) : m_K(K), m_N(N), m_enc_matrix(N * K) {
    * K*K Vandermonde matrix, multiply right the bottom n-K rows
    * by the inverse, and construct the identity matrix at the top.
    */
-   create_inverted_vdm(&temp_matrix[0], m_K);
+   create_inverted_vdm(temp_matrix.data(), m_K);
 
    for(size_t i = m_K * m_K; i != temp_matrix.size(); ++i) {
       temp_matrix[i] = GF_EXP[((i / m_K) * (i % m_K)) % 255];
@@ -373,6 +377,7 @@ ZFEC::ZFEC(size_t K, size_t N) : m_K(K), m_N(N), m_enc_matrix(N * K) {
    /*
    * the upper part of the encoding matrix is I
    */
+   m_enc_matrix.resize(m_N * m_K);
    for(size_t i = 0; i != m_K; ++i) {
       m_enc_matrix[i * (m_K + 1)] = 1;
    }
@@ -426,13 +431,8 @@ void ZFEC::encode_shares(const std::vector<const uint8_t*>& shares,
    std::vector<uint8_t> fec_buf(share_size);
 
    for(size_t i = m_K; i != m_N; ++i) {
-      clear_mem(fec_buf.data(), fec_buf.size());
-
-      for(size_t j = 0; j != m_K; ++j) {
-         addmul(&fec_buf[0], shares[j], m_enc_matrix[i * m_K + j], share_size);
-      }
-
-      output_cb(i, &fec_buf[0], fec_buf.size());
+      linear_combination(fec_buf.data(), shares.data(), &m_enc_matrix[i * m_K], m_K, share_size);
+      output_cb(i, fec_buf.data(), fec_buf.size());
    }
 }
 
@@ -506,35 +506,33 @@ void ZFEC::decode_shares(const std::map<size_t, const uint8_t*>& shares,
    // If we had the original data shares then no need to perform
    // a matrix inversion, return immediately.
    if(!missing_primary_share) {
-      for(size_t i = 0; i != indexes.size(); ++i) {
-         BOTAN_ASSERT_NOMSG(indexes[i] < m_K);
+      for(const size_t index : indexes) {
+         BOTAN_ASSERT_NOMSG(index < m_K);
       }
       return;
    }
 
-   invert_matrix(&decoding_matrix[0], m_K);
+   invert_matrix(decoding_matrix.data(), m_K);
 
    for(size_t i = 0; i != indexes.size(); ++i) {
       if(indexes[i] >= m_K) {
          std::vector<uint8_t> buf(share_size);
-         for(size_t col = 0; col != m_K; ++col) {
-            addmul(&buf[0], sharesv[col], decoding_matrix[i * m_K + col], share_size);
-         }
-         output_cb(i, &buf[0], share_size);
+         linear_combination(buf.data(), sharesv.data(), &decoding_matrix[i * m_K], m_K, share_size);
+         output_cb(i, buf.data(), share_size);
       }
    }
 }
 
 std::string ZFEC::provider() const {
-#if defined(BOTAN_HAS_ZFEC_VPERM)
-   if(CPUID::has_vperm()) {
-      return "vperm";
+#if defined(BOTAN_HAS_ZFEC_GFNI)
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return *feat;
    }
 #endif
 
-#if defined(BOTAN_HAS_ZFEC_SSE2)
-   if(CPUID::has_sse2()) {
-      return "sse2";
+#if defined(BOTAN_HAS_ZFEC_VPERM)
+   if(auto feat = CPUID::check(CPUID::Feature::SIMD_4X32)) {
+      return *feat;
    }
 #endif
 

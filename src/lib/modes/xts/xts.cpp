@@ -1,6 +1,6 @@
 /*
 * XTS Mode
-* (C) 2009,2013 Jack Lloyd
+* (C) 2009,2013,2026 Jack Lloyd
 * (C) 2016 Daniel Neus, Rohde & Schwarz Cybersecurity
 *
 * Botan is released under the Simplified BSD License (see license.txt)
@@ -8,8 +8,14 @@
 
 #include <botan/internal/xts.h>
 
+#include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/poly_dbl.h>
+
+#if defined(BOTAN_HAS_MODE_XTS_AVX512_CLMUL)
+   #include <botan/internal/cpuid.h>
+#endif
 
 namespace Botan {
 
@@ -18,7 +24,7 @@ XTS_Mode::XTS_Mode(std::unique_ptr<BlockCipher> cipher) :
       m_cipher_block_size(m_cipher->block_size()),
       m_cipher_parallelism(m_cipher->parallel_bytes()),
       m_tweak_blocks(m_cipher_parallelism / m_cipher_block_size) {
-   if(poly_double_supported_size(m_cipher_block_size) == false) {
+   if(!poly_double_supported_size(m_cipher_block_size)) {
       throw Invalid_Argument(fmt("Cannot use {} with XTS", m_cipher->name()));
    }
 
@@ -76,6 +82,11 @@ void XTS_Mode::key_schedule(std::span<const uint8_t> key) {
 
    m_cipher->set_key(key.first(key_half));
    m_tweak_cipher->set_key(key.last(key_half));
+
+   // Drop the tweak: it was computed under the previous tweak-cipher key
+   // and the previous nonce; the user must call start_msg again before
+   // any further processing.
+   reset();
 }
 
 void XTS_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
@@ -88,19 +99,46 @@ void XTS_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
    copy_mem(m_tweak.data(), nonce, nonce_len);
    m_tweak_cipher->encrypt(m_tweak.data());
 
-   update_tweak(0);
+   // Just repeated doubling from first, remaining contents are junk...
+   xts_compute_tweak_block(m_tweak.data(), m_tweak_cipher->block_size(), tweak_blocks());
 }
 
-void XTS_Mode::update_tweak(size_t which) {
-   const size_t BS = m_tweak_cipher->block_size();
-
-   if(which > 0) {
-      poly_double_n_le(m_tweak.data(), &m_tweak[(which - 1) * BS], BS);
+//static
+void XTS_Mode::update_tweak_block(uint8_t tweak[], size_t BS, size_t blocks_in_tweak) {
+#if defined(BOTAN_HAS_MODE_XTS_AVX512_CLMUL)
+   if(BS == 16 && blocks_in_tweak % 8 == 0 && CPUID::has(CPUID::Feature::AVX512_CLMUL)) {
+      return update_tweak_block_avx512_clmul(tweak, BS, blocks_in_tweak);
    }
+#endif
 
+   /*
+   * If we don't have a fast method available, just set the first tweak block to
+   * the doubling of the last tweak block, and recompute all the rest via
+   * successive doublings.
+   */
+   poly_double_n_le(tweak, &tweak[(blocks_in_tweak - 1) * BS], BS);
+   xts_compute_tweak_block(tweak, BS, blocks_in_tweak);
+}
+
+void XTS_Mode::update_tweak(size_t consumed) {
+   const size_t BS = m_tweak_cipher->block_size();
    const size_t blocks_in_tweak = tweak_blocks();
 
-   xts_update_tweak_block(m_tweak.data(), BS, blocks_in_tweak);
+   BOTAN_ASSERT_NOMSG(consumed > 0 && consumed <= blocks_in_tweak);
+
+   if(consumed == blocks_in_tweak) {
+      // Update all in parallel
+      update_tweak_block(m_tweak.data(), BS, blocks_in_tweak);
+   } else {
+      /*
+      The last remaining tweaks can just be shifted over
+
+      This could be a lot better though! We can copy all of the remaining tweaks
+      and just recompute the last few
+      */
+      copy_mem(m_tweak.data(), &m_tweak[(consumed * BS)], BS);
+      xts_compute_tweak_block(m_tweak.data(), BS, blocks_in_tweak);
+   }
 }
 
 size_t XTS_Encryption::output_length(size_t input_length) const {
@@ -116,12 +154,15 @@ size_t XTS_Encryption::process_msg(uint8_t buf[], size_t sz) {
 
    const size_t blocks_in_tweak = tweak_blocks();
 
-   while(blocks) {
+   while(blocks > 0) {
       const size_t to_proc = std::min(blocks, blocks_in_tweak);
+      const size_t proc_bytes = to_proc * BS;
 
-      cipher().encrypt_n_xex(buf, tweak(), to_proc);
+      xor_buf(buf, tweak(), proc_bytes);
+      cipher().encrypt_n(buf, buf, to_proc);
+      xor_buf(buf, tweak(), proc_bytes);
 
-      buf += to_proc * BS;
+      buf += proc_bytes;
       blocks -= to_proc;
 
       update_tweak(to_proc);
@@ -131,6 +172,7 @@ size_t XTS_Encryption::process_msg(uint8_t buf[], size_t sz) {
 }
 
 void XTS_Encryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
+   BOTAN_STATE_CHECK(tweak_set());
    BOTAN_ARG_CHECK(buffer.size() >= offset, "Offset is out of range");
    const size_t sz = buffer.size() - offset;
    uint8_t* buf = buffer.data() + offset;
@@ -182,12 +224,15 @@ size_t XTS_Decryption::process_msg(uint8_t buf[], size_t sz) {
 
    const size_t blocks_in_tweak = tweak_blocks();
 
-   while(blocks) {
+   while(blocks > 0) {
       const size_t to_proc = std::min(blocks, blocks_in_tweak);
+      const size_t proc_bytes = to_proc * BS;
 
-      cipher().decrypt_n_xex(buf, tweak(), to_proc);
+      xor_buf(buf, tweak(), proc_bytes);
+      cipher().decrypt_n(buf, buf, to_proc);
+      xor_buf(buf, tweak(), proc_bytes);
 
-      buf += to_proc * BS;
+      buf += proc_bytes;
       blocks -= to_proc;
 
       update_tweak(to_proc);
@@ -197,6 +242,7 @@ size_t XTS_Decryption::process_msg(uint8_t buf[], size_t sz) {
 }
 
 void XTS_Decryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
+   BOTAN_STATE_CHECK(tweak_set());
    BOTAN_ARG_CHECK(buffer.size() >= offset, "Offset is out of range");
    const size_t sz = buffer.size() - offset;
    uint8_t* buf = buffer.data() + offset;

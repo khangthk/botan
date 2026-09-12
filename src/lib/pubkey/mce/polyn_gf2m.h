@@ -13,6 +13,7 @@
 #define BOTAN_POLYN_GF2M_H_
 
 #include <botan/secmem.h>
+#include <memory>
 #include <utility>
 
 namespace Botan {
@@ -33,6 +34,8 @@ class polyn_gf2m {
       polyn_gf2m() : m_deg(-1) {}
 
       polyn_gf2m(const secure_vector<uint8_t>& encoded, const std::shared_ptr<GF2m_Field>& sp_field);
+
+      ~polyn_gf2m() = default;
 
       polyn_gf2m& operator=(const polyn_gf2m&) = default;
 
@@ -91,6 +94,8 @@ class polyn_gf2m {
 
       int get_degree() const;
 
+      size_t get_coeff_count() const { return m_coeff.size(); }
+
       /**
       * determine the degree in a timing secure manner. the timing of this function
       * only depends on the number of allocated coefficients, not on the actual
@@ -129,7 +134,7 @@ class polyn_gf2m {
       static polyn_gf2m gcd_aux(polyn_gf2m& p1, polyn_gf2m& p2);
 
    private:
-      int m_deg;
+      int m_deg = -1;
       secure_vector<gf2m> m_coeff;
       std::shared_ptr<GF2m_Field> m_sp_field;
 };

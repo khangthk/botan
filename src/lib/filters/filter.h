@@ -10,6 +10,7 @@
 #define BOTAN_FILTER_H_
 
 #include <botan/secmem.h>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -21,12 +22,13 @@ namespace Botan {
 class BOTAN_PUBLIC_API(2, 0) Filter {
    public:
       /**
-      * @return descriptive name for this filter
+      * Return a descriptive name for this filter
       */
       virtual std::string name() const = 0;
 
       /**
       * Write a portion of a message to this filter.
+      *
       * @param input the input as a byte array
       * @param length the length of the byte array input
       */
@@ -36,15 +38,13 @@ class BOTAN_PUBLIC_API(2, 0) Filter {
       * Start a new message. Must be closed by end_msg() before another
       * message can be started.
       */
-      virtual void start_msg() { /* default empty */
-      }
+      virtual void start_msg() {}
 
       /**
       * Notify that the current message is finished; flush buffers and
       * do end-of-message processing (if any).
       */
-      virtual void end_msg() { /* default empty */
-      }
+      virtual void end_msg() {}
 
       /**
       * Check whether this filter is an attachable filter.
@@ -55,38 +55,49 @@ class BOTAN_PUBLIC_API(2, 0) Filter {
       virtual ~Filter() = default;
 
       Filter(const Filter&) = delete;
+      Filter(Filter&&) = delete;
       Filter& operator=(const Filter&) = delete;
+      Filter& operator=(Filter&&) = delete;
 
    protected:
       /**
+      * Send some bytes to the next filter in the chain
+      *
       * @param in some input for the filter
       * @param length the length of in
       */
       virtual void send(const uint8_t in[], size_t length);
 
       /**
+      * Send some bytes to the next filter in the chain
+      *
       * @param in some input for the filter
       */
       void send(uint8_t in) { send(&in, 1); }
 
       /**
+      * Send some bytes to the next filter in the chain
+      *
       * @param in some input for the filter
       */
-      template <typename Alloc>
-      void send(const std::vector<uint8_t, Alloc>& in) {
-         send(in.data(), in.size());
-      }
+      void send(std::span<const uint8_t> in) { send(in.data(), in.size()); }
 
       /**
+      * Send some bytes to the next filter in the chain
+      *
       * @param in some input for the filter
       * @param length the number of bytes of in to send
+      *
+      * This previously took a std::vector, for which the length field (allowing
+      * using just a prefix of the vector) somewhat made sense. It makes less
+      * sense now that we are using a span here; you can just use `first` to get
+      * a prefix.
       */
-      template <typename Alloc>
-      void send(const std::vector<uint8_t, Alloc>& in, size_t length) {
-         BOTAN_ASSERT_NOMSG(length <= in.size());
-         send(in.data(), length);
-      }
+      void send(std::span<const uint8_t> in, size_t length);
 
+      /**
+      * Default constructor
+      */
       Filter();
 
    private:
@@ -133,10 +144,11 @@ class BOTAN_PUBLIC_API(2, 0) Filter {
 
       secure_vector<uint8_t> m_write_queue;
       std::vector<Filter*> m_next;  // not owned
-      size_t m_port_num, m_filter_owns;
+      size_t m_port_num = 0;
+      size_t m_filter_owns = 0;
 
       // true if filter belongs to a pipe --> prohibit filter sharing!
-      bool m_owned;
+      bool m_owned = false;
 };
 
 /**
@@ -149,10 +161,26 @@ class BOTAN_PUBLIC_API(2, 0) Fanout_Filter : public Filter {
       */
       void incr_owns() { ++m_filter_owns; }
 
+      /**
+      * Select which of the attached filters subsequent output is sent to
+      * @param n the index of the port to select
+      */
+      // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
       void set_port(size_t n) { Filter::set_port(n); }
 
+      /**
+      * Set the filters which follow this one
+      * @param f the filters to attach
+      * @param n the number of filters in f
+      */
+      // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
       void set_next(Filter* f[], size_t n) { Filter::set_next(f, n); }
 
+      /**
+      * Attach a filter to the end of this filter chain
+      * @param f the filter to attach
+      */
+      // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
       void attach(Filter* f) { Filter::attach(f); }
 };
 
@@ -162,7 +190,7 @@ class BOTAN_PUBLIC_API(2, 0) Fanout_Filter : public Filter {
 * whitespaces, FULL_CHECK - perform checks, also complain
 * about white spaces.
 */
-enum Decoder_Checking { NONE, IGNORE_WS, FULL_CHECK };
+enum Decoder_Checking : uint8_t /* NOLINT(*-use-enum-class) */ { NONE, IGNORE_WS, FULL_CHECK };
 
 }  // namespace Botan
 

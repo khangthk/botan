@@ -7,15 +7,17 @@
 
 #include <botan/chacha_rng.h>
 
+#include <botan/assert.h>
+
 namespace Botan {
 
-ChaCha_RNG::ChaCha_RNG() : Stateful_RNG() {
+ChaCha_RNG::ChaCha_RNG() {
    m_hmac = MessageAuthenticationCode::create_or_throw("HMAC(SHA-256)");
    m_chacha = StreamCipher::create_or_throw("ChaCha(20)");
    clear();
 }
 
-ChaCha_RNG::ChaCha_RNG(std::span<const uint8_t> seed) : Stateful_RNG() {
+ChaCha_RNG::ChaCha_RNG(std::span<const uint8_t> seed) {
    m_hmac = MessageAuthenticationCode::create_or_throw("HMAC(SHA-256)");
    m_chacha = StreamCipher::create_or_throw("ChaCha(20)");
    clear();

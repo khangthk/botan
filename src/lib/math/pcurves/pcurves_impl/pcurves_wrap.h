@@ -7,6 +7,7 @@
 #ifndef BOTAN_PCURVES_WRAP_H_
 #define BOTAN_PCURVES_WRAP_H_
 
+#include <botan/exceptn.h>
 #include <botan/internal/pcurves.h>
 #include <botan/internal/pcurves_impl.h>
 
@@ -17,22 +18,14 @@ concept curve_supports_scalar_invert = requires(const typename C::Scalar& s) {
    { C::scalar_invert(s) } -> std::same_as<typename C::Scalar>;
 };
 
+/**
+* This class provides a bridge between the "public" (actually still
+* internal) PrimeOrderCurve type, and the inner templates which are
+* subclasses of EllipticCurve from pcurves_impl.h
+*/
 template <typename C>
 class PrimeOrderCurveImpl final : public PrimeOrderCurve {
    public:
-      class PrecomputedMul2TableC final : public PrimeOrderCurve::PrecomputedMul2Table {
-         public:
-            static constexpr size_t WindowBits = 3;
-
-            const WindowedMul2Table<C, WindowBits>& table() const { return m_table; }
-
-            explicit PrecomputedMul2TableC(const typename C::AffinePoint& x, const typename C::AffinePoint& y) :
-                  m_table(x, y) {}
-
-         private:
-            WindowedMul2Table<C, WindowBits> m_table;
-      };
-
       static_assert(C::OrderBits <= PrimeOrderCurve::MaximumBitLength);
       static_assert(C::PrimeFieldBits <= PrimeOrderCurve::MaximumBitLength);
 
@@ -47,21 +40,43 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
       }
 
       ProjectivePoint mul(const AffinePoint& pt, const Scalar& scalar, RandomNumberGenerator& rng) const override {
-         auto tbl = WindowedMulTable<C, 4>(from_stash(pt));
+         auto tbl = WindowedBoothMulTable<C, VarPointWindowBits>(from_stash(pt));
          return stash(tbl.mul(from_stash(scalar), rng));
       }
 
-      std::unique_ptr<const PrecomputedMul2Table> mul2_setup(const AffinePoint& x,
-                                                             const AffinePoint& y) const override {
-         return std::make_unique<PrecomputedMul2TableC>(from_stash(x), from_stash(y));
+      secure_vector<uint8_t> mul_x_only(const AffinePoint& pt,
+                                        const Scalar& scalar,
+                                        RandomNumberGenerator& rng) const override {
+         auto tbl = WindowedBoothMulTable<C, VarPointWindowBits>(from_stash(pt));
+         auto result = tbl.mul(from_stash(scalar), rng);
+         BOTAN_STATE_CHECK(!result.is_identity().as_bool());
+         auto pt_x = to_affine_x<C>(result);
+         secure_vector<uint8_t> x_bytes(C::FieldElement::BYTES);
+         pt_x.serialize_to(std::span<uint8_t, C::FieldElement::BYTES>{x_bytes});
+         return x_bytes;
+      }
+
+      class PrecomputedMul2TableC final : public PrimeOrderCurve::PrecomputedMul2Table {
+         public:
+            const auto& table() const { return m_table; }
+
+            explicit PrecomputedMul2TableC(const typename C::AffinePoint& x, const typename C::AffinePoint& y) :
+                  m_table(x, y) {}
+
+         private:
+            VartimeMul2Table<C, Mul2PrecompWindowBits> m_table;
+      };
+
+      std::unique_ptr<const PrecomputedMul2Table> mul2_setup_g(const AffinePoint& q) const override {
+         return std::make_unique<PrecomputedMul2TableC>(C::G, from_stash(q));
       }
 
       std::optional<ProjectivePoint> mul2_vartime(const PrecomputedMul2Table& tableb,
-                                                  const Scalar& s1,
-                                                  const Scalar& s2) const override {
+                                                  const Scalar& x,
+                                                  const Scalar& y) const override {
          try {
             const auto& table = dynamic_cast<const PrecomputedMul2TableC&>(tableb);
-            auto pt = table.table().mul2_vartime(from_stash(s1), from_stash(s2));
+            auto pt = table.table().mul2_vartime(from_stash(x), from_stash(y));
             if(pt.is_identity().as_bool()) {
                return {};
             } else {
@@ -72,13 +87,27 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
          }
       }
 
+      std::optional<ProjectivePoint> mul_px_qy(const AffinePoint& p,
+                                               const Scalar& x,
+                                               const AffinePoint& q,
+                                               const Scalar& y,
+                                               RandomNumberGenerator& rng) const override {
+         const WindowedMul2Table<C, Mul2WindowBits> tbl(from_stash(p), from_stash(q));
+         auto pt = tbl.mul2(from_stash(x), from_stash(y), rng);
+         if(pt.is_identity().as_bool()) {
+            return {};
+         } else {
+            return stash(pt);
+         }
+      }
+
       bool mul2_vartime_x_mod_order_eq(const PrecomputedMul2Table& tableb,
                                        const Scalar& v,
-                                       const Scalar& s1,
-                                       const Scalar& s2) const override {
+                                       const Scalar& x,
+                                       const Scalar& y) const override {
          try {
             const auto& table = dynamic_cast<const PrecomputedMul2TableC&>(tableb);
-            const auto pt = table.table().mul2_vartime(from_stash(s1), from_stash(s2));
+            const auto pt = table.table().mul2_vartime(from_stash(x), from_stash(y));
             // Variable time here, so the early return is fine
             if(pt.is_identity().as_bool()) {
                return false;
@@ -95,11 +124,11 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
             * With overwhelming probability, this conversion is correct. The
             * only time it is not is in the extremely unlikely case where the
             * signer actually reduced the x coordinate modulo the group order.
-            * That is handled seperately in a second step.
+            * That is handled separately in a second step.
             */
             const auto z2 = pt.z().square();
 
-            std::array<uint8_t, C::Scalar::BYTES> v_bytes;
+            std::array<uint8_t, C::Scalar::BYTES> v_bytes{};
             from_stash(v).serialize_to(v_bytes);
 
             if(const auto fe_v = C::FieldElement::deserialize(v_bytes)) {
@@ -151,32 +180,32 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
 
       Scalar base_point_mul_x_mod_order(const Scalar& scalar, RandomNumberGenerator& rng) const override {
          auto pt = m_mul_by_g.mul(from_stash(scalar), rng);
-         std::array<uint8_t, C::FieldElement::BYTES> x_bytes;
+         BOTAN_STATE_CHECK(!pt.is_identity().as_bool());
+         std::array<uint8_t, C::FieldElement::BYTES> x_bytes{};
          to_affine_x<C>(pt).serialize_to(std::span{x_bytes});
+         // Reduction might be required (if unlikely)
          return stash(C::Scalar::from_wide_bytes(std::span<const uint8_t, C::FieldElement::BYTES>{x_bytes}));
       }
 
       AffinePoint generator() const override { return stash(C::G); }
 
       AffinePoint point_to_affine(const ProjectivePoint& pt) const override {
-         return stash(to_affine<C>(from_stash(pt)));
+         auto affine = to_affine<C>(from_stash(pt));
+
+         const auto y2 = affine.y().square();
+         const auto x3_ax_b = C::x3_ax_b(affine.x());
+         const auto valid_point = affine.is_identity() || (y2 == x3_ax_b);
+
+         BOTAN_ASSERT(valid_point.as_bool(), "Computed point is on the curve");
+
+         return stash(affine);
       }
 
-      ProjectivePoint point_to_projective(const AffinePoint& pt) const override {
-         return stash(C::ProjectivePoint::from_affine(from_stash(pt)));
+      ProjectivePoint point_add(const AffinePoint& a, const AffinePoint& b) const override {
+         return stash(C::ProjectivePoint::from_affine(from_stash(a)) + from_stash(b));
       }
 
-      ProjectivePoint point_double(const ProjectivePoint& pt) const override { return stash(from_stash(pt).dbl()); }
-
-      ProjectivePoint point_add(const ProjectivePoint& a, const ProjectivePoint& b) const override {
-         return stash(from_stash(a) + from_stash(b));
-      }
-
-      ProjectivePoint point_add_mixed(const ProjectivePoint& a, const AffinePoint& b) const override {
-         return stash(from_stash(a) + from_stash(b));
-      }
-
-      ProjectivePoint point_negate(const ProjectivePoint& pt) const override { return stash(from_stash(pt).negate()); }
+      AffinePoint point_negate(const AffinePoint& pt) const override { return stash(from_stash(pt).negate()); }
 
       bool affine_point_is_identity(const AffinePoint& pt) const override {
          return from_stash(pt).is_identity().as_bool();
@@ -185,17 +214,6 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
       void serialize_point(std::span<uint8_t> bytes, const AffinePoint& pt) const override {
          BOTAN_ARG_CHECK(bytes.size() == C::AffinePoint::BYTES, "Invalid length for serialize_point");
          from_stash(pt).serialize_to(bytes.subspan<0, C::AffinePoint::BYTES>());
-      }
-
-      void serialize_point_compressed(std::span<uint8_t> bytes, const AffinePoint& pt) const override {
-         BOTAN_ARG_CHECK(bytes.size() == C::AffinePoint::COMPRESSED_BYTES,
-                         "Invalid length for serialize_point_compressed");
-         from_stash(pt).serialize_compressed_to(bytes.subspan<0, C::AffinePoint::COMPRESSED_BYTES>());
-      }
-
-      void serialize_point_x(std::span<uint8_t> bytes, const AffinePoint& pt) const override {
-         BOTAN_ARG_CHECK(bytes.size() == C::FieldElement::BYTES, "Invalid length for serialize_point_x");
-         from_stash(pt).serialize_x_to(bytes.subspan<0, C::FieldElement::BYTES>());
       }
 
       void serialize_scalar(std::span<uint8_t> bytes, const Scalar& scalar) const override {
@@ -221,29 +239,61 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
          }
       }
 
-      std::optional<AffinePoint> deserialize_point(std::span<const uint8_t> bytes) const override {
-         if(auto pt = C::AffinePoint::deserialize(bytes)) {
-            return stash(*pt);
-         } else {
-            return {};
+      AffinePoint point_identity() const override { return stash(C::AffinePoint::identity()); }
+
+      std::optional<AffinePoint> deserialize_point_uncompressed(std::span<const uint8_t> bytes) const override {
+         constexpr size_t FieldElementBytes = C::FieldElement::BYTES;
+         constexpr size_t UncompressedBytes = 2 * C::FieldElement::BYTES + 1;
+
+         if(bytes.size() == UncompressedBytes && bytes[0] == 0x04) {
+            const auto encoded_point = bytes.subspan(1);
+            auto x = C::FieldElement::deserialize(encoded_point.first(FieldElementBytes));
+            auto y = C::FieldElement::deserialize(encoded_point.last(FieldElementBytes));
+
+            if(x && y) {
+               // Check that y^2 = x^3 + ax + b
+               const auto lhs = (*y).square();
+               const auto rhs = C::x3_ax_b(*x);
+               const auto valid = (lhs == rhs);
+               if(valid.as_bool()) {
+                  return stash(typename C::AffinePoint(*x, *y));
+               }
+            }
          }
+
+         return {};
       }
 
-      AffinePoint hash_to_curve_nu(std::string_view hash,
-                                   std::span<const uint8_t> input,
-                                   std::span<const uint8_t> domain_sep) const override {
+      std::optional<AffinePoint> deserialize_point_compressed(std::span<const uint8_t> bytes) const override {
+         constexpr size_t FieldElementBytes = C::FieldElement::BYTES;
+         constexpr size_t CompressedBytes = C::FieldElement::BYTES + 1;
+
+         if(bytes.size() == CompressedBytes && (bytes[0] == 0x02 || bytes[0] == 0x03)) {
+            const CT::Choice y_is_even = CT::Mask<uint8_t>::is_equal(bytes[0], 0x02).as_choice();
+
+            if(auto x = C::FieldElement::deserialize(bytes.subspan(1, FieldElementBytes))) {
+               if(auto y = sqrt_field_element<C>(C::x3_ax_b(*x)).as_optional_vartime()) {
+                  return stash(typename C::AffinePoint(*x, y->correct_sign(y_is_even)));
+               }
+            }
+         }
+
+         return {};
+      }
+
+      bool supports_hash_to_curve() const override { return C::ValidForSswuHash; }
+
+      AffinePoint hash_to_curve_nu(std::function<void(std::span<uint8_t>)> expand_message) const override {
          if constexpr(C::ValidForSswuHash) {
-            return stash(hash_to_curve_sswu<C, false>(hash, input, domain_sep));
+            return stash(hash_to_curve_sswu<C, false>(expand_message));
          } else {
             throw Not_Implemented("Hash to curve is not implemented for this curve");
          }
       }
 
-      ProjectivePoint hash_to_curve_ro(std::string_view hash,
-                                       std::span<const uint8_t> input,
-                                       std::span<const uint8_t> domain_sep) const override {
+      ProjectivePoint hash_to_curve_ro(std::function<void(std::span<uint8_t>)> expand_message) const override {
          if constexpr(C::ValidForSswuHash) {
-            return stash(hash_to_curve_sswu<C, true>(hash, input, domain_sep));
+            return stash(hash_to_curve_sswu<C, true>(expand_message));
          } else {
             throw Not_Implemented("Hash to curve is not implemented for this curve");
          }
@@ -272,6 +322,11 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
          }
       }
 
+      Scalar scalar_invert_vartime(const Scalar& ss) const override {
+         auto s = from_stash(ss);
+         return stash(s.invert_vartime());
+      }
+
       Scalar scalar_negate(const Scalar& s) const override { return stash(from_stash(s).negate()); }
 
       bool scalar_is_zero(const Scalar& s) const override { return from_stash(s).is_zero().as_bool(); }
@@ -280,11 +335,7 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
          return (from_stash(a) == from_stash(b)).as_bool();
       }
 
-      Scalar scalar_zero() const override { return stash(C::Scalar::zero()); }
-
       Scalar scalar_one() const override { return stash(C::Scalar::one()); }
-
-      Scalar scalar_from_u32(uint32_t x) const override { return stash(C::Scalar::from_word(x)); }
 
       Scalar random_scalar(RandomNumberGenerator& rng) const override { return stash(C::Scalar::random(rng)); }
 
@@ -340,7 +391,7 @@ class PrimeOrderCurveImpl final : public PrimeOrderCurve {
       }
 
    private:
-      const PrecomputedBaseMulTable<C, 5> m_mul_by_g;
+      const PrecomputedBaseMulTable<C, BasePointWindowBits> m_mul_by_g;
 };
 
 }  // namespace Botan::PCurve

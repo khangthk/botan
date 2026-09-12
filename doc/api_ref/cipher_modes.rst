@@ -56,6 +56,18 @@ All cipher mode implementations are are derived from the base class
     is authenticated, it will return some positive value (typically somewhere
     between 8 and 16).
 
+    .. note::
+
+       Usually, the ciphertext and tag are considered a bundle, and not split
+       apart except for internally during the decryption process. However a few
+       unfortunate libraries require you, the developer, to manually split the
+       ciphertext and the tag apart for decryption.
+
+       Should you encounter such an interface, it would be helpful to know that
+       in (almost all) cases the tag is appended at the end of the ciphertext.
+       The only exception to this at the moment is SIV, which prefixes the tag
+       instead - but SIV is rarely implemented by such libraries.
+
   .. cpp:function:: void clear()
 
     Clear all internal state. The object will act exactly like one which was
@@ -146,14 +158,25 @@ with PKCS#7 padding.
 Available Unauthenticated Cipher Modes
 -----------------------------------------
 
+.. warning::
+
+   As noted above these modes are insecure if used without an authentication code.
+   Prefer using an AEAD.
+
 .. note::
    CTR and OFB modes are also implemented, but these are treated as
-   :cpp:class:`Stream_Cipher`\s instead.
+   :cpp:class:`StreamCipher`\s instead.
 
 CBC
 ~~~~~~~~~~~~
 
 Available if ``BOTAN_HAS_MODE_CBC`` is defined.
+
+CBC mode has a significant drawback, namely that due to its structure, when
+encrypting a message it is not possible to process multiple blocks simultaneously.
+This effectively prevents any use of optimizations based on SIMD or interleaving,
+resulting in relatively poor performance compared to the same cipher in another
+mode.
 
 CBC requires the plaintext be padded using a reversible rule. The following
 padding schemes are implemented
@@ -282,7 +305,7 @@ header). It is a subclass of :cpp:class:`Cipher_Mode`.
 
        Complete processing a message with a final input of *buffer*, which is
        treated the same as with :cpp:func:`update`. It must contain at least
-       :cpp:func:`final_minimum_size` bytes.
+       :cpp:func:`minimum_final_size` bytes.
 
        Note that if you have the entire message in hand, calling finish without
        ever calling update is both efficient and convenient.
@@ -292,7 +315,7 @@ header). It is a subclass of :cpp:class:`Cipher_Mode`.
           During decryption, if the supplied authentication tag does not
           validate, finish will throw an instance of Invalid_Authentication_Tag
           (aka Integrity_Failure, which was the name for this exception in
-          versions before 2.10, a typedef is included for compatability).
+          versions before 2.10, a typedef is included for compatibility).
 
           If this occurs, all plaintext previously output via calls to update
           must be destroyed and not used in any way that an attacker could
@@ -311,7 +334,7 @@ header). It is a subclass of :cpp:class:`Cipher_Mode`.
        The AEAD interface requires :cpp:func:`update` be called with blocks of
        this size. This will be 1, if the mode can process any length inputs.
 
-  .. cpp:function:: size_t final_minimum_size() const
+  .. cpp:function:: size_t minimum_final_size() const
 
        The AEAD interface requires :cpp:func:`finish` be called with at least
        this many bytes (which may be zero, or greater than
@@ -337,6 +360,27 @@ If in doubt about what to use, pick ChaCha20Poly1305, AES-256/GCM, or AES-256/SI
 Both ChaCha20Poly1305 and AES with GCM are widely implemented. SIV is somewhat
 more obscure (and is slower than either GCM or ChaCha20Poly1305), but has
 excellent security properties.
+
+Ascon-AEAD128
+~~~~~~~~~~~~~
+
+Available if ``BOTAN_HAS_ASCON_AEAD128`` is defined.
+
+An AEAD scheme based on the Ascon permutation, specifically designed to allow
+small footprint implementations. Its main use case is in constrained
+environments, such as IoT devices where traditional cryptographic functions
+may be too resource intensive.
+
+Unless you are interoperating with an existing device which due to resource
+constraints can only use Ascon, prefer more typical AEADs such as AES-256/GCM,
+AES-256/SIV, or ChaCha20Poly1305.
+
+This AEAD scheme is standardized by NIST in SP.800-232. It is not compatible
+with earlier versions of the Ascon specification. The current implementation
+does not provide explicit support for the tag truncation and nonce masking
+features specified in the standard.
+
+Algorithm specification name: ``Ascon-AEAD128``
 
 CCM
 ~~~~~
@@ -409,6 +453,26 @@ Algorithm specification name:
 
 - Tag size defaults to 16.
 - Examples: e.g. ``AES-128/GCM``, ``AES-128/GCM(12)``
+
+GCM-SIV
+~~~~~~~~
+
+Available if ``BOTAN_HAS_AEAD_GCM_SIV`` is defined.
+
+AES-GCM-SIV, specified in RFC 8452. Like SIV this mode is resistant to nonce
+misuse; if a nonce is ever reused, the only information leaked is if two
+messages encrypted under the same nonce were identical. Requires a 128-bit
+block cipher with either a 128-bit or 256-bit key. The nonce must be exactly
+96 bits, and the tag is always 128 bits.
+
+Note that unlike SIV, GCM-SIV is not usable as a deterministic (nonce-less)
+encryption scheme; a nonce must always be provided.
+
+Algorithm specification name:
+``<BlockCipher>/GCM-SIV`` (reported name) /
+``GCM-SIV(<BlockCipher>)``
+
+- Examples: ``AES-128/GCM-SIV``, ``AES-256/GCM-SIV``
 
 OCB
 ~~~~~

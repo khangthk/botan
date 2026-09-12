@@ -18,19 +18,21 @@
    #include <utility>
    #include <vector>
 
-   #include <botan/internal/os_utils.h>
    #include <boost/asio.hpp>
-   #include <boost/bind.hpp>
+   #include <boost/bind/bind.hpp>
 
-   #include <botan/hex.h>
    #include <botan/pkcs8.h>
    #include <botan/rng.h>
+   #include <botan/tls_callbacks.h>
    #include <botan/tls_server.h>
    #include <botan/tls_session_manager_memory.h>
-   #include <botan/x509cert.h>
 
    #if defined(BOTAN_HAS_TLS_SQLITE3_SESSION_MANAGER)
       #include <botan/tls_session_manager_sqlite.h>
+   #endif
+
+   #if defined(BOTAN_HAS_OS_UTILS)
+      #include <botan/internal/os_utils.h>
    #endif
 
    #include "tls_helpers.h"
@@ -38,6 +40,8 @@
 namespace Botan_CLI {
 
 namespace {
+
+// NOLINTBEGIN(*-avoid-endl,*-avoid-bind)
 
 using boost::asio::ip::tcp;
 
@@ -80,7 +84,7 @@ void log_text_message(const char* where, const uint8_t buf[], size_t buf_len) {
 
 class ServerStatus {
    public:
-      ServerStatus(size_t max_clients) : m_max_clients(max_clients), m_clients_serviced(0) {}
+      explicit ServerStatus(size_t max_clients) : m_max_clients(max_clients), m_clients_serviced(0) {}
 
       bool should_exit() const {
          if(m_max_clients == 0) {
@@ -106,11 +110,11 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
 
       typedef std::shared_ptr<tls_proxy_session> pointer;
 
-      static pointer create(boost::asio::io_service& io,
+      static pointer create(boost::asio::io_context& io,
                             const std::shared_ptr<Botan::TLS::Session_Manager>& session_manager,
                             const std::shared_ptr<Botan::Credentials_Manager>& credentials,
                             const std::shared_ptr<Botan::TLS::Policy>& policy,
-                            const tcp::resolver::iterator& endpoints) {
+                            const tcp::resolver::results_type& endpoints) {
          auto session = std::make_shared<tls_proxy_session>(io, endpoints);
 
          // Defer the setup of the TLS server to make use of
@@ -128,7 +132,7 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
       }
 
       void stop() {
-         if(m_is_closed == false) {
+         if(!m_is_closed) {
             /*
             Don't need to talk to the server anymore
             Client socket is closed during write callback
@@ -144,7 +148,7 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
          }
       }
 
-      tls_proxy_session(boost::asio::io_service& io, tcp::resolver::iterator endpoints) :
+      tls_proxy_session(boost::asio::io_context& io, tcp::resolver::results_type endpoints) :
             m_strand(io),
             m_server_endpoints(std::move(endpoints)),
             m_client_socket(io),
@@ -172,20 +176,21 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
 
          try {
             if(!m_tls->is_active()) {
-               log_binary_message("From client", &m_c2p[0], bytes_transferred);
+               log_binary_message("From client", m_c2p.data(), bytes_transferred);
             }
-            m_tls->received_data(&m_c2p[0], bytes_transferred);
+            m_tls->received_data(m_c2p.data(), bytes_transferred);
          } catch(Botan::Exception& e) {
             log_exception("TLS connection failed", e);
             stop();
             return;
          }
 
-         m_client_socket.async_read_some(boost::asio::buffer(&m_c2p[0], m_c2p.size()),
-                                         m_strand.wrap(boost::bind(&tls_proxy_session::client_read,
-                                                                   shared_from_this(),
-                                                                   boost::asio::placeholders::error,
-                                                                   boost::asio::placeholders::bytes_transferred)));
+         m_client_socket.async_read_some(
+            boost::asio::buffer(m_c2p),
+            boost::asio::bind_executor(
+               m_strand, [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+                  self->client_read(ec, bytes);
+               }));
       }
 
       void handle_client_write_completion(const boost::system::error_code& error) {
@@ -228,13 +233,15 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
          if(m_p2c.empty() && !m_p2c_pending.empty()) {
             std::swap(m_p2c_pending, m_p2c);
 
-            log_binary_message("To Client", &m_p2c[0], m_p2c.size());
+            log_binary_message("To Client", m_p2c.data(), m_p2c.size());
 
-            boost::asio::async_write(m_client_socket,
-                                     boost::asio::buffer(&m_p2c[0], m_p2c.size()),
-                                     m_strand.wrap(boost::bind(&tls_proxy_session::handle_client_write_completion,
-                                                               shared_from_this(),
-                                                               boost::asio::placeholders::error)));
+            boost::asio::async_write(
+               m_client_socket,
+               boost::asio::buffer(m_p2c),
+               boost::asio::bind_executor(
+                  m_strand, [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
+                     self->handle_client_write_completion(ec);
+                  }));
          }
       }
 
@@ -247,13 +254,15 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
          if(m_p2s.empty() && !m_p2s_pending.empty()) {
             std::swap(m_p2s_pending, m_p2s);
 
-            log_text_message("To Server", &m_p2s[0], m_p2s.size());
+            log_text_message("To Server", m_p2s.data(), m_p2s.size());
 
-            boost::asio::async_write(m_server_socket,
-                                     boost::asio::buffer(&m_p2s[0], m_p2s.size()),
-                                     m_strand.wrap(boost::bind(&tls_proxy_session::handle_server_write_completion,
-                                                               shared_from_this(),
-                                                               boost::asio::placeholders::error)));
+            boost::asio::async_write(
+               m_server_socket,
+               boost::asio::buffer(m_p2s),
+               boost::asio::bind_executor(
+                  m_strand, [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
+                     self->handle_server_write_completion(ec);
+                  }));
          }
       }
 
@@ -265,10 +274,10 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
          }
 
          try {
-            if(bytes_transferred) {
-               log_text_message("Server to client", &m_s2p[0], m_s2p.size());
-               log_binary_message("Server to client", &m_s2p[0], m_s2p.size());
-               m_tls->send(&m_s2p[0], bytes_transferred);
+            if(bytes_transferred > 0) {
+               log_text_message("Server to client", m_s2p.data(), m_s2p.size());
+               log_binary_message("Server to client", m_s2p.data(), m_s2p.size());
+               m_tls->send(m_s2p.data(), bytes_transferred);
             }
          } catch(Botan::Exception& e) {
             log_exception("TLS connection failed", e);
@@ -278,16 +287,17 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
 
          m_s2p.resize(readbuf_size);
 
-         m_server_socket.async_read_some(boost::asio::buffer(&m_s2p[0], m_s2p.size()),
-                                         m_strand.wrap(boost::bind(&tls_proxy_session::server_read,
-                                                                   shared_from_this(),
-                                                                   boost::asio::placeholders::error,
-                                                                   boost::asio::placeholders::bytes_transferred)));
+         m_server_socket.async_read_some(
+            boost::asio::buffer(m_s2p),
+            boost::asio::bind_executor(
+               m_strand, [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+                  self->server_read(ec, bytes);
+               }));
       }
 
       void tls_session_activated() override {
          auto onConnect = [self = weak_from_this()](boost::system::error_code ec,
-                                                    const tcp::resolver::iterator& /*endpoint*/) {
+                                                    const tcp::resolver::results_type::iterator& /*endpoint*/) {
             if(ec) {
                log_error("Server connection", ec);
                return;
@@ -301,7 +311,7 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
                return;
             }
          };
-         async_connect(m_server_socket, m_server_endpoints, onConnect);
+         async_connect(m_server_socket, m_server_endpoints.begin(), m_server_endpoints.end(), onConnect);
       }
 
       void tls_session_established(const Botan::TLS::Session_Summary& session) override {
@@ -315,9 +325,9 @@ class tls_proxy_session final : public std::enable_shared_from_this<tls_proxy_se
          }
       }
 
-      boost::asio::io_service::strand m_strand;
+      boost::asio::io_context::strand m_strand;
 
-      tcp::resolver::iterator m_server_endpoints;
+      tcp::resolver::results_type m_server_endpoints;
 
       tcp::socket m_client_socket;
       tcp::socket m_server_socket;
@@ -341,9 +351,9 @@ class tls_proxy_server final {
    public:
       typedef tls_proxy_session session;
 
-      tls_proxy_server(boost::asio::io_service& io,
+      tls_proxy_server(boost::asio::io_context& io,
                        unsigned short port,
-                       tcp::resolver::iterator endpoints,
+                       tcp::resolver::results_type endpoints,
                        std::shared_ptr<Botan::Credentials_Manager> creds,
                        std::shared_ptr<Botan::TLS::Policy> policy,
                        std::shared_ptr<Botan::TLS::Session_Manager> session_mgr,
@@ -354,7 +364,7 @@ class tls_proxy_server final {
             m_policy(std::move(policy)),
             m_session_manager(std::move(session_mgr)),
             m_status(max_clients) {
-         log_info("Listening for new connections on port " + std::to_string(port));
+         log_info("Listening for new connections on port " + std::to_string(m_acceptor.local_endpoint().port()));
          serve_one_session();
       }
 
@@ -364,7 +374,7 @@ class tls_proxy_server final {
       }
 
       void serve_one_session() {
-         session::pointer new_session = make_session();
+         const session::pointer new_session = make_session();
 
          m_acceptor.async_accept(
             new_session->client_socket(),
@@ -383,15 +393,13 @@ class tls_proxy_server final {
       }
 
       tcp::acceptor m_acceptor;
-      tcp::resolver::iterator m_server_endpoints;
+      tcp::resolver::results_type m_server_endpoints;
 
       std::shared_ptr<Botan::Credentials_Manager> m_creds;
       std::shared_ptr<Botan::TLS::Policy> m_policy;
       std::shared_ptr<Botan::TLS::Session_Manager> m_session_manager;
       ServerStatus m_status;
 };
-
-}  // namespace
 
 class TLS_Proxy final : public Command {
    public:
@@ -405,12 +413,14 @@ class TLS_Proxy final : public Command {
       std::string description() const override { return "Proxies requests between a TLS client and a TLS server"; }
 
       size_t thread_count() const {
-         if(size_t t = get_arg_sz("threads")) {
+         if(const size_t t = get_arg_sz("threads")) {
             return t;
          }
-         if(size_t t = Botan::OS::get_cpu_available()) {
+   #if defined(BOTAN_HAS_OS_UTILS)
+         if(const size_t t = Botan::OS::get_cpu_available()) {
             return t;
          }
+   #endif
          return 2;
       }
 
@@ -429,10 +439,10 @@ class TLS_Proxy final : public Command {
 
          auto policy = load_tls_policy(get_arg("policy"));
 
-         boost::asio::io_service io;
+         boost::asio::io_context io;
 
          tcp::resolver resolver(io);
-         auto server_endpoint_iterator = resolver.resolve({target, target_port});
+         auto server_endpoint_iterator = resolver.resolve(target, target_port);
 
          std::shared_ptr<Botan::TLS::Session_Manager> session_mgr;
 
@@ -449,7 +459,8 @@ class TLS_Proxy final : public Command {
             session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng_as_shared());
          }
 
-         tls_proxy_server server(io, listen_port, server_endpoint_iterator, creds, policy, session_mgr, max_clients);
+         const tls_proxy_server server(
+            io, listen_port, server_endpoint_iterator, creds, policy, session_mgr, max_clients);
 
          std::vector<std::shared_ptr<std::thread>> threads;
 
@@ -460,13 +471,17 @@ class TLS_Proxy final : public Command {
 
          io.run();
 
-         for(size_t i = 0; i < threads.size(); ++i) {
-            threads[i]->join();
+         for(auto& thread : threads) {
+            thread->join();
          }
       }
 };
 
+// NOLINTEND(*-avoid-endl,*-avoid-bind)
+
 BOTAN_REGISTER_COMMAND("tls_proxy", TLS_Proxy);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

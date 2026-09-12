@@ -21,10 +21,19 @@ class BOTAN_PUBLIC_API(2, 0) ECDSA_PublicKey : public virtual EC_PublicKey {
    public:
       /**
       * Create a public key from a given public point.
-      * @param dom_par the domain parameters associated with this key
+      * @param group the domain parameters associated with this key
+      * @param public_key the public point defining this key
+      */
+      ECDSA_PublicKey(const EC_Group& group, const EC_AffinePoint& public_key) : EC_PublicKey(group, public_key) {}
+
+#if defined(BOTAN_HAS_LEGACY_EC_POINT)
+      /**
+      * Create a public key from a given public point.
+      * @param group the domain parameters associated with this key
       * @param public_point the public point defining this key
       */
-      ECDSA_PublicKey(const EC_Group& dom_par, const EC_Point& public_point) : EC_PublicKey(dom_par, public_point) {}
+      ECDSA_PublicKey(const EC_Group& group, const EC_Point& public_point) : EC_PublicKey(group, public_point) {}
+#endif
 
       /**
       * Load a public key.
@@ -32,15 +41,15 @@ class BOTAN_PUBLIC_API(2, 0) ECDSA_PublicKey : public virtual EC_PublicKey {
       * @param key_bits DER encoded public key bits
       */
       ECDSA_PublicKey(const AlgorithmIdentifier& alg_id, std::span<const uint8_t> key_bits) :
-            EC_PublicKey(alg_id, key_bits) {}
+            EC_PublicKey(assert_algorithm_identifier(alg_id, "ECDSA"), key_bits) {}
 
       /**
       * Recover a public key from a signature/msg pair
       * See SEC section 4.6.1
       * @param group the elliptic curve group
       * @param msg the message
-      * @param r the r paramter of the signature
-      * @param s the s paramter of the signature
+      * @param r the r parameter of the signature
+      * @param s the s parameter of the signature
       * @param v the recovery ID
       */
       ECDSA_PublicKey(
@@ -52,9 +61,7 @@ class BOTAN_PUBLIC_API(2, 0) ECDSA_PublicKey : public virtual EC_PublicKey {
       */
       std::string algo_name() const override { return "ECDSA"; }
 
-      size_t message_parts() const override { return 2; }
-
-      size_t message_part_size() const override { return domain().get_order_bytes(); }
+      std::optional<size_t> _signature_element_size_for_DER_encoding() const override;
 
       bool supports_operation(PublicKeyOperation op) const override { return (op == PublicKeyOperation::Signature); }
 
@@ -62,8 +69,7 @@ class BOTAN_PUBLIC_API(2, 0) ECDSA_PublicKey : public virtual EC_PublicKey {
 
       uint8_t recovery_param(const std::vector<uint8_t>& msg, const BigInt& r, const BigInt& s) const;
 
-      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                   std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const override;
 
       std::unique_ptr<PK_Ops::Verification> create_x509_verification_op(const AlgorithmIdentifier& signature_algorithm,
                                                                         std::string_view provider) const override;
@@ -88,24 +94,38 @@ class BOTAN_PUBLIC_API(2, 0) ECDSA_PrivateKey final : public ECDSA_PublicKey,
       * @param key_bits ECPrivateKey bits
       */
       ECDSA_PrivateKey(const AlgorithmIdentifier& alg_id, std::span<const uint8_t> key_bits) :
-            EC_PrivateKey(alg_id, key_bits) {}
+            EC_PrivateKey(assert_algorithm_identifier(alg_id, "ECDSA"), key_bits) {}
+
+      /**
+      * Create a private key from a given secret @p x
+      * @param group curve parameters to bu used for this key
+      * @param x      the private key
+      */
+      ECDSA_PrivateKey(const EC_Group& group, const EC_Scalar& x) : EC_PrivateKey(group, x) {}
+
+      /**
+      * Create a new private key
+      * @param rng a random number generator
+      * @param group parameters to used for this key
+      */
+      ECDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group) : EC_PrivateKey(rng, group) {}
 
       /**
       * Create a private key.
       * @param rng a random number generator
-      * @param domain parameters to used for this key
+      * @param group parameters to used for this key
       * @param x the private key (if zero, generate a new random key)
       */
-      ECDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& domain, const BigInt& x = BigInt::zero()) :
-            EC_PrivateKey(rng, domain, x) {}
+      BOTAN_DEPRECATED("Use one of the other constructors")
+      ECDSA_PrivateKey(RandomNumberGenerator& rng, const EC_Group& group, const BigInt& x) :
+            EC_PrivateKey(rng, group, x) {}
 
-      bool check_key(RandomNumberGenerator& rng, bool) const override;
+      bool check_key(RandomNumberGenerator& rng, bool strong) const override;
 
       std::unique_ptr<Public_Key> public_key() const override;
 
-      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
-                                                             std::string_view params,
-                                                             std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                              const PK_Signature_Options& options) const override;
 };
 
 BOTAN_DIAGNOSTIC_POP

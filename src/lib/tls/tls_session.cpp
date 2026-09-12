@@ -15,11 +15,17 @@
 #include <botan/pem.h>
 #include <botan/rng.h>
 #include <botan/tls_callbacks.h>
-#include <botan/tls_messages.h>
 #include <botan/x509_key.h>
+#include <botan/x509cert.h>
+#include <botan/internal/buffer_slicer.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/stl_util.h>
+
+#if defined(BOTAN_HAS_TLS_13)
+   #include <botan/tls_extensions_13.h>
+   #include <botan/tls_messages_13.h>
+#endif
 
 #include <utility>
 
@@ -59,7 +65,7 @@ std::optional<Session_ID> Session_Handle::id() const {
       return std::get<Session_ID>(m_handle);
    }
 
-   // Opaque handles can mimick as a Session_ID if they are short enough
+   // Opaque handles can mimic as a Session_ID if they are short enough
    if(is_opaque_handle()) {
       const auto& handle = std::get<Opaque_Session_Handle>(m_handle);
       if(handle.size() <= 32) {
@@ -75,13 +81,44 @@ std::optional<Session_Ticket> Session_Handle::ticket() const {
       return std::get<Session_Ticket>(m_handle);
    }
 
-   // Opaque handles can mimick 'normal' Session_Tickets at any time
+   // Opaque handles can mimic 'normal' Session_Tickets at any time
    if(is_opaque_handle()) {
       return Session_Ticket(std::get<Opaque_Session_Handle>(m_handle).get());
    }
 
    return std::nullopt;
 }
+
+Session_Base::Session_Base() = default;
+
+Session_Base::~Session_Base() = default;
+
+Session_Base::Session_Base(const Session_Base& other) = default;
+Session_Base& Session_Base::operator=(const Session_Base& other) = default;
+
+Session_Base::Session_Base(Session_Base&& other) noexcept = default;
+Session_Base& Session_Base::operator=(Session_Base&& other) noexcept = default;
+
+Session_Base::Session_Base(std::chrono::system_clock::time_point start_time,
+                           Protocol_Version version,
+                           uint16_t ciphersuite,
+                           Connection_Side connection_side,
+                           uint16_t srtp_profile,
+                           bool extended_master_secret,
+                           bool encrypt_then_mac,
+                           const std::vector<X509_Certificate>& peer_certs,
+                           std::shared_ptr<const Public_Key> peer_raw_public_key,
+                           Server_Information server_info) :
+      m_start_time(start_time),
+      m_version(version),
+      m_ciphersuite(ciphersuite),
+      m_connection_side(connection_side),
+      m_srtp_profile(srtp_profile),
+      m_extended_master_secret(extended_master_secret),
+      m_encrypt_then_mac(encrypt_then_mac),
+      m_peer_certs(peer_certs),
+      m_peer_raw_public_key(std::move(peer_raw_public_key)),
+      m_server_info(std::move(server_info)) {}
 
 Ciphersuite Session_Base::ciphersuite() const {
    auto suite = Ciphersuite::by_id(m_ciphersuite);
@@ -103,9 +140,46 @@ Session_Summary::Session_Summary(const Session_Base& base,
 
 #if defined(BOTAN_HAS_TLS_13)
 
+namespace {
+
+std::string tls13_kex_to_string(bool psk, std::optional<Named_Group> group) {
+   if(psk && group) {
+      if(group->is_dh_named_group()) {
+         return kex_method_to_string(Kex_Algo::DHE_PSK);
+      } else if(group->is_ecdh_named_curve() || group->is_x25519() || group->is_x448()) {
+         return kex_method_to_string(Kex_Algo::ECDHE_PSK);
+      } else if(group->is_pure_ml_kem() || group->is_pure_frodokem()) {
+         return kex_method_to_string(Kex_Algo::KEM_PSK);
+      } else if(group->is_pqc_hybrid()) {
+         return kex_method_to_string(Kex_Algo::HYBRID_PSK);
+      } else if(auto s = group->to_string()) {
+         return *s;
+      }
+   } else if(psk) {
+      return kex_method_to_string(Kex_Algo::PSK);
+   } else {
+      BOTAN_ASSERT_NOMSG(group.has_value());
+      if(group->is_dh_named_group()) {
+         return kex_method_to_string(Kex_Algo::DH);
+      } else if(group->is_ecdh_named_curve() || group->is_x25519() || group->is_x448()) {
+         return kex_method_to_string(Kex_Algo::ECDH);
+      } else if(group->is_pure_ml_kem() || group->is_pure_frodokem()) {
+         return kex_method_to_string(Kex_Algo::KEM);
+      } else if(group->is_pqc_hybrid()) {
+         return kex_method_to_string(Kex_Algo::HYBRID);
+      } else if(auto s = group->to_string()) {
+         return *s;
+      }
+   }
+
+   return kex_method_to_string(Kex_Algo::UNDEFINED);
+}
+
+}  // namespace
+
 Session_Summary::Session_Summary(const Server_Hello_13& server_hello,
                                  Connection_Side side,
-                                 std::vector<X509_Certificate> peer_certs,
+                                 const std::vector<X509_Certificate>& peer_certs,
                                  std::shared_ptr<const Public_Key> peer_raw_public_key,
                                  std::optional<std::string> psk_identity,
                                  bool session_was_resumed,
@@ -128,7 +202,7 @@ Session_Summary::Session_Summary(const Server_Hello_13& server_hello,
 
                    // TLS 1.3 uses AEADs, so technically encrypt-then-MAC is not applicable.
                    false,
-                   std::move(peer_certs),
+                   peer_certs,
                    std::move(peer_raw_public_key),
                    std::move(server_info)),
       m_external_psk_identity(std::move(psk_identity)),
@@ -138,39 +212,26 @@ Session_Summary::Session_Summary(const Server_Hello_13& server_hello,
 
    // In TLS 1.3 the key exchange algorithm is not negotiated in the ciphersuite
    // anymore. This provides a compatible identifier for applications to use.
-   m_kex_algo = kex_method_to_string([&] {
+
+   std::optional<Named_Group> group = [&]() -> std::optional<Named_Group> {
       if(psk_used() || was_resumption()) {
-         if(const auto keyshare = server_hello.extensions().get<Key_Share>()) {
-            const auto group = keyshare->selected_group();
-            if(group.is_dh_named_group()) {
-               return Kex_Algo::DHE_PSK;
-            } else if(group.is_ecdh_named_curve() || group.is_x25519() || group.is_x448()) {
-               return Kex_Algo::ECDHE_PSK;
-            } else if(group.is_pure_kyber()) {
-               return Kex_Algo::KEM_PSK;
-            } else if(group.is_pqc_hybrid()) {
-               return Kex_Algo::HYBRID_PSK;
-            }
+         if(auto* const keyshare = server_hello.extensions().get<Key_Share>()) {
+            return keyshare->selected_group();
          } else {
-            return Kex_Algo::PSK;
+            return {};
          }
       } else {
-         const auto keyshare = server_hello.extensions().get<Key_Share>();
+         auto* const keyshare = server_hello.extensions().get<Key_Share>();
          BOTAN_ASSERT_NONNULL(keyshare);
-         const auto group = keyshare->selected_group();
-         if(group.is_dh_named_group()) {
-            return Kex_Algo::DH;
-         } else if(group.is_ecdh_named_curve() || group.is_x25519() || group.is_x448()) {
-            return Kex_Algo::ECDH;
-         } else if(group.is_pure_kyber()) {
-            return Kex_Algo::KEM;
-         } else if(group.is_pqc_hybrid()) {
-            return Kex_Algo::HYBRID;
-         }
+         return keyshare->selected_group();
       }
+   }();
 
-      return Kex_Algo::UNDEFINED;
-   }());
+   if(group.has_value()) {
+      m_kex_parameters = group->to_string();
+   }
+
+   m_kex_algo = tls13_kex_to_string(psk_used() || was_resumption(), group);
 }
 
 #endif
@@ -245,58 +306,30 @@ Session::Session(const secure_vector<uint8_t>& session_psk,
    BOTAN_ARG_CHECK(!version.is_pre_tls_13(), "Instantiated a TLS 1.3 session object with a TLS version older than 1.3");
 }
 
-Session::Session(secure_vector<uint8_t>&& session_psk,
-                 const std::optional<uint32_t>& max_early_data_bytes,
-                 std::chrono::seconds lifetime_hint,
-                 const std::vector<X509_Certificate>& peer_certs,
-                 std::shared_ptr<const Public_Key> peer_raw_public_key,
-                 const Client_Hello_13& client_hello,
-                 const Server_Hello_13& server_hello,
-                 Callbacks& callbacks,
-                 RandomNumberGenerator& rng) :
-      Session_Base(callbacks.tls_current_timestamp(),
-                   server_hello.selected_version(),
-                   server_hello.ciphersuite(),
-                   Connection_Side::Server,
-                   0,
-                   true,
-                   false,  // see constructor above for rationales
-                   peer_certs,
-                   std::move(peer_raw_public_key),
-                   Server_Information(client_hello.sni_hostname())),
-      m_master_secret(std::move(session_psk)),
-      m_early_data_allowed(max_early_data_bytes.has_value()),
-      m_max_early_data_bytes(max_early_data_bytes.value_or(0)),
-      m_ticket_age_add(load_be<uint32_t>(rng.random_vec(4).data(), 0)),
-      m_lifetime_hint(lifetime_hint) {
-   BOTAN_ARG_CHECK(!m_version.is_pre_tls_13(),
-                   "Instantiated a TLS 1.3 session object with a TLS version older than 1.3");
-}
-
 #endif
 
 Session::Session(std::string_view pem) : Session(PEM_Code::decode_check_label(pem, "TLS SESSION")) {}
 
-Session::Session(std::span<const uint8_t> ber_data) {
+Session::Session(std::span<const uint8_t> ber_data) /* NOLINT(*-member-init) */ {
    uint8_t side_code = 0;
 
    std::vector<uint8_t> raw_pubkey_or_empty;
 
    ASN1_String server_hostname;
    ASN1_String server_service;
-   size_t server_port;
+   size_t server_port = 0;
 
-   uint8_t major_version = 0, minor_version = 0;
+   uint8_t major_version = 0;
+   uint8_t minor_version = 0;
 
    size_t start_time = 0;
    size_t srtp_profile = 0;
    uint16_t ciphersuite_code = 0;
    uint64_t lifetime_hint = 0;
 
-   BER_Decoder(ber_data.data(), ber_data.size())
+   BER_Decoder(ber_data, BER_Decoder::Limits::DER())
       .start_sequence()
-      .decode_and_check(static_cast<size_t>(TLS_SESSION_PARAM_STRUCT_VERSION),
-                        "Unknown version in serialized TLS session")
+      .decode_and_check(TLS_SESSION_PARAM_STRUCT_VERSION, "Unknown version in serialized TLS session")
       .decode_integer_type(start_time)
       .decode_integer_type(major_version)
       .decode_integer_type(minor_version)
@@ -328,7 +361,18 @@ Session::Session(std::span<const uint8_t> ber_data) {
    m_ciphersuite = ciphersuite_code;
    m_version = Protocol_Version(major_version, minor_version);
    m_start_time = std::chrono::system_clock::from_time_t(start_time);
+   if(side_code != static_cast<uint8_t>(Connection_Side::Client) &&
+      side_code != static_cast<uint8_t>(Connection_Side::Server)) {
+      throw Decoding_Error("Serialized TLS session contains unknown connection side " + std::to_string(side_code));
+   }
    m_connection_side = static_cast<Connection_Side>(side_code);
+
+   const bool valid_secret_size = m_version.is_pre_tls_13()
+                                     ? (m_master_secret.size() == 48)
+                                     : (m_master_secret.size() == 32 || m_master_secret.size() == 48);
+   if(!valid_secret_size) {
+      throw Decoding_Error("Serialized TLS session has master_secret of unexpected length");
+   }
    m_srtp_profile = static_cast<uint16_t>(srtp_profile);
 
    m_server_info =
@@ -347,7 +391,7 @@ secure_vector<uint8_t> Session::DER_encode() const {
 
    return DER_Encoder()
       .start_sequence()
-      .encode(static_cast<size_t>(TLS_SESSION_PARAM_STRUCT_VERSION))
+      .encode(TLS_SESSION_PARAM_STRUCT_VERSION)
       .encode(static_cast<size_t>(std::chrono::system_clock::to_time_t(m_start_time)))
       .encode(static_cast<size_t>(m_version.major_version()))
       .encode(static_cast<size_t>(m_version.minor_version()))
@@ -429,7 +473,7 @@ std::vector<uint8_t> Session::encrypt(const SymmetricKey& key, RandomNumberGener
    std::vector<uint8_t> buf;
    buf.reserve(TLS_SESSION_CRYPT_OVERHEAD + bits.size());
    buf.resize(TLS_SESSION_CRYPT_MAGIC_LEN);
-   store_be(TLS_SESSION_CRYPT_MAGIC, &buf[0]);
+   store_be(TLS_SESSION_CRYPT_MAGIC, &buf[0]);  // NOLINT(*container-data-pointer)
    buf += key_name;
    buf += key_seed;
    buf += aead_nonce;
@@ -455,10 +499,10 @@ Session Session::decrypt(std::span<const uint8_t> in, const SymmetricKey& key) {
       }
 
       BufferSlicer sub(in);
-      const auto magic = sub.take(TLS_SESSION_CRYPT_MAGIC_LEN).data();
-      const auto key_name = sub.take(TLS_SESSION_CRYPT_KEY_NAME_LEN).data();
-      const auto key_seed = sub.take(TLS_SESSION_CRYPT_AEAD_KEY_SEED_LEN).data();
-      const auto aead_nonce = sub.take(TLS_SESSION_CRYPT_AEAD_NONCE_LEN).data();
+      const auto* const magic = sub.take(TLS_SESSION_CRYPT_MAGIC_LEN).data();
+      const auto* const key_name = sub.take(TLS_SESSION_CRYPT_KEY_NAME_LEN).data();
+      const auto* const key_seed = sub.take(TLS_SESSION_CRYPT_AEAD_KEY_SEED_LEN).data();
+      const auto* const aead_nonce = sub.take(TLS_SESSION_CRYPT_AEAD_NONCE_LEN).data();
       auto ctext = sub.copy_as_secure_vector(sub.remaining());
 
       if(load_be<uint64_t>(magic, 0) != TLS_SESSION_CRYPT_MAGIC) {

@@ -11,13 +11,15 @@
 
    #include <botan/cipher_mode.h>
    #include <botan/hex.h>
-   #include <sstream>
+   #include <botan/symkey.h>
 
    #if defined(BOTAN_HAS_AEAD_MODES)
       #include <botan/aead.h>
    #endif
 
 namespace Botan_CLI {
+
+namespace {
 
 class Cipher final : public Command {
    public:
@@ -74,6 +76,8 @@ class Cipher final : public Command {
 };
 
 BOTAN_REGISTER_COMMAND("cipher", Cipher);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

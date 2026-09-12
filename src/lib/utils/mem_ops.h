@@ -8,7 +8,8 @@
 #ifndef BOTAN_MEMORY_OPS_H_
 #define BOTAN_MEMORY_OPS_H_
 
-#include <botan/concepts.h>
+#include <botan/assert.h>
+#include <botan/range_concepts.h>
 #include <botan/types.h>
 #include <array>
 #include <cstring>
@@ -16,6 +17,8 @@
 #include <span>
 #include <type_traits>
 #include <vector>
+
+BOTAN_FUTURE_INTERNAL_HEADER(mem_ops.h)
 
 /*
 The header mem_ops.h previously included the contents of allocator.h
@@ -48,17 +51,14 @@ namespace Botan {
 BOTAN_PUBLIC_API(2, 0) void secure_scrub_memory(void* ptr, size_t n);
 
 /**
-* Scrub memory contents in a way that a compiler should not elide,
-* using some system specific technique. Note that this function might
-* not zero the memory.
+* Zero memory contents in a way that a compiler should not elide,
+* using some system specific technique.
 *
 * @param data  the data region to be scrubbed
 */
 void secure_scrub_memory(ranges::contiguous_output_range auto&& data) {
    secure_scrub_memory(std::ranges::data(data), ranges::size_bytes(data));
 }
-
-#if !defined(BOTAN_IS_BEGIN_BUILT)
 
 /**
 * Memory comparison, input insensitive
@@ -69,8 +69,6 @@ void secure_scrub_memory(ranges::contiguous_output_range auto&& data) {
 */
 BOTAN_DEPRECATED("This function is deprecated, use constant_time_compare()")
 BOTAN_PUBLIC_API(2, 9) uint8_t ct_compare_u8(const uint8_t x[], const uint8_t y[], size_t len);
-
-#endif
 
 /**
  * Memory comparison, input insensitive
@@ -129,7 +127,7 @@ inline constexpr void clear_mem(T* ptr, size_t n) {
 * @param mem a contiguous range of Ts to zero
 */
 template <ranges::contiguous_output_range R>
-inline constexpr void clear_mem(R&& mem)
+inline constexpr void clear_mem(R&& mem)  // NOLINT(*-missing-std-forward)
    requires std::is_trivially_copyable_v<std::ranges::range_value_t<R>>
 {
    clear_bytes(std::ranges::data(mem), ranges::size_bytes(mem));
@@ -142,7 +140,7 @@ inline constexpr void clear_mem(R&& mem)
 * @param n the number of elements of in/out
 */
 template <typename T>
-   requires std::is_trivial<typename std::decay<T>::type>::value
+   requires std::is_trivial_v<std::decay_t<T>>
 inline constexpr void copy_mem(T* out, const T* in, size_t n) {
    BOTAN_ASSERT_IMPLICATION(n > 0, in != nullptr && out != nullptr, "If n > 0 then args are not null");
 
@@ -159,7 +157,7 @@ inline constexpr void copy_mem(T* out, const T* in, size_t n) {
 template <ranges::contiguous_output_range OutR, ranges::contiguous_range InR>
    requires std::is_same_v<std::ranges::range_value_t<OutR>, std::ranges::range_value_t<InR>> &&
             std::is_trivially_copyable_v<std::ranges::range_value_t<InR>>
-inline constexpr void copy_mem(OutR&& out, InR&& in) {
+inline constexpr void copy_mem(OutR&& out /* NOLINT(*-std-forward) */, const InR& in) {
    ranges::assert_equal_byte_lengths(out, in);
    if(std::is_constant_evaluated()) {
       std::copy(std::ranges::begin(in), std::ranges::end(in), std::ranges::begin(out));
@@ -175,7 +173,7 @@ inline constexpr void copy_mem(OutR&& out, InR&& in) {
 template <ranges::contiguous_output_range ToR, ranges::contiguous_range FromR>
    requires std::is_trivially_copyable_v<std::ranges::range_value_t<FromR>> &&
             std::is_trivially_copyable_v<std::ranges::range_value_t<ToR>>
-inline constexpr void typecast_copy(ToR&& out, FromR&& in) {
+inline constexpr void typecast_copy(ToR&& out /* NOLINT(*-std-forward) */, const FromR& in) {
    ranges::assert_equal_byte_lengths(out, in);
    std::memcpy(std::ranges::data(out), std::ranges::data(in), ranges::size_bytes(out));
 }
@@ -187,7 +185,7 @@ inline constexpr void typecast_copy(ToR&& out, FromR&& in) {
 template <typename ToT, ranges::contiguous_range FromR>
    requires std::is_trivially_copyable_v<std::ranges::range_value_t<FromR>> && std::is_trivially_copyable_v<ToT> &&
             (!std::ranges::range<ToT>)
-inline constexpr void typecast_copy(ToT& out, FromR&& in) noexcept {
+inline constexpr void typecast_copy(ToT& out, const FromR& in) {
    typecast_copy(std::span<ToT, 1>(&out, 1), in);
 }
 
@@ -198,7 +196,7 @@ inline constexpr void typecast_copy(ToT& out, FromR&& in) noexcept {
 template <ranges::contiguous_output_range ToR, typename FromT>
    requires std::is_trivially_copyable_v<FromT> &&
             (!std::ranges::range<FromT>) && std::is_trivially_copyable_v<std::ranges::range_value_t<ToR>>
-inline constexpr void typecast_copy(ToR&& out, const FromT& in) {
+inline constexpr void typecast_copy(ToR&& out /* NOLINT(*-std-forward) */, const FromT& in) {
    typecast_copy(out, std::span<const FromT, 1>(&in, 1));
 }
 
@@ -209,30 +207,47 @@ inline constexpr void typecast_copy(ToR&& out, const FromT& in) {
 template <typename ToT, ranges::contiguous_range FromR>
    requires std::is_default_constructible_v<ToT> && std::is_trivially_copyable_v<ToT> &&
             std::is_trivially_copyable_v<std::ranges::range_value_t<FromR>>
-inline constexpr ToT typecast_copy(FromR&& src) noexcept {
-   ToT dst;
+inline constexpr ToT typecast_copy(const FromR& src) {
+   ToT dst;  // NOLINT(*-member-init)
    typecast_copy(dst, src);
    return dst;
 }
 
+/**
+* Copy the bytes of an array of trivially copyable objects into a byte array
+* @param out the output byte array, must have room for sizeof(T)*N bytes
+* @param in the input array
+* @param N the number of elements in the input array
+*/
 // TODO: deprecate and replace
 template <typename T>
 inline constexpr void typecast_copy(uint8_t out[], T in[], size_t N)
-   requires std::is_trivially_copyable<T>::value
+   requires std::is_trivially_copyable_v<T>
 {
    // asserts that *in and *out point to the correct amount of memory
    typecast_copy(std::span<uint8_t>(out, sizeof(T) * N), std::span<const T>(in, N));
 }
 
+/**
+* Reinterpret a byte array as an array of trivial objects
+* @param out the output array, must have room for N elements
+* @param in the input byte array, must hold sizeof(T)*N bytes
+* @param N the number of elements to produce
+*/
 // TODO: deprecate and replace
 template <typename T>
 inline constexpr void typecast_copy(T out[], const uint8_t in[], size_t N)
-   requires std::is_trivial<T>::value
+   requires std::is_trivial_v<T>
 {
    // asserts that *in and *out point to the correct amount of memory
    typecast_copy(std::span<T>(out, N), std::span<const uint8_t>(in, N * sizeof(T)));
 }
 
+/**
+* Copy the bytes of a single object into a byte array
+* @param out the output byte array, must have room for sizeof(T) bytes
+* @param in the object to copy from
+*/
 // TODO: deprecate and replace
 template <typename T>
 inline constexpr void typecast_copy(uint8_t out[], const T& in) {
@@ -240,23 +255,33 @@ inline constexpr void typecast_copy(uint8_t out[], const T& in) {
    typecast_copy(std::span<uint8_t, sizeof(T)>(out, sizeof(T)), in);
 }
 
+/**
+* Reinterpret a byte array as a single trivial object
+* @param out the object to copy into
+* @param in the input byte array, must hold sizeof(T) bytes
+*/
 // TODO: deprecate and replace
 template <typename T>
-   requires std::is_trivial<typename std::decay<T>::type>::value
+   requires std::is_trivial_v<std::decay_t<T>>
 inline constexpr void typecast_copy(T& out, const uint8_t in[]) {
    // asserts that *in points to the correct amount of memory
    typecast_copy(out, std::span<const uint8_t, sizeof(T)>(in, sizeof(T)));
 }
 
+/**
+* Reinterpret a byte array as a single trivial object
+* @param src the input byte array, must hold sizeof(To) bytes
+* @return the object read from src
+*/
 // TODO: deprecate and replace
 template <typename To>
-   requires std::is_trivial<To>::value
+   requires std::is_trivial_v<To>
 inline constexpr To typecast_copy(const uint8_t src[]) noexcept {
    // asserts that *src points to the correct amount of memory
    return typecast_copy<To>(std::span<const uint8_t, sizeof(To)>(src, sizeof(To)));
 }
 
-#if !defined(BOTAN_IS_BEGIN_BUILT)
+#if !defined(BOTAN_IS_BEING_BUILT)
 /**
 * Set memory to a fixed value
 * @param ptr a pointer to an array of bytes
@@ -270,18 +295,40 @@ BOTAN_DEPRECATED("This function is deprecated") inline constexpr void set_mem(ui
 }
 #endif
 
+#if !defined(BOTAN_IS_BEING_BUILT)
+/**
+* Cast a char pointer to a uint8_t pointer
+* @param s the pointer to cast
+* @return s viewed as a byte pointer
+*/
 inline const uint8_t* cast_char_ptr_to_uint8(const char* s) {
    return reinterpret_cast<const uint8_t*>(s);
 }
 
+/**
+* Cast a char pointer to a uint8_t pointer
+* @param s the pointer to cast
+* @return s viewed as a byte pointer
+*/
+inline uint8_t* cast_char_ptr_to_uint8(char* s) {
+   return reinterpret_cast<uint8_t*>(s);
+}
+#endif
+
+/**
+* Cast a uint8_t pointer to a char pointer
+* @param b the pointer to cast
+* @return b viewed as a char pointer
+*/
 inline const char* cast_uint8_ptr_to_char(const uint8_t* b) {
    return reinterpret_cast<const char*>(b);
 }
 
-inline uint8_t* cast_char_ptr_to_uint8(char* s) {
-   return reinterpret_cast<uint8_t*>(s);
-}
-
+/**
+* Cast a uint8_t pointer to a char pointer
+* @param b the pointer to cast
+* @return b viewed as a char pointer
+*/
 inline char* cast_uint8_ptr_to_char(uint8_t* b) {
    return reinterpret_cast<char*>(b);
 }
@@ -309,6 +356,14 @@ inline bool same_mem(const T* p1, const T* p2, size_t n) {
 
 #if !defined(BOTAN_IS_BEING_BUILT)
 
+/**
+* Copy into a buffer at an offset, truncating to the space available
+* @param buf the buffer to write into
+* @param buf_offset the offset in buf to write at
+* @param input the elements to copy
+* @param input_length the number of elements in input
+* @return the number of elements actually copied
+*/
 template <typename T, typename Alloc>
 BOTAN_DEPRECATED("The buffer_insert functions are deprecated")
 size_t buffer_insert(std::vector<T, Alloc>& buf, size_t buf_offset, const T input[], size_t input_length) {
@@ -320,6 +375,13 @@ size_t buffer_insert(std::vector<T, Alloc>& buf, size_t buf_offset, const T inpu
    return to_copy;
 }
 
+/**
+* Copy into a buffer at an offset, truncating to the space available
+* @param buf the buffer to write into
+* @param buf_offset the offset in buf to write at
+* @param input the elements to copy
+* @return the number of elements actually copied
+*/
 template <typename T, typename Alloc, typename Alloc2>
 BOTAN_DEPRECATED("The buffer_insert functions are deprecated")
 size_t buffer_insert(std::vector<T, Alloc>& buf, size_t buf_offset, const std::vector<T, Alloc2>& input) {
@@ -417,6 +479,12 @@ inline void xor_buf(uint8_t out[], const uint8_t in[], const uint8_t in2[], size
    xor_buf(std::span{out, length}, std::span{in, length}, std::span{in2, length});
 }
 
+/**
+* XOR the first n bytes of in into out
+* @param out the buffer to XOR into, must hold at least n bytes
+* @param in the buffer to read from, must hold at least n bytes
+* @param n the number of bytes to XOR
+*/
 // TODO: deprecate and replace, use .subspan()
 inline void xor_buf(std::span<uint8_t> out, std::span<const uint8_t> in, size_t n) {
    BOTAN_ARG_CHECK(out.size() >= n, "output span is too small");
@@ -424,6 +492,12 @@ inline void xor_buf(std::span<uint8_t> out, std::span<const uint8_t> in, size_t 
    xor_buf(out.first(n), in.first(n));
 }
 
+/**
+* XOR n bytes into the front of a vector
+* @param out the vector to XOR into, must hold at least n bytes
+* @param in the bytes to read from, must point to at least n bytes
+* @param n the number of bytes to XOR
+*/
 // TODO: deprecate and replace, use .subspan()
 template <typename Alloc>
 void xor_buf(std::vector<uint8_t, Alloc>& out, const uint8_t* in, size_t n) {
@@ -432,6 +506,13 @@ void xor_buf(std::vector<uint8_t, Alloc>& out, const uint8_t* in, size_t n) {
    xor_buf(std::span{out}.first(n), std::span{in, n});
 }
 
+/**
+* Set the front of a vector to the XOR of two inputs
+* @param out the vector to write into, must hold at least n bytes
+* @param in the first input, must point to at least n bytes
+* @param in2 the second input, must hold at least n bytes
+* @param n the number of bytes to process
+*/
 // TODO: deprecate and replace
 template <typename Alloc, typename Alloc2>
 void xor_buf(std::vector<uint8_t, Alloc>& out, const uint8_t* in, const std::vector<uint8_t, Alloc2>& in2, size_t n) {
@@ -441,6 +522,12 @@ void xor_buf(std::vector<uint8_t, Alloc>& out, const uint8_t* in, const std::vec
    xor_buf(std::span{out}.first(n), std::span{in, n}, std::span{in2}.first(n));
 }
 
+/**
+* XOR a vector into another, growing the destination if it is shorter
+* @param out the vector to XOR into
+* @param in the vector to read from
+* @return reference to out
+*/
 template <typename Alloc, typename Alloc2>
 std::vector<uint8_t, Alloc>& operator^=(std::vector<uint8_t, Alloc>& out, const std::vector<uint8_t, Alloc2>& in) {
    if(out.size() < in.size()) {

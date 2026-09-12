@@ -8,6 +8,7 @@
 #include <botan/pkcs8.h>
 
 #include <botan/asn1_obj.h>
+#include <botan/assert.h>
 #include <botan/ber_dec.h>
 #include <botan/der_enc.h>
 #include <botan/pem.h>
@@ -30,7 +31,12 @@ namespace {
 secure_vector<uint8_t> PKCS8_extract(DataSource& source, AlgorithmIdentifier& pbe_alg_id) {
    secure_vector<uint8_t> key_data;
 
-   BER_Decoder(source).start_sequence().decode(pbe_alg_id).decode(key_data, ASN1_Type::OctetString).verify_end();
+   BER_Decoder(source, BER_Decoder::Limits::DER())
+      .start_sequence()
+      .decode(pbe_alg_id)
+      .decode(key_data, ASN1_Type::OctetString)
+      .end_cons()
+      .verify_end();
 
    return key_data;
 }
@@ -43,7 +49,8 @@ secure_vector<uint8_t> PKCS8_decode(DataSource& source,
                                     AlgorithmIdentifier& pk_alg_id,
                                     bool is_encrypted) {
    AlgorithmIdentifier pbe_alg_id;
-   secure_vector<uint8_t> key_data, key;
+   secure_vector<uint8_t> key_data;
+   secure_vector<uint8_t> key;
 
    try {
       if(ASN1::maybe_BER(source) && !PEM_Code::matches(source)) {
@@ -51,12 +58,8 @@ secure_vector<uint8_t> PKCS8_decode(DataSource& source,
             key_data = PKCS8_extract(source, pbe_alg_id);
          } else {
             // todo read more efficiently
-            while(!source.end_of_data()) {
-               uint8_t b;
-               size_t read = source.read_byte(b);
-               if(read) {
-                  key_data.push_back(b);
-               }
+            while(auto b = source.read_byte()) {
+               key_data.push_back(*b);
             }
          }
       } else {
@@ -83,7 +86,7 @@ secure_vector<uint8_t> PKCS8_decode(DataSource& source,
 
    try {
       if(is_encrypted) {
-         if(pbe_alg_id.oid().to_formatted_string() != "PBE-PKCS5v20") {
+         if(pbe_alg_id.oid().registered_name() != "PBE-PKCS5v20") {
             throw PKCS8_Exception(fmt("Unknown PBE type {}", pbe_alg_id.oid()));
          }
 
@@ -97,13 +100,14 @@ secure_vector<uint8_t> PKCS8_decode(DataSource& source,
          key = key_data;
       }
 
-      BER_Decoder(key)
+      BER_Decoder(key, BER_Decoder::Limits::DER())
          .start_sequence()
          .decode_and_check<size_t>(0, "Unknown PKCS #8 version number")
          .decode(pk_alg_id)
          .decode(key, ASN1_Type::OctetString)
          .discard_remaining()
-         .end_cons();
+         .end_cons()
+         .verify_end();
    } catch(std::exception& e) {
       throw Decoding_Error("PKCS #8 private key decoding", e);
    }
@@ -144,7 +148,7 @@ std::pair<std::string, std::string> choose_pbe_params(std::string_view pbe_algo,
       return std::make_pair("AES-256/CBC", "SHA-256");
    }
 
-   SCAN_Name request(pbe_algo);
+   const SCAN_Name request(pbe_algo);
 
    if(request.arg_count() != 2 || (request.algo_name() != "PBE-PKCS5v20" && request.algo_name() != "PBES2")) {
       throw Invalid_Argument(fmt("Unsupported PBE '{}'", pbe_algo));
@@ -300,12 +304,11 @@ std::unique_ptr<Private_Key> load_key(DataSource& source,
    AlgorithmIdentifier alg_id;
    secure_vector<uint8_t> pkcs8_key = PKCS8_decode(source, get_pass, alg_id, is_encrypted);
 
-   const std::string alg_name = alg_id.oid().human_name_or_empty();
-   if(alg_name.empty()) {
+   if(const auto alg_name = alg_id.oid().registered_name()) {
+      return load_private_key(alg_id, pkcs8_key);
+   } else {
       throw PKCS8_Exception(fmt("Unknown algorithm OID {}", alg_id.oid()));
    }
-
-   return load_private_key(alg_id, pkcs8_key);
 }
 
 }  // namespace

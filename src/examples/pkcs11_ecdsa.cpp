@@ -19,7 +19,7 @@ int main() {
    Botan::PKCS11::Slot slot(module, slots.at(0));
    Botan::PKCS11::Session session(slot, false);
 
-   Botan::PKCS11::secure_string pin = {'1', '2', '3', '4', '5', '6'};
+   const Botan::PKCS11::secure_string pin = {'1', '2', '3', '4', '5', '6'};
    session.login(Botan::PKCS11::UserType::User, pin);
 
    /************ import ECDSA private key *************/
@@ -27,7 +27,7 @@ int main() {
    // create private key in software
    Botan::AutoSeeded_RNG rng;
 
-   Botan::ECDSA_PrivateKey priv_key_sw(rng, Botan::EC_Group::from_name("secp256r1"));
+   const Botan::ECDSA_PrivateKey priv_key_sw(rng, Botan::EC_Group::from_name("secp256r1"));
 
    // set the private key import properties
    Botan::PKCS11::EC_PrivateKeyImportProperties priv_import_props(priv_key_sw.DER_domain(),
@@ -43,17 +43,16 @@ int main() {
    priv_import_props.set_label(label);
 
    // import to card
-   Botan::PKCS11::PKCS11_ECDSA_PrivateKey priv_key(session, priv_import_props);
+   const Botan::PKCS11::PKCS11_ECDSA_PrivateKey priv_key(session, priv_import_props);
 
    /************ export PKCS#11 ECDSA private key *************/
-   Botan::ECDSA_PrivateKey priv_exported = priv_key.export_key();
+   const Botan::ECDSA_PrivateKey priv_exported = priv_key.export_key();
 
    /************ import ECDSA public key *************/
 
    // import to card
    std::vector<uint8_t> ec_point;
-   Botan::DER_Encoder(ec_point).encode(priv_key_sw.public_point().encode(Botan::EC_Point_Format::Uncompressed),
-                                       Botan::ASN1_Type::OctetString);
+   Botan::DER_Encoder(ec_point).encode(priv_key_sw.raw_public_key_bits(), Botan::ASN1_Type::OctetString);
    Botan::PKCS11::EC_PublicKeyImportProperties pub_import_props(priv_key_sw.DER_domain(), ec_point);
 
    pub_import_props.set_token(true);
@@ -64,10 +63,10 @@ int main() {
    label = "test ECDSA pub key";
    pub_import_props.set_label(label);
 
-   Botan::PKCS11::PKCS11_ECDSA_PublicKey public_key(session, pub_import_props);
+   const Botan::PKCS11::PKCS11_ECDSA_PublicKey public_key(session, pub_import_props);
 
    /************ export PKCS#11 ECDSA public key *************/
-   Botan::ECDSA_PublicKey pub_exported = public_key.export_key();
+   const Botan::ECDSA_PublicKey pub_exported = public_key.export_key();
 
    /************ generate PKCS#11 ECDSA private key *************/
    Botan::PKCS11::EC_PrivateKeyGenerationProperties priv_generate_props;
@@ -75,7 +74,7 @@ int main() {
    priv_generate_props.set_private(true);
    priv_generate_props.set_sign(true);
 
-   Botan::PKCS11::PKCS11_ECDSA_PrivateKey pk(
+   const Botan::PKCS11::PKCS11_ECDSA_PrivateKey pk(
       session, Botan::EC_Group::from_name("secp256r1").DER_encode(), priv_generate_props);
 
    /************ generate PKCS#11 ECDSA key pair *************/
@@ -89,18 +88,21 @@ int main() {
    pub_generate_props.set_private(false);
    pub_generate_props.set_modifiable(true);
 
-   Botan::PKCS11::PKCS11_ECDSA_KeyPair key_pair =
+   const Botan::PKCS11::PKCS11_ECDSA_KeyPair key_pair =
       Botan::PKCS11::generate_ecdsa_keypair(session, pub_generate_props, priv_generate_props);
 
    /************ PKCS#11 ECDSA sign and verify *************/
 
-   std::vector<uint8_t> plaintext(20, 0x01);
+   // The token signs this digest directly (CKM_ECDSA) without hashing it
+   std::vector<uint8_t> digest(20, 0x01);
 
-   Botan::PK_Signer signer(key_pair.second, rng, "Raw", Botan::Signature_Format::Standard, "pkcs11");
-   auto signature = signer.sign_message(plaintext, rng);
+   const auto options = Botan::PK_Signature_Options().with_externally_computed_prehash().with_provider("pkcs11");
 
-   Botan::PK_Verifier token_verifier(key_pair.first, "Raw", Botan::Signature_Format::Standard, "pkcs11");
-   bool ecdsa_ok = token_verifier.verify_message(plaintext, signature);
+   Botan::PK_Signer signer(key_pair.second, rng, options);
+   auto signature = signer.sign_message(digest, rng);
+
+   Botan::PK_Verifier token_verifier(key_pair.first, options);
+   const bool ecdsa_ok = token_verifier.verify_message(digest, signature);
 
    return ecdsa_ok ? 0 : 1;
 }

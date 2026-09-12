@@ -14,8 +14,9 @@
 #include <botan/tls_algos.h>
 #include <botan/tls_ciphersuite.h>
 #include <botan/tls_exceptn.h>
-#include <botan/internal/os_utils.h>
+#include <botan/tls_signature_scheme.h>
 #include <botan/internal/stl_util.h>
+#include <algorithm>
 #include <optional>
 #include <sstream>
 
@@ -28,7 +29,7 @@ bool Policy::allow_ssl_key_log_file() const {
 std::vector<Signature_Scheme> Policy::allowed_signature_schemes() const {
    std::vector<Signature_Scheme> schemes;
 
-   for(Signature_Scheme scheme : Signature_Scheme::all_available_schemes()) {
+   for(const Signature_Scheme scheme : Signature_Scheme::all_available_schemes()) {
       const bool sig_allowed = allowed_signature_method(scheme.algorithm_name());
       const bool hash_allowed = allowed_signature_hash(scheme.hash_function_name());
 
@@ -52,9 +53,9 @@ std::optional<std::vector<Signature_Scheme>> Policy::acceptable_certificate_sign
 std::vector<std::string> Policy::allowed_ciphers() const {
    return {
       //"AES-256/OCB(12)",
-      "ChaCha20Poly1305",
       "AES-256/GCM",
       "AES-128/GCM",
+      "ChaCha20Poly1305",
       //"AES-256/CCM",
       //"AES-128/CCM",
       //"AES-256/CCM(8)",
@@ -96,7 +97,7 @@ std::vector<std::string> Policy::allowed_key_exchange_methods() const {
       //"ECDHE_PSK",
       //"PSK",
       "ECDH",
-      "DH",
+      //"DH",
       //"RSA",
    };
 }
@@ -126,7 +127,21 @@ Group_Params Policy::choose_key_exchange_group(const std::vector<Group_Params>& 
       return Group_Params::NONE;
    }
 
-   const std::vector<Group_Params> our_groups = key_exchange_groups();
+   const auto our_groups = key_exchange_groups();
+
+   // First check if the peer sent a PQ share of a group we also support
+   for(auto share : offered_by_peer) {
+      if(share.is_post_quantum() && value_exists(our_groups, share)) {
+         return share;
+      }
+   }
+
+   // Then check if the peer offered a PQ algo we also support
+   for(auto share : supported_by_peer) {
+      if(share.is_post_quantum() && value_exists(our_groups, share)) {
+         return share;
+      }
+   }
 
    // Prefer groups that were offered by the peer for the sake of saving
    // an additional round trip. For TLS 1.2, this won't be used.
@@ -161,35 +176,77 @@ Group_Params Policy::default_dh_group() const {
 }
 
 std::vector<Group_Params> Policy::key_exchange_groups() const {
-   // Default list is ordered by performance
    return {
+      // clang-format off
 #if defined(BOTAN_HAS_X25519)
       Group_Params::X25519,
 #endif
-#if defined(BOTAN_HAS_X448)
-         Group_Params::X448,
+
+      Group_Params::SECP256R1,
+
+#if defined(BOTAN_HAS_ML_KEM) && defined(BOTAN_HAS_TLS_13_PQC)
+
+#if defined(BOTAN_HAS_X25519)
+      Group_Params_Code::HYBRID_X25519_ML_KEM_768,
 #endif
 
-         Group_Params::SECP256R1, Group_Params::BRAINPOOL256R1, Group_Params::SECP384R1, Group_Params::BRAINPOOL384R1,
-         Group_Params::SECP521R1, Group_Params::BRAINPOOL512R1,
+      Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768,
+      Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
+#endif
 
-         Group_Params::FFDHE_2048, Group_Params::FFDHE_3072, Group_Params::FFDHE_4096, Group_Params::FFDHE_6144,
-         Group_Params::FFDHE_8192,
+#if defined(BOTAN_HAS_X448)
+      Group_Params::X448,
+#endif
+
+      Group_Params::SECP384R1,
+      Group_Params::SECP521R1,
+
+      Group_Params::BRAINPOOL256R1,
+      Group_Params::BRAINPOOL256R1TLS13,
+      Group_Params::BRAINPOOL384R1,
+      Group_Params::BRAINPOOL384R1TLS13,
+      Group_Params::BRAINPOOL512R1,
+      Group_Params::BRAINPOOL512R1TLS13,
+
+      // clang-format on
    };
 }
 
 std::vector<Group_Params> Policy::key_exchange_groups_to_offer() const {
-   // by default, we offer a key share for the most-preferred group, only
    std::vector<Group_Params> groups_to_offer;
+
    const auto supported_groups = key_exchange_groups();
-   if(!supported_groups.empty()) {
+   BOTAN_ASSERT(!supported_groups.empty(), "Policy allows at least one key exchange group");
+
+   /*
+   * Initially prefer sending a key share only of the first pure-ECC
+   * group, since these shares are small and PQ support is still not
+   * that widespread.
+   */
+   for(auto group : key_exchange_groups()) {
+      if(group.is_pure_ecc_group()) {
+         groups_to_offer.push_back(group);
+         break;
+      }
+   }
+
+   /*
+   * If for some reason no pure ECC groups are enabled then simply
+   * send a share of whatever the policy's top preference is.
+   */
+   if(groups_to_offer.empty()) {
       groups_to_offer.push_back(supported_groups.front());
    }
+
    return groups_to_offer;
 }
 
 size_t Policy::minimum_dh_group_size() const {
    return 2048;
+}
+
+size_t Policy::maximum_dh_group_size() const {
+   return 8192;
 }
 
 size_t Policy::minimum_ecdsa_group_size() const {
@@ -280,6 +337,7 @@ bool Policy::acceptable_protocol_version(Protocol_Version version) const {
    }
 #endif
 
+   BOTAN_UNUSED(version);
    return false;
 }
 
@@ -288,18 +346,16 @@ Protocol_Version Policy::latest_supported_version(bool datagram) const {
       if(acceptable_protocol_version(Protocol_Version::DTLS_V12)) {
          return Protocol_Version::DTLS_V12;
       }
-      throw Invalid_State("Policy forbids all available DTLS version");
    } else {
-#if defined(BOTAN_HAS_TLS_13)
       if(acceptable_protocol_version(Protocol_Version::TLS_V13)) {
          return Protocol_Version::TLS_V13;
       }
-#endif
       if(acceptable_protocol_version(Protocol_Version::TLS_V12)) {
          return Protocol_Version::TLS_V12;
       }
-      throw Invalid_State("Policy forbids all available TLS version");
    }
+
+   throw Invalid_State("Policy forbids all available TLS version");
 }
 
 bool Policy::acceptable_ciphersuite(const Ciphersuite& ciphersuite) const {
@@ -359,8 +415,17 @@ bool Policy::negotiate_encrypt_then_mac() const {
    return true;
 }
 
+bool Policy::require_extended_master_secret() const {
+   return true;
+}
+
 std::optional<uint16_t> Policy::record_size_limit() const {
    return std::nullopt;
+}
+
+size_t Policy::record_padding_bytes(size_t plaintext_bytes) const {
+   BOTAN_UNUSED(plaintext_bytes);
+   return 0;
 }
 
 bool Policy::support_cert_status_message() const {
@@ -407,8 +472,50 @@ bool Policy::allow_dtls_epoch0_restart() const {
    return false;
 }
 
+bool Policy::dtls_server_require_cookie_exchange() const {
+   /*
+   RFC 9147 Section 11 "Security Considerations":
+
+      The primary additional security consideration raised by DTLS is that of
+      denial of service by excessive resource consumption. DTLS includes a
+      cookie exchange designed to protect against denial of service. [...]
+      In particular, DTLS servers that do not use the cookie exchange may be
+      used as attack amplifiers even if they themselves are not experiencing
+      DoS. Therefore, DTLS servers SHOULD use the cookie exchange unless there
+      is good reason to believe that amplification is not a threat in their
+      environment.
+   */
+   return true;
+}
+
+size_t Policy::maximum_handshake_message_size() const {
+   return 65536;
+}
+
 size_t Policy::maximum_certificate_chain_size() const {
-   return 0;
+   return 65536;
+}
+
+uint64_t Policy::minimum_key_update_interval_ms() const {
+   return 1000;
+}
+
+uint64_t Policy::records_per_traffic_key() const {
+   /* RFC 8446 Section 5.5
+   *   For AES-GCM, up to 2^24.5 full-size records (about 24 million) may be encrypted on
+   *   a given connection while keeping a safety margin of approximately 2^-57 for
+   *   Authenticated Encryption (AE) security.
+   *
+   * However RFC 9001 (QUIC) Section 6.6
+   *    For [GCM suites], the confidentiality limit is 2^23 encrypted packets [...]
+   *
+   * Here we take the lower value as the default.
+   */
+   return uint64_t(1) << 23;
+}
+
+size_t Policy::maximum_session_tickets_per_connection() const {
+   return 10;
 }
 
 // 1 second initial timeout, 60 second max - see RFC 6347 sec 4.2.4.1
@@ -418,6 +525,22 @@ size_t Policy::dtls_initial_timeout() const {
 
 size_t Policy::dtls_maximum_timeout() const {
    return 60 * 1000;
+}
+
+// Generous next to the one or two a legitimate cookie-secret rotation can
+// produce, while still bounding a forged stream.
+std::optional<size_t> Policy::dtls_maximum_hello_verify_requests() const {
+   return 4;
+}
+
+std::optional<size_t> Policy::dtls_maximum_retransmissions() const {
+   // Matches BoringSSL's DTLS1_MAX_TIMEOUTS.
+   //
+   // With the default schedule of a 1 second initial timeout and 60
+   // second maximum, this gives up after roughly 8 minutes
+   // (1+2+4+8+16+32+7*60 s).
+
+   return 12;
 }
 
 size_t Policy::dtls_default_mtu() const {
@@ -530,6 +653,23 @@ std::vector<uint16_t> Policy::ciphersuite_list(Protocol_Version version) const {
          continue;  // unsupported cipher
       }
 
+      // Our non EtM TLS-CBC decryption step still has a residual Lucky13 timing
+      // channel. The leak is minor but for DTLS, which allows repeated
+      // observations, that is likely more than enough to allow plaintext
+      // recovery. Refuse CBC suites in DTLS.
+      if(version.is_datagram_protocol() && suite.cbc_ciphersuite()) {
+         continue;
+      }
+
+      // In DTLS, prohibit any potentially brute-forceable MACs
+      //
+      // DTLS allows repeated attempts without a connection teardown, and we
+      // don't currently offer any facility for an application to respond to
+      // a flood of invalid packets.
+      if(version.is_datagram_protocol() && suite.uses_short_authentication_tag()) {
+         continue;
+      }
+
       // these checks are irrelevant for TLS 1.3
       // TODO: consider making a method for this logic
       if(version.is_pre_tls_13()) {
@@ -557,12 +697,12 @@ std::vector<uint16_t> Policy::ciphersuite_list(Protocol_Version version) const {
       throw Invalid_State("Policy does not allow any available cipher suite");
    }
 
-   Ciphersuite_Preference_Ordering order(ciphers, macs, kex, sigs);
+   const Ciphersuite_Preference_Ordering order(ciphers, macs, kex, sigs);
    std::sort(ciphersuites.begin(), ciphersuites.end(), order);
 
    std::vector<uint16_t> ciphersuite_codes;
    ciphersuite_codes.reserve(ciphersuites.size());
-   for(auto i : ciphersuites) {
+   for(const auto& i : ciphersuites) {
       ciphersuite_codes.push_back(i.ciphersuite_code());
    }
    return ciphersuite_codes;
@@ -612,6 +752,17 @@ void print_vec(std::ostream& o, const char* key, const std::vector<Certificate_T
    o << '\n';
 }
 
+void print_vec(std::ostream& o, const char* key, const std::vector<Signature_Scheme>& schemes) {
+   o << key << " = ";
+   for(size_t i = 0; i != schemes.size(); ++i) {
+      o << schemes[i].to_string();
+      if(i != schemes.size() - 1) {
+         o << ' ';
+      }
+   }
+   o << '\n';
+}
+
 void print_bool(std::ostream& o, const char* key, bool b) {
    o << key << " = " << (b ? "true" : "false") << '\n';
 }
@@ -627,6 +778,8 @@ void Policy::print(std::ostream& o) const {
    print_vec(o, "macs", allowed_macs());
    print_vec(o, "signature_hashes", allowed_signature_hashes());
    print_vec(o, "signature_methods", allowed_signature_methods());
+   print_vec(o, "signature_schemes", allowed_signature_schemes());
+   print_vec(o, "acceptable_signature_schemes", acceptable_signature_schemes());
    print_vec(o, "key_exchange_methods", allowed_key_exchange_methods());
    print_vec(o, "key_exchange_groups", key_exchange_groups());
    const auto groups_to_offer = key_exchange_groups_to_offer();
@@ -641,6 +794,7 @@ void Policy::print(std::ostream& o) const {
    print_bool(o, "hide_unknown_users", hide_unknown_users());
    print_bool(o, "server_uses_own_ciphersuite_preferences", server_uses_own_ciphersuite_preferences());
    print_bool(o, "negotiate_encrypt_then_mac", negotiate_encrypt_then_mac());
+   print_bool(o, "require_extended_master_secret", require_extended_master_secret());
    print_bool(o, "support_cert_status_message", support_cert_status_message());
    print_bool(o, "tls_13_middlebox_compatibility_mode", tls_13_middlebox_compatibility_mode());
    print_vec(o, "accepted_client_certificate_types", accepted_client_certificate_types());
@@ -651,7 +805,7 @@ void Policy::print(std::ostream& o) const {
    }
    o << "maximum_session_tickets_per_client_hello = " << maximum_session_tickets_per_client_hello() << '\n';
    o << "session_ticket_lifetime = " << session_ticket_lifetime().count() << '\n';
-   o << "reuse_session_tickets = " << reuse_session_tickets() << '\n';
+   print_bool(o, "reuse_session_tickets", reuse_session_tickets());
    o << "new_session_tickets_upon_handshake_success = " << new_session_tickets_upon_handshake_success() << '\n';
    o << "minimum_dh_group_size = " << minimum_dh_group_size() << '\n';
    o << "minimum_ecdh_group_size = " << minimum_ecdh_group_size() << '\n';
@@ -666,7 +820,7 @@ std::string Policy::to_string() const {
 }
 
 std::vector<std::string> Strict_Policy::allowed_ciphers() const {
-   return {"ChaCha20Poly1305", "AES-256/GCM", "AES-128/GCM"};
+   return {"AES-256/GCM", "AES-128/GCM", "ChaCha20Poly1305"};
 }
 
 std::vector<std::string> Strict_Policy::allowed_signature_hashes() const {

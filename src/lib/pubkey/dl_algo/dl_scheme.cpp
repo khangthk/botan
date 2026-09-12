@@ -16,13 +16,13 @@ namespace {
 
 BigInt decode_single_bigint(std::span<const uint8_t> key_bits) {
    BigInt x;
-   BER_Decoder(key_bits).decode(x);
+   BER_Decoder(key_bits, BER_Decoder::Limits::DER()).decode(x).verify_end();
    return x;
 }
 
 BigInt generate_private_dl_key(const DL_Group& group, RandomNumberGenerator& rng) {
    if(group.has_q() && group.q_bits() >= 160 && group.q_bits() <= 384) {
-      return BigInt::random_integer(rng, 2, group.get_q());
+      return BigInt::random_integer(rng, BigInt::from_s32(2), group.get_q());
    } else {
       return BigInt(rng, group.exponent_bits());
    }
@@ -35,13 +35,17 @@ BigInt check_dl_private_key_input(const BigInt& x, const DL_Group& group) {
 
 }  // namespace
 
-DL_PublicKey::DL_PublicKey(const DL_Group& group, const BigInt& public_key) :
-      m_group(group), m_public_key(public_key) {}
+DL_PublicKey::DL_PublicKey(const DL_Group& group, const BigInt& public_key) : m_group(group), m_public_key(public_key) {
+   // The subgroup check (y^q == 1 mod p) is deferred to check_key() since it can be expensive
+   BOTAN_ARG_CHECK(m_public_key > 1 && m_public_key < m_group.get_p(), "Invalid DL public key");
+}
 
 DL_PublicKey::DL_PublicKey(const AlgorithmIdentifier& alg_id,
                            std::span<const uint8_t> key_bits,
                            DL_Group_Format format) :
-      m_group(alg_id.parameters(), format), m_public_key(decode_single_bigint(key_bits)) {}
+      m_group(alg_id.parameters(), format), m_public_key(decode_single_bigint(key_bits)) {
+   BOTAN_ARG_CHECK(m_public_key > 1 && m_public_key < m_group.get_p(), "Invalid DL public key");
+}
 
 std::vector<uint8_t> DL_PublicKey::public_key_as_bytes() const {
    return m_public_key.serialize(m_group.p_bytes());
@@ -80,7 +84,7 @@ DL_PrivateKey::DL_PrivateKey(const AlgorithmIdentifier& alg_id,
                              DL_Group_Format format) :
       m_group(alg_id.parameters(), format),
       m_private_key(check_dl_private_key_input(decode_single_bigint(key_bits), m_group)),
-      m_public_key(m_group.power_g_p(m_private_key, m_group.p_bits())) {}
+      m_public_key(m_group.power_g_p(m_private_key, m_private_key.bits())) {}
 
 secure_vector<uint8_t> DL_PrivateKey::DER_encode() const {
    return DER_Encoder().encode(m_private_key).get_contents();

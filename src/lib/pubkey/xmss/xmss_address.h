@@ -1,6 +1,7 @@
 /*
  * XMSS Address
  * (C) 2016 Matthias Gierlings
+ *     2026 Jack Lloyd
  *
  * Botan is released under the Simplified BSD License (see license.txt)
  **/
@@ -8,8 +9,10 @@
 #ifndef BOTAN_XMSS_ADDRESS_H_
 #define BOTAN_XMSS_ADDRESS_H_
 
-#include <botan/secmem.h>
+#include <botan/assert.h>
 #include <botan/types.h>
+#include <array>
+#include <span>
 
 namespace Botan {
 
@@ -39,34 +42,44 @@ class XMSS_Address final {
       enum class Key_Mask : uint8_t { Key_Mode = 0, Mask_Mode = 1, Mask_MSB_Mode = 1, Mask_LSB_Mode = 2 };
 
       /**
-       * Layer Address for XMSS is constantly zero and can not be changed this
-       * property is only of relevance to XMSS_MT.
+       * retrieves the Layer Address. A call to this method is only required by XMSS_MT.
+       * The Layer Address is constantly zero for XMSS.
+       * For XMSS_MT it describes the height of the tree in the multi-tree structure.
        *
-       * @return Layer address, which is constant 0 for XMSS.
+       * @return Layer address.
        **/
-      uint8_t get_layer_addr() const { return 0; }
+      uint32_t get_layer_addr() const { return get_hi32(0); }
 
       /**
-       * Layer Address for XMSS is constantly zero and can not be changed this
-       * property is only of relevance to XMSS_MT. Calling this method for
-       * XMSS will result in an error.
+       * sets the Layer Address. A call to this method is only required by XMSS_MT.
+       * The Layer Address is constantly zero for XMSS.
+       * For XMSS_MT it describes the height of the tree in the multi-tree structure.
        **/
-      void set_layer_addr() { BOTAN_ASSERT(false, "Only available in XMSS_MT."); }
+      void set_layer_addr(uint32_t value) { set_hi32(0, value); }
 
       /**
-       * Tree Address for XMSS is constantly zero and can not be changed this
-       * property is only of relevance to XMSS_MT.
+       * retrieves the Tree Address. A call to this method is only required by XMSS_MT.
+       * The Tree Address is constantly zero for XMSS.
+       * For XMSS_MT it describes the position of the tree within its layer.
        *
-       * @return Tree address, which is constant 0 for XMSS.
+       * @return Tree address.
        **/
-      uint64_t get_tree_addr() const { return 0; }
+      uint64_t get_tree_addr() const {
+         const uint64_t high = static_cast<uint64_t>(get_lo32(0));
+         const uint64_t low = static_cast<uint64_t>(get_hi32(1));
+         return (high << 32) | low;
+      }
 
       /**
-       * Tree Address for XMSS is constantly zero and can not be changed this
-       * property is only of relevance to XMSS_MT. Calling this method for
-       * XMSS will result in an error.
+       * sets the Tree Address. A call to this method is only required by XMSS_MT.
+       * The Tree Address is constantly zero for XMSS.
+       * For XMSS_MT it describes the position of the tree within its layer.
+       *
        **/
-      void set_tree_addr() { BOTAN_ASSERT(false, "Only available in XMSS_MT."); }
+      void set_tree_addr(uint64_t value) {
+         set_lo32(0, static_cast<uint32_t>(value >> 32));
+         set_hi32(1, static_cast<uint32_t>(value));
+      }
 
       /**
        * retrieves the logical type currently assigned to the XMSS Address
@@ -89,7 +102,9 @@ class XMSS_Address final {
        **/
       void set_type(Type type) {
          m_data[15] = static_cast<uint8_t>(type);
-         std::fill(m_data.begin() + 16, m_data.end(), static_cast<uint8_t>(0));
+         for(size_t i = 16; i != m_data.size(); ++i) {
+            m_data[i] = 0;
+         }
       }
 
       /**
@@ -276,29 +291,25 @@ class XMSS_Address final {
          set_hi32(3, value);
       }
 
-      const secure_vector<uint8_t>& bytes() const { return m_data; }
-
-      secure_vector<uint8_t>& bytes() { return m_data; }
+      std::span<const uint8_t> bytes() const { return std::span{m_data}; }
 
       /**
        * @return the size of an XMSS_Address
        **/
       size_t size() const { return m_data.size(); }
 
-      XMSS_Address() : m_data(m_address_size) { set_type(Type::None); }
+      XMSS_Address() : m_data{} { set_type(Type::None); }
 
-      XMSS_Address(Type type) : m_data(m_address_size) { set_type(type); }
+      ~XMSS_Address() = default;
+      XMSS_Address(const XMSS_Address& other) = default;
+      XMSS_Address(XMSS_Address&& other) = default;
 
-      XMSS_Address(secure_vector<uint8_t> data) : m_data(std::move(data)) {
-         BOTAN_ASSERT(m_data.size() == m_address_size, "XMSS_Address must be of 256 bits size.");
-      }
+      XMSS_Address& operator=(const XMSS_Address& other) = default;
+      XMSS_Address& operator=(XMSS_Address&& other) = default;
 
-   protected:
-      secure_vector<uint8_t> m_data;
+      explicit XMSS_Address(Type type) : m_data() { set_type(type); }
 
    private:
-      static const size_t m_address_size = 32;
-
       inline uint32_t get_hi32(size_t offset) const {
          return ((0x000000FF & m_data[8 * offset + 3]) | (0x000000FF & m_data[8 * offset + 2]) << 8 |
                  (0x000000FF & m_data[8 * offset + 1]) << 16 | (0x000000FF & m_data[8 * offset]) << 24);
@@ -322,6 +333,8 @@ class XMSS_Address final {
          m_data[offset * 8 + 6] = ((value >> 8) & 0xFF);
          m_data[offset * 8 + 7] = ((value) & 0xFF);
       }
+
+      std::array<uint8_t, 32> m_data;  // NOLINT(*non-private-member-variable*)
 };
 
 }  // namespace Botan

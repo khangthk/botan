@@ -1,9 +1,9 @@
 Semantic Versioning
 =====================
 
-Starting with 2.0.0, Botan adopted semantic versioning. This means we endevour
+Starting with 2.0.0, Botan adopted semantic versioning. This means we endeavour
 to make no change which will either break compilation of existing code, or cause
-different behavior in a way that will cause compatability issues. Such changes
+different behavior in a way that will cause compatibility issues. Such changes
 are reserved for new major versions.
 
 If on upgrading to a new minor version, you encounter a problem where your
@@ -13,7 +13,16 @@ way that causes trouble, it is probably a bug; please report it on Github.
 There are important exceptions to the SemVer guarantees that you
 should be aware of, described in the following list.
 
-Exception #1: Deriving from Library Classes
+Exception #1: Security Trumps SemVer
+--------------------------------------------
+
+If fixing a significant security issue requires breaking compatibility for some
+specific class of applications, this breakage will occur. In any case where this
+is necessary, the developers try to minimize the overall impact and scope of the
+breakage. The nature and reasoning for the change will be clearly called out in
+the release notes for that version.
+
+Exception #2: Deriving from Library Classes
 --------------------------------------------
 
 If you in your application derive a new class from a class in the
@@ -34,7 +43,7 @@ for derivation by applications, and are fully covered by SemVer:
 * ``TLS::Policy`` (and subclasses thereof)
 * ``TLS::Stream<T>``
 
-Exception #2: ``BOTAN_UNSTABLE_API``
+Exception #3: ``BOTAN_UNSTABLE_API``
 --------------------------------------
 
 Certain functionality is available to users, and marked in the header
@@ -46,7 +55,7 @@ something "interesting", but we are not confident that the API is any
 good. Examples include interfaces allowing applications to write
 custom TLS extensions and custom public key operations.
 
-Exception #3: Experimental modules
+Exception #4: Experimental modules
 --------------------------------------
 
 Certain modules can be marked as experimental in the build system.
@@ -55,7 +64,7 @@ such modules may change or vanish at any time without warning. See
 :ref:`building` for more information on enabling or disabling these
 modules.
 
-Exception #4: Any function starting with ``_``
+Exception #5: Any function starting with ``_``
 -----------------------------------------------
 
 For various technical reasons, some functions are available for public

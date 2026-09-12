@@ -3,16 +3,19 @@ Project Goals
 ================================
 
 Botan seeks to be a broadly applicable library that can be used to implement a
-range of secure distributed systems.
-
-The library has the following project goals guiding changes. It does not succeed
-in all of these areas in every way just yet, but it describes the system that is
-the desired end result. Over time further progress is made in each.
+range of secure distributed systems. The library has the following project goals
+guiding changes.
 
 * Secure and reliable. The implementations must of course be correct and well
   tested, and attacks such as side channels and fault attacks should be
   accounted for where necessary. The library should never crash, or invoke
   undefined behavior, regardless of circumstances.
+
+* Constant time programming. The table stakes for a modern cryptographic library
+  include being immune to basic timing/cache based side channels. Botan includes
+  utilities to assist in writing and testing constant time code. A test suite
+  run nightly in CI verifies Botan's constant time behavior across a range of
+  compilers, compiler options, and CPU architectures.
 
 * Implement schemes important in practice. It should be practical to implement
   any real-world crypto protocol using just what the library provides. It is
@@ -48,9 +51,9 @@ the desired end result. Over time further progress is made in each.
   least the option of using a post-quantum scheme. Botan provides a conservative
   selection of algorithms thought to be post-quantum secure.
 
-* Performance. Botan does not in every case strive to be faster than every other
-  software implementation, but performance should be competitive and over time
-  new optimizations are identified and applied.
+* Performance. Botan aims to have the fastest possible implementation of all
+  algorithms it supports, subject to the constraints implicit with the other
+  project goals.
 
 * Support whatever I/O mechanism the application wants. Allow the application to
   control all aspects of how the network is contacted, and ensure the API makes
@@ -58,16 +61,14 @@ the desired end result. Over time further progress is made in each.
   system-specific details and allows the application to use whatever networking
   style they please.
 
-* Portability to modern systems. Botan does not run everywhere, and we actually
-  do not want it to (see non-goals below). But we do want it to run on anything
-  that someone is deploying new applications on. That includes both major
-  platforms like Windows, Linux, Android and iOS, and also promising new systems
-  such as Fuchsia.
+* Portability to all relevant platforms. Botan supports all major operating
+  systems and CPU architectures. Botan has also been used with great success on
+  baremetal systems and in operating system kernels.
 
 * Well documented. Ideally every public API would have some place in the manual
   describing its usage.
 
-* Useful command line utility. The botan command line tool should be flexible
+* Useful command line utility. The ``botan`` command line tool should be flexible
   and featured enough to replace similar tools such as ``openssl`` for everyday
   users.
 
@@ -77,55 +78,22 @@ Non-Goals
 There are goals some crypto libraries have, but which Botan actively does not
 seek to address.
 
-* Deep embedded support. Botan requires a heap, C++ exceptions, and RTTI, and at
-  least in terms of performance optimizations effectively assumes a 32 or 64 bit
-  processor. It is not suitable for deploying on, say FreeRTOS running on a
-  MSP430, or smartcard with an 8 bit CPU and 256 bytes RAM. A larger SoC, such
-  as a Cortex-A7 running Linux, is entirely within scope.
-
 * Implementing every crypto scheme in existence. The focus is on algorithms
   which are in practical use in systems deployed now, as well as promising
-  algorithms for future deployment. Many algorithms which were of interest
-  in the past but never saw widespread deployment and have no compelling
-  benefit over other designs have been removed to simplify the codebase.
+  algorithms for future deployment.
 
 * Portable to obsolete systems. There is no reason for crypto software to
-  support ancient OS platforms like SunOS or Windows 2000, since these unpatched
+  support ancient OS versions like SunOS or Windows 2000, since such unpatched
   systems are completely unsafe anyway. The additional complexity supporting
-  such platforms just creates more room for bugs.
+  such platforms just creates room for bugs.
 
 * Portable to every C++ compiler ever made. Over time Botan moves forward to
   both take advantage of new language/compiler features, and to shed workarounds
   for dealing with bugs in ancient compilers, allowing further simplifications
-  in the codebase. The set of supported compilers is fixed for each new release
-  branch, for example Botan 2.x will always support GCC 4.8. But a future 3.x
-  release version will likely increase the required versions for all compilers.
-
-* FIPS 140 validation. The primary developer was (long ago) a consultant with a
-  NIST approved testing lab. He does not have a positive view of the process or
-  results, particularly when it comes to Level 1 software validations. The only
-  benefit of a Level 1 validation is to allow for government sales, and the cost
-  of validation includes enormous amounts of time and money, adding 'checks'
-  that are useless or actively harmful, then freezing the software so security
-  updates cannot be applied in the future. It does force a certain minimum
-  standard (ie, FIPS Level 1 does assure AES and RSA are probably implemented
-  correctly) but this is an issue of interop not security since Level 1 does not
-  seriously consider attacks of any kind. Any security budget would be far
-  better spent on a review from a specialized crypto consultancy, who would look
-  for actual flaws.
-
-  That said it would be easy to add a "FIPS 140" build mode to Botan, which just
-  disabled all the builtin crypto and wrapped whatever the most recent OpenSSL
-  FIPS module exports.
-
-* Educational purposes. The library code is intended to be easy to read and
-  review, and so might be useful in an educational context. However it does not
-  contain any toy ciphers (unless you count DES and RC4) nor any tools for
-  simple cryptanalysis. Generally the manual and source comments assume previous
-  knowledge on the basic concepts involved.
+  in the codebase. The set of supported compilers is fixed for each new major
+  release, for example Botan3 will always support GCC 11.
 
 * User proof. Some libraries provide a very high level API in an attempt to save
   the user from themselves. Occasionally they succeed. It would be appropriate
-  and useful to build such an API on top of Botan, but Botan itself wants to
-  cover a broad set of uses cases and some of these involve having pointy things
-  within reach.
+  and useful to include such an API, but covering a broad set of use cases
+  requires a relatively flexible approach.

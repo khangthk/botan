@@ -7,12 +7,14 @@
 
 #include <botan/asn1_obj.h>
 
+#include <botan/assert.h>
 #include <botan/data_src.h>
 #include <botan/der_enc.h>
 #include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/stl_util.h>
+#include <botan/internal/mem_utils.h>
 #include <sstream>
+#include <utility>
 
 namespace Botan {
 
@@ -23,11 +25,45 @@ std::vector<uint8_t> ASN1_Object::BER_encode() const {
    return output;
 }
 
+ASN1_BitString::ASN1_BitString(std::vector<uint8_t> bytes, size_t unused_bits) :
+      m_bytes(std::move(bytes)), m_unused_bits(unused_bits) {
+   if(m_unused_bits >= 8) {
+      throw Invalid_Argument("ASN1_BitString: Invalid unused bit count");
+   }
+
+   if(m_bytes.empty() && m_unused_bits != 0) {
+      throw Invalid_Argument("ASN1_BitString: Empty BIT STRING cannot have unused bits");
+   }
+
+   if(m_unused_bits > 0 && (m_bytes.back() & ((1U << m_unused_bits) - 1)) != 0) {
+      throw Invalid_Argument("ASN1_BitString: Unused bits must be zero");
+   }
+}
+
+ASN1_BitString::ASN1_BitString(std::span<const uint8_t> bytes, size_t unused_bits) :
+      ASN1_BitString(std::vector<uint8_t>(bytes.begin(), bytes.end()), unused_bits) {}
+
+size_t ASN1_BitString::bit_length() const {
+   return 8 * m_bytes.size() - m_unused_bits;
+}
+
+bool ASN1_BitString::bit_at(size_t bit) const {
+   if(bit >= bit_length()) {
+      throw Invalid_Argument("ASN1_BitString: Bit index out of range");
+   }
+
+   return (m_bytes[bit / 8] & (0x80 >> (bit % 8))) != 0;
+}
+
+BER_Object::~BER_Object() {
+   secure_scrub_memory(m_value);
+}
+
 /*
 * Check a type invariant on BER data
 */
 void BER_Object::assert_is_a(ASN1_Type expected_type_tag, ASN1_Class expected_class_tag, std::string_view descr) const {
-   if(this->is_a(expected_type_tag, expected_class_tag) == false) {
+   if(!this->is_a(expected_type_tag, expected_class_tag)) {
       std::stringstream msg;
 
       msg << "Tag mismatch when decoding " << descr << " got ";
@@ -160,7 +196,7 @@ std::string asn1_tag_to_string(ASN1_Type type) {
 /*
 * BER Decoding Exceptions
 */
-BER_Decoding_Error::BER_Decoding_Error(std::string_view str) : Decoding_Error(fmt("BER: {}", str)) {}
+BER_Decoding_Error::BER_Decoding_Error(std::string_view err) : Decoding_Error(fmt("BER: {}", err)) {}
 
 BER_Bad_Tag::BER_Bad_Tag(std::string_view str, uint32_t tagging) : BER_Decoding_Error(fmt("{}: {}", str, tagging)) {}
 
@@ -174,8 +210,11 @@ std::vector<uint8_t> put_in_sequence(const std::vector<uint8_t>& contents) {
 }
 
 std::vector<uint8_t> put_in_sequence(const uint8_t bits[], size_t len) {
-   std::vector<uint8_t> output;
-   DER_Encoder(output).start_sequence().raw_bytes(bits, len).end_cons();
+   std::vector<uint8_t> output = der_sequence_header(len);
+   output.reserve(output.size() + len);
+   if(len > 0) {
+      output.insert(output.end(), bits, bits + len);
+   }
    return output;
 }
 
@@ -183,24 +222,21 @@ std::vector<uint8_t> put_in_sequence(const uint8_t bits[], size_t len) {
 * Convert a BER object into a string object
 */
 std::string to_string(const BER_Object& obj) {
-   return std::string(cast_uint8_ptr_to_char(obj.bits()), obj.length());
+   return bytes_to_string(obj.data());
 }
 
 /*
 * Do heuristic tests for BER data
 */
 bool maybe_BER(DataSource& source) {
-   uint8_t first_u8;
-   if(!source.peek_byte(first_u8)) {
+   uint8_t first_u8 = 0;
+   if(source.peek_byte(first_u8) == 0) {
       BOTAN_ASSERT_EQUAL(source.read_byte(first_u8), 0, "Expected EOF");
       throw Stream_IO_Error("ASN1::maybe_BER: Source was empty");
    }
 
    const auto cons_seq = static_cast<uint8_t>(ASN1_Class::Constructed) | static_cast<uint8_t>(ASN1_Type::Sequence);
-   if(first_u8 == cons_seq) {
-      return true;
-   }
-   return false;
+   return first_u8 == cons_seq;
 }
 
 }  // namespace ASN1

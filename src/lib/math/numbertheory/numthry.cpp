@@ -8,8 +8,9 @@
 
 #include <botan/numthry.h>
 
-#include <botan/reducer.h>
+#include <botan/exceptn.h>
 #include <botan/rng.h>
+#include <botan/internal/barrett.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/divide.h>
 #include <botan/internal/monty.h>
@@ -39,12 +40,12 @@ BigInt sqrt_modulo_prime(const BigInt& a, const BigInt& p) {
       return BigInt::from_s32(-1);
    }
 
-   Modular_Reducer mod_p(p);
-   auto monty_p = std::make_shared<Montgomery_Params>(p, mod_p);
+   auto mod_p = Barrett_Reduction::for_public_modulus(p);
+   const Montgomery_Params monty_p(p, mod_p);
 
    // If p == 3 (mod 4) there is a simple solution
    if(p % 4 == 3) {
-      return monty_exp_vartime(monty_p, a, ((p + 1) >> 2));
+      return monty_exp_vartime(monty_p, a, ((p + 1) >> 2)).value();
    }
 
    // Otherwise we have to use Shanks-Tonelli
@@ -54,7 +55,7 @@ BigInt sqrt_modulo_prime(const BigInt& a, const BigInt& p) {
    q -= 1;
    q >>= 1;
 
-   BigInt r = monty_exp_vartime(monty_p, a, q);
+   BigInt r = monty_exp_vartime(monty_p, a, q).value();
    BigInt n = mod_p.multiply(a, mod_p.square(r));
    r = mod_p.multiply(r, a);
 
@@ -81,7 +82,7 @@ BigInt sqrt_modulo_prime(const BigInt& a, const BigInt& p) {
       }
    }
 
-   BigInt c = monty_exp_vartime(monty_p, BigInt::from_word(z), (q << 1) + 1);
+   BigInt c = monty_exp_vartime(monty_p, BigInt::from_word(z), (q << 1) + 1).value();
 
    while(n > 1) {
       q = n;
@@ -97,7 +98,7 @@ BigInt sqrt_modulo_prime(const BigInt& a, const BigInt& p) {
       }
 
       BOTAN_ASSERT_NOMSG(s >= (i + 1));  // No underflow!
-      c = monty_exp_vartime(monty_p, c, BigInt::power_of_2(s - i - 1));
+      c = monty_exp_vartime(monty_p, c, BigInt::power_of_2(s - i - 1)).value();
       r = mod_p.multiply(r, c);
       c = mod_p.square(c);
       n = mod_p.multiply(n, c);
@@ -112,43 +113,69 @@ BigInt sqrt_modulo_prime(const BigInt& a, const BigInt& p) {
 
 /*
 * Calculate the Jacobi symbol
+*
+* See Algorithm 2.149 in Handbook of Applied Cryptography
 */
-int32_t jacobi(const BigInt& a, const BigInt& n) {
-   if(n.is_even() || n < 2) {
-      throw Invalid_Argument("jacobi: second argument must be odd and > 1");
+int32_t jacobi(BigInt a, BigInt n) {
+   BOTAN_ARG_CHECK(n.is_odd() && n >= 3, "Argument n must be an odd integer >= 3");
+
+   if(a < 0 || a >= n) {
+      a %= n;
    }
 
-   BigInt x = a % n;
-   BigInt y = n;
-   int32_t J = 1;
+   if(a == 0) {
+      return 0;
+   }
+   if(a == 1) {
+      return 1;
+   }
 
-   while(y > 1) {
-      x %= y;
-      if(x > y / 2) {
-         x = y - x;
-         if(y % 4 == 3) {
-            J = -J;
-         }
+   int32_t s = 1;
+
+   for(;;) {
+      const size_t e = low_zero_bits(a);
+      a >>= e;
+      const word n_mod_8 = n.word_at(0) % 8;
+      const word n_mod_4 = n_mod_8 % 4;
+
+      if(e % 2 == 1 && (n_mod_8 == 3 || n_mod_8 == 5)) {
+         s = -s;
       }
-      if(x.is_zero()) {
+
+      if(n_mod_4 == 3 && a % 4 == 3) {
+         s = -s;
+      }
+
+      /*
+      * The HAC presentation of the algorithm uses recursion, which is not
+      * desirable or necessary.
+      *
+      * Instead we loop accumulating the product of the various jacobi()
+      * subcomputations into s, until we reach algorithm termination, which
+      * occurs in one of two ways.
+      *
+      * If a == 1 then the recursion has completed; we can return the value of s.
+      *
+      * Otherwise, after swapping and reducing, check for a == 0 [this value is
+      * called `n1` in HAC's presentation]. This would imply that jacobi(n1,a1)
+      * would have the value 0, due to Line 1 in HAC 2.149, in which case the
+      * entire product is zero, and we can immediately return that result.
+      */
+
+      if(a == 1) {
+         return s;
+      }
+
+      std::swap(a, n);
+
+      BOTAN_ASSERT_NOMSG(n.is_odd());
+
+      a %= n;
+
+      if(a == 0) {
          return 0;
       }
-
-      size_t shifts = low_zero_bits(x);
-      x >>= shifts;
-      if(shifts % 2) {
-         word y_mod_8 = y % 8;
-         if(y_mod_8 == 3 || y_mod_8 == 5) {
-            J = -J;
-         }
-      }
-
-      if(x % 4 == 3 && y % 4 == 3) {
-         J = -J;
-      }
-      std::swap(x, y);
    }
-   return J;
 }
 
 /*
@@ -213,25 +240,24 @@ BigInt gcd(const BigInt& a, const BigInt& b) {
    // shifting so many times, we'll have reached the result for sure.
    const size_t loop_cnt = u.bits() + v.bits();
 
-   using WordMask = CT::Mask<word>;
-
    // This temporary is big enough to hold all intermediate results of the
    // algorithm. No reallocation will happen during the loop.
    // Note however, that `ct_cond_assign()` will invalidate the 'sig_words'
    // cache, which _does not_ shrink the capacity of the underlying buffer.
    auto tmp = BigInt::with_capacity(sz);
+   secure_vector<word> ws(sz * 2);
    size_t factors_of_two = 0;
    for(size_t i = 0; i != loop_cnt; ++i) {
-      auto both_odd = WordMask::expand(u.is_odd()) & WordMask::expand(v.is_odd());
+      auto both_odd = CT::Mask<word>::expand_bool(u.is_odd()) & CT::Mask<word>::expand_bool(v.is_odd());
 
       // Subtract the smaller from the larger if both are odd
-      auto u_gt_v = WordMask::expand(bigint_cmp(u._data(), u.size(), v._data(), v.size()) > 0);
-      bigint_sub_abs(tmp.mutable_data(), u._data(), sz, v._data(), sz);
+      auto u_gt_v = CT::Mask<word>::expand_bool(bigint_cmp(u._data(), u.size(), v._data(), v.size()) > 0);
+      bigint_sub_abs(tmp.mutable_data(), u._data(), v._data(), sz, ws.data());
       u.ct_cond_assign((u_gt_v & both_odd).as_bool(), tmp);
       v.ct_cond_assign((~u_gt_v & both_odd).as_bool(), tmp);
 
-      const auto u_is_even = WordMask::expand(u.is_even());
-      const auto v_is_even = WordMask::expand(v.is_even());
+      const auto u_is_even = CT::Mask<word>::expand_bool(u.is_even());
+      const auto v_is_even = CT::Mask<word>::expand_bool(v.is_even());
       BOTAN_DEBUG_ASSERT((u_is_even | v_is_even).as_bool());
 
       // When both are even, we're going to eliminate a factor of 2.
@@ -239,11 +265,11 @@ BigInt gcd(const BigInt& a, const BigInt& b) {
       factors_of_two += (u_is_even & v_is_even).if_set_return(1);
 
       // remove one factor of 2, if u is even
-      bigint_shr2(tmp.mutable_data(), u._data(), sz, 1);
+      bigint_shr2(tmp.mutable_data(), sz, u._data(), sz, 1);
       u.ct_cond_assign(u_is_even.as_bool(), tmp);
 
       // remove one factor of 2, if v is even
-      bigint_shr2(tmp.mutable_data(), v._data(), sz, 1);
+      bigint_shr2(tmp.mutable_data(), sz, v._data(), sz, 1);
       v.ct_cond_assign(v_is_even.as_bool(), tmp);
    }
 
@@ -282,7 +308,7 @@ BigInt lcm(const BigInt& a, const BigInt& b) {
 * Modular Exponentiation
 */
 BigInt power_mod(const BigInt& base, const BigInt& exp, const BigInt& mod) {
-   if(mod.is_negative() || mod == 1) {
+   if(mod.signum() < 0 || mod == 1) {
       return BigInt::zero();
    }
 
@@ -293,13 +319,13 @@ BigInt power_mod(const BigInt& base, const BigInt& exp, const BigInt& mod) {
       return BigInt::zero();
    }
 
-   Modular_Reducer reduce_mod(mod);
+   auto reduce_mod = Barrett_Reduction::for_secret_modulus(mod);
 
    const size_t exp_bits = exp.bits();
 
    if(mod.is_odd()) {
-      auto monty_params = std::make_shared<Montgomery_Params>(mod, reduce_mod);
-      return monty_exp(monty_params, reduce_mod.reduce(base), exp, exp_bits);
+      const Montgomery_Params monty_params(mod, reduce_mod);
+      return monty_exp(monty_params, ct_modulo(base, mod), exp, exp_bits).value();
    }
 
    /*
@@ -307,7 +333,7 @@ BigInt power_mod(const BigInt& base, const BigInt& exp, const BigInt& mod) {
    cryptographically important, so this implementation is slow ...
    */
    BigInt accum = BigInt::one();
-   BigInt g = reduce_mod.reduce(base);
+   BigInt g = ct_modulo(base, mod);
    BigInt t;
 
    for(size_t i = 0; i != exp_bits; ++i) {
@@ -369,12 +395,27 @@ bool is_prime(const BigInt& n, RandomNumberGenerator& rng, size_t prob, bool is_
       return std::binary_search(PRIMES, PRIMES + PRIME_TABLE_SIZE, num);
    }
 
-   Modular_Reducer mod_n(n);
+   // Trial division, which is much cheaper than the Miller-Rabin setup below
+   const auto residues = mod_small_primes(n, std::min(n_bits, PRIME_TABLE_SIZE));
+
+   auto no_small_factor = CT::Mask<word>::set();
+   for(const word r : residues) {
+      // We've already checked above that n is not itself in the primes table, so any
+      // remainder of zero implies a factor rather than equality
+      no_small_factor &= CT::Mask<word>::expand(r);
+   }
+
+   if(!no_small_factor.as_bool()) {
+      return false;
+   }
+
+   auto mod_n = Barrett_Reduction::for_secret_modulus(n);
+   const Montgomery_Params monty_n(n, mod_n);
 
    if(rng.is_seeded()) {
       const size_t t = miller_rabin_test_iterations(n_bits, prob, is_random);
 
-      if(is_miller_rabin_probable_prime(n, mod_n, rng, t) == false) {
+      if(!is_miller_rabin_probable_prime(n, mod_n, monty_n, rng, t)) {
          return false;
       }
 

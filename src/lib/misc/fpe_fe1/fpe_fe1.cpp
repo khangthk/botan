@@ -7,9 +7,9 @@
 
 #include <botan/fpe_fe1.h>
 
+#include <botan/exceptn.h>
 #include <botan/mac.h>
 #include <botan/numthry.h>
-#include <botan/reducer.h>
 #include <botan/internal/divide.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
@@ -27,10 +27,21 @@ const size_t MAX_N_BYTES = 128 / 8;
 * typical uses of FPE (typically, n is a power of 10)
 */
 void factor(BigInt n, BigInt& a, BigInt& b) {
+   BOTAN_ARG_CHECK(n >= 2, "Invalid FPE modulus");
+
    a = BigInt::one();
    b = BigInt::one();
 
-   size_t n_low_zero = low_zero_bits(n);
+   /*
+   * This algorithm was poorly designed. It should have fully factored n (to the
+   * extent possible) and then built a/b starting from the largest factor first.
+   *
+   * This can't be fixed now without breaking existing users but if some
+   * incompatible change (or new flag, etc) is added in the future, consider
+   * fixing the factoring for those users.
+   */
+
+   const size_t n_low_zero = low_zero_bits(n);
 
    a <<= (n_low_zero / 2);
    b <<= n_low_zero - (n_low_zero / 2);
@@ -52,26 +63,27 @@ void factor(BigInt n, BigInt& a, BigInt& b) {
    a *= n;
 
    if(a <= 1 || b <= 1) {
-      throw Internal_Error("Could not factor n for use in FPE");
+      throw Invalid_Argument("FPE_FE1 modulus must be composite with at least one prime factor under 65521");
    }
 }
 
 }  // namespace
 
-FPE_FE1::FPE_FE1(const BigInt& n, size_t rounds, bool compat_mode, std::string_view mac_algo) : m_rounds(rounds) {
+FPE_FE1::FPE_FE1(const BigInt& n, size_t rounds, bool compat_mode, std::string_view mac_algo) :
+      m_n(n), m_rounds(rounds) {
    if(m_rounds < 3) {
       throw Invalid_Argument("FPE_FE1 rounds too small");
    }
 
    m_mac = MessageAuthenticationCode::create_or_throw(mac_algo);
 
-   m_n_bytes = n.serialize();
+   m_n_bytes = m_n.serialize();
 
    if(m_n_bytes.size() > MAX_N_BYTES) {
       throw Invalid_Argument("N is too large for FPE encryption");
    }
 
-   factor(n, m_a, m_b);
+   factor(m_n, m_a, m_b);
 
    if(compat_mode) {
       if(m_a < m_b) {
@@ -82,9 +94,9 @@ FPE_FE1::FPE_FE1(const BigInt& n, size_t rounds, bool compat_mode, std::string_v
          std::swap(m_a, m_b);
       }
    }
-
-   mod_a = std::make_unique<Modular_Reducer>(m_a);
 }
+
+FPE_FE1::FPE_FE1(FPE_FE1&& other) noexcept = default;
 
 FPE_FE1::~FPE_FE1() = default;
 
@@ -137,34 +149,42 @@ secure_vector<uint8_t> FPE_FE1::compute_tweak_mac(const uint8_t tweak[], size_t 
 }
 
 BigInt FPE_FE1::encrypt(const BigInt& input, const uint8_t tweak[], size_t tweak_len) const {
+   BOTAN_ARG_CHECK(input.signum() >= 0 && input < m_n, "Invalid FPE_FE1 input");
+
    const secure_vector<uint8_t> tweak_mac = compute_tweak_mac(tweak, tweak_len);
 
    BigInt X = input;
 
    secure_vector<uint8_t> tmp;
 
-   BigInt L, R, Fi;
+   BigInt L;
+   BigInt R;
+   BigInt Fi;
    for(size_t i = 0; i != m_rounds; ++i) {
       ct_divide(X, m_b, L, R);
       Fi = F(R, i, tweak_mac, tmp);
-      X = m_a * R + mod_a->reduce(L + Fi);
+      X = m_a * R + ct_modulo(L + Fi, m_a);
    }
 
    return X;
 }
 
 BigInt FPE_FE1::decrypt(const BigInt& input, const uint8_t tweak[], size_t tweak_len) const {
+   BOTAN_ARG_CHECK(input.signum() >= 0 && input < m_n, "Invalid FPE_FE1 input");
+
    const secure_vector<uint8_t> tweak_mac = compute_tweak_mac(tweak, tweak_len);
 
    BigInt X = input;
    secure_vector<uint8_t> tmp;
 
-   BigInt W, R, Fi;
+   BigInt W;
+   BigInt R;
+   BigInt Fi;
    for(size_t i = 0; i != m_rounds; ++i) {
       ct_divide(X, m_a, R, W);
 
       Fi = F(R, m_rounds - i - 1, tweak_mac, tmp);
-      X = m_b * mod_a->reduce(W - Fi) + R;
+      X = m_b * ct_modulo(W - Fi, m_a) + R;
    }
 
    return X;

@@ -14,10 +14,10 @@
 
 namespace Botan_CLI {
 
+namespace {
+
 class PSK_Tool_Base : public Command {
    public:
-      PSK_Tool_Base(const std::string& spec) : Command(spec) {}
-
       std::string group() const override { return "psk"; }
 
       void go() override {
@@ -25,11 +25,14 @@ class PSK_Tool_Base : public Command {
          const Botan::secure_vector<uint8_t> db_key =
             Botan::hex_decode_locked(get_passphrase_arg("Database key", "db_key"));
 
-         std::shared_ptr<Botan::SQL_Database> db = std::make_shared<Botan::Sqlite3_Database>(db_filename);
+         const std::shared_ptr<Botan::SQL_Database> db = std::make_shared<Botan::Sqlite3_Database>(db_filename);
          Botan::Encrypted_PSK_Database_SQL psk(db_key, db, "psk");
 
          psk_operation(psk);
       }
+
+   protected:
+      explicit PSK_Tool_Base(const std::string& spec) : Command(spec) {}
 
    private:
       virtual void psk_operation(Botan::PSK_Database& db) = 0;
@@ -82,6 +85,8 @@ class PSK_Tool_List final : public PSK_Tool_Base {
 BOTAN_REGISTER_COMMAND("psk_set", PSK_Tool_Set);
 BOTAN_REGISTER_COMMAND("psk_get", PSK_Tool_Get);
 BOTAN_REGISTER_COMMAND("psk_list", PSK_Tool_List);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

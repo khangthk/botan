@@ -11,10 +11,15 @@
 #define BOTAN_CERT_STORE_SYSTEM_WINDOWS_H_
 
 #include <botan/certstor.h>
+#include <memory>
 
-#include <map>
+// Use Certificate_Store_System instead
+BOTAN_FUTURE_INTERNAL_HEADER(certstor_windows.h)
 
 namespace Botan {
+
+class Certificate_Store_Windows_Impl;
+
 /**
 * Certificate Store that is backed by the system trust store on Windows.
 */
@@ -54,10 +59,13 @@ class BOTAN_PUBLIC_API(2, 11) Certificate_Store_Windows final : public Certifica
       std::optional<X509_Certificate> find_cert_by_pubkey_sha1(const std::vector<uint8_t>& key_hash) const override;
 
       /**
-       * @throws Not_Implemented
+       * @throws Not_Implemented as this is not possible in the Windows system cert API
        */
       std::optional<X509_Certificate> find_cert_by_raw_subject_dn_sha256(
          const std::vector<uint8_t>& subject_hash) const override;
+
+      std::optional<X509_Certificate> find_cert_by_issuer_dn_and_serial_number(
+         const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const override;
 
       /**
        * Not Yet Implemented
@@ -65,22 +73,12 @@ class BOTAN_PUBLIC_API(2, 11) Certificate_Store_Windows final : public Certifica
        */
       std::optional<X509_CRL> find_crl_for(const X509_Certificate& subject) const override;
 
-   private:
-      /**
-       * Handle certificates that do not adhere to RFC 3280 using a subject key identifier
-       * that is not equal to the SHA-1 of the public key (w/o algorithm identifier)
-       *
-       * This method lazily builds a cache of certificates found in previous queries as well
-       * as negative results for @p key_hash queries that didn't find a certificate.
-       *
-       * See here for further details: https://github.com/randombit/botan/issues/2779
-       */
-      std::optional<X509_Certificate> find_cert_by_pubkey_sha1_via_exhaustive_search(
-         const std::vector<uint8_t>& key_hash) const;
+      bool contains(const X509_Certificate& cert) const override;
 
    private:
-      mutable std::map<std::vector<uint8_t>, std::optional<X509_Certificate>> m_non_rfc3289_certs;
+      std::shared_ptr<Certificate_Store_Windows_Impl> m_impl;
 };
+
 }  // namespace Botan
 
 #endif

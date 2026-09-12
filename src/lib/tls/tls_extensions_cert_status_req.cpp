@@ -21,7 +21,7 @@ class RFC6066_Empty_Certificate_Status_Request {
    public:
       RFC6066_Empty_Certificate_Status_Request() = default;
 
-      RFC6066_Empty_Certificate_Status_Request(uint16_t extension_size) {
+      explicit RFC6066_Empty_Certificate_Status_Request(uint16_t extension_size) {
          if(extension_size != 0) {
             throw Decoding_Error("Received an unexpectedly non-empty Certificate_Status_Request");
          }
@@ -42,9 +42,24 @@ class RFC6066_Certificate_Status_Request {
 
          const uint8_t type = reader.get_byte();
          if(type == 1 /* ocsp */) {
+            // RFC 6066 Section 8: OCSP CertificateStatusRequest is
+            //    ResponderID responder_id_list<0..2^16-1>;
+            //    Extensions  request_extensions;
+            //
+            // for a total wire size of 1 (status_type) + 2 (resp_id_list len)
+            //   + len_resp_id_list + 2 (request_ext len) + len_requ_ext.
+            if(extension_size < 5) {
+               throw Decoding_Error("Truncated OCSP CertificateStatusRequest");
+            }
             const size_t len_resp_id_list = reader.get_uint16_t();
+            if(len_resp_id_list > static_cast<size_t>(extension_size) - 5) {
+               throw Decoding_Error("Inconsistent length in OCSP CertificateStatusRequest");
+            }
             ocsp_names = reader.get_fixed<uint8_t>(len_resp_id_list);
             const size_t len_requ_ext = reader.get_uint16_t();
+            if(len_resp_id_list + len_requ_ext + 5 != extension_size) {
+               throw Decoding_Error("Inconsistent length in OCSP CertificateStatusRequest");
+            }
             extension_bytes = reader.get_fixed<uint8_t>(len_requ_ext);
          } else {
             // RFC 6066 does not specify anything but 'ocsp' and we
@@ -65,9 +80,9 @@ class RFC6066_Certificate_Status_Request {
          };
       }
 
-      std::vector<uint8_t> ocsp_names;              // NOLINT(*-non-private-member-variables-in-classes)
-      std::vector<std::vector<uint8_t>> ocsp_keys;  // NOLINT(*-non-private-member-variables-in-classes)
-      std::vector<uint8_t> extension_bytes;         // NOLINT(*-non-private-member-variables-in-classes)
+      std::vector<uint8_t> ocsp_names;              // NOLINT(*-non-private-member-variable*)
+      std::vector<std::vector<uint8_t>> ocsp_keys;  // NOLINT(*-non-private-member-variable*)
+      std::vector<uint8_t> extension_bytes;         // NOLINT(*-non-private-member-variable*)
 };
 
 }  // namespace
@@ -78,9 +93,9 @@ class Certificate_Status_Request_Internal {
          std::variant<RFC6066_Empty_Certificate_Status_Request, RFC6066_Certificate_Status_Request, Certificate_Status>;
 
    public:
-      Certificate_Status_Request_Internal(Contents c) : content(std::move(c)) {}
+      explicit Certificate_Status_Request_Internal(Contents c) : content(std::move(c)) {}
 
-      Contents content;  // NOLINT(*-non-private-member-variables-in-classes)
+      Contents content;  // NOLINT(*-non-private-member-variable*)
 };
 
 Certificate_Status_Request::Certificate_Status_Request(TLS_Data_Reader& reader,
@@ -166,7 +181,7 @@ const std::vector<uint8_t>& Certificate_Status_Request::get_ocsp_response() cons
    return std::get<Certificate_Status>(m_impl->content).response();
 }
 
-std::vector<uint8_t> Certificate_Status_Request::serialize(Connection_Side) const {
+std::vector<uint8_t> Certificate_Status_Request::serialize(Connection_Side /*side*/) const {
    BOTAN_ASSERT_NONNULL(m_impl);
    return std::visit([](const auto& c) { return c.serialize(); }, m_impl->content);
 }

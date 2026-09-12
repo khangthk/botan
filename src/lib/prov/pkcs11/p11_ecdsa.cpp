@@ -10,27 +10,26 @@
 
 #if defined(BOTAN_HAS_ECDSA)
 
+   #include <botan/assert.h>
+   #include <botan/p11_mechanism.h>
    #include <botan/pk_ops.h>
+   #include <botan/pk_options.h>
    #include <botan/rng.h>
    #include <botan/internal/keypair.h>
-   #include <botan/internal/p11_mechanism.h>
+   #include <botan/internal/pk_options_impl.h>
 
 namespace Botan::PKCS11 {
 
 ECDSA_PublicKey PKCS11_ECDSA_PublicKey::export_key() const {
-   return ECDSA_PublicKey(domain(), public_point());
+   return ECDSA_PublicKey(domain(), _public_ec_point());
 }
 
 bool PKCS11_ECDSA_PrivateKey::check_key(RandomNumberGenerator& rng, bool strong) const {
-   if(!public_point().on_the_curve()) {
-      return false;
-   }
-
    if(!strong) {
       return true;
    }
 
-   ECDSA_PublicKey pubkey(domain(), public_point());
+   const ECDSA_PublicKey pubkey(domain(), public_ec_point());
    return KeyPair::signature_consistency_check(rng, *this, pubkey, "SHA-256");
 }
 
@@ -46,19 +45,37 @@ secure_vector<uint8_t> PKCS11_ECDSA_PrivateKey::private_key_bits() const {
 }
 
 std::unique_ptr<Public_Key> PKCS11_ECDSA_PrivateKey::public_key() const {
-   return std::make_unique<ECDSA_PublicKey>(domain(), public_point());
+   return std::make_unique<ECDSA_PublicKey>(domain(), public_ec_point());
 }
 
 namespace {
 
+/*
+* The mechanism hashes the input itself, unless the caller provides the
+* digest, in which case the plain CKM_ECDSA mechanism is used
+*/
+std::string p11_ecdsa_mechanism_hash(const PK_Signature_Options& options) {
+   if(options.using_externally_computed_prehash()) {
+      return "Raw";
+   }
+   return options.hash_function_name();
+}
+
+std::string p11_ecdsa_hash_name(const PK_Signature_Options& options) {
+   if(options.using_externally_computed_prehash()) {
+      return externally_computed_prehash_name(options).value_or("Raw");
+   }
+   return options.hash_function_name();
+}
+
 class PKCS11_ECDSA_Signature_Operation final : public PK_Ops::Signature {
    public:
-      PKCS11_ECDSA_Signature_Operation(const PKCS11_ECDSA_PrivateKey& key, std::string_view hash) :
+      PKCS11_ECDSA_Signature_Operation(const PKCS11_ECDSA_PrivateKey& key, const PK_Signature_Options& options) :
             PK_Ops::Signature(),
             m_key(key),
             m_order_bytes(key.domain().get_order_bytes()),
-            m_mechanism(MechanismWrapper::create_ecdsa_mechanism(hash)),
-            m_hash(hash) {}
+            m_mechanism(MechanismWrapper::create_ecdsa_mechanism(p11_ecdsa_mechanism_hash(options))),
+            m_hash(p11_ecdsa_hash_name(options)) {}
 
       void update(std::span<const uint8_t> input) override {
          if(!m_initialized) {
@@ -66,26 +83,35 @@ class PKCS11_ECDSA_Signature_Operation final : public PK_Ops::Signature {
             m_key.module()->C_SignInit(m_key.session().handle(), m_mechanism.data(), m_key.handle());
             m_initialized = true;
             m_first_message.assign(input.begin(), input.end());
+            m_has_first_message = true;
             return;
          }
 
-         if(!m_first_message.empty()) {
+         if(m_has_first_message) {
             // second call to update: start multiple-part operation
             m_key.module()->C_SignUpdate(m_key.session().handle(), m_first_message);
             m_first_message.clear();
+            m_has_first_message = false;
          }
 
-         m_key.module()->C_SignUpdate(m_key.session().handle(), input.data(), static_cast<Ulong>(input.size()));
+         m_key.module()->C_SignUpdate(m_key.session().handle(), input.data(), checked_ulong_cast(input.size()));
       }
 
       std::vector<uint8_t> sign(RandomNumberGenerator& /*rng*/) override {
+         if(!m_initialized) {
+            // sign() called with no prior update(): treat as a single-part operation over the empty message
+            m_key.module()->C_SignInit(m_key.session().handle(), m_mechanism.data(), m_key.handle());
+            m_initialized = true;
+            m_has_first_message = true;
+         }
          std::vector<uint8_t> signature;
-         if(!m_first_message.empty()) {
+         if(m_has_first_message) {
             // single call to update: perform single-part operation
             m_key.module()->C_Sign(m_key.session().handle(), m_first_message, signature);
             m_first_message.clear();
+            m_has_first_message = false;
          } else {
-            // multiple calls to update (or none): finish multiple-part operation
+            // multiple calls to update: finish multiple-part operation
             m_key.module()->C_SignFinal(m_key.session().handle(), signature);
          }
          m_initialized = false;
@@ -105,6 +131,7 @@ class PKCS11_ECDSA_Signature_Operation final : public PK_Ops::Signature {
       const std::string m_hash;
       secure_vector<uint8_t> m_first_message;
       bool m_initialized = false;
+      bool m_has_first_message = false;
 };
 
 AlgorithmIdentifier PKCS11_ECDSA_Signature_Operation::algorithm_identifier() const {
@@ -115,11 +142,11 @@ AlgorithmIdentifier PKCS11_ECDSA_Signature_Operation::algorithm_identifier() con
 
 class PKCS11_ECDSA_Verification_Operation final : public PK_Ops::Verification {
    public:
-      PKCS11_ECDSA_Verification_Operation(const PKCS11_ECDSA_PublicKey& key, std::string_view hash) :
+      PKCS11_ECDSA_Verification_Operation(const PKCS11_ECDSA_PublicKey& key, const PK_Signature_Options& options) :
             PK_Ops::Verification(),
             m_key(key),
-            m_mechanism(MechanismWrapper::create_ecdsa_mechanism(hash)),
-            m_hash(hash) {}
+            m_mechanism(MechanismWrapper::create_ecdsa_mechanism(p11_ecdsa_mechanism_hash(options))),
+            m_hash(p11_ecdsa_hash_name(options)) {}
 
       void update(std::span<const uint8_t> input) override {
          if(!m_initialized) {
@@ -127,39 +154,51 @@ class PKCS11_ECDSA_Verification_Operation final : public PK_Ops::Verification {
             m_key.module()->C_VerifyInit(m_key.session().handle(), m_mechanism.data(), m_key.handle());
             m_initialized = true;
             m_first_message.assign(input.begin(), input.end());
+            m_has_first_message = true;
             return;
          }
 
-         if(!m_first_message.empty()) {
+         if(m_has_first_message) {
             // second call to update: start multiple-part operation
             m_key.module()->C_VerifyUpdate(m_key.session().handle(), m_first_message);
             m_first_message.clear();
+            m_has_first_message = false;
          }
 
-         m_key.module()->C_VerifyUpdate(m_key.session().handle(), input.data(), static_cast<Ulong>(input.size()));
+         m_key.module()->C_VerifyUpdate(m_key.session().handle(), input.data(), checked_ulong_cast(input.size()));
       }
 
       bool is_valid_signature(std::span<const uint8_t> sig) override {
+         if(!m_initialized) {
+            // is_valid_signature() called with no prior update(): treat as a single-part operation over the empty message
+            m_key.module()->C_VerifyInit(m_key.session().handle(), m_mechanism.data(), m_key.handle());
+            m_initialized = true;
+            m_has_first_message = true;
+         }
          ReturnValue return_value = ReturnValue::SignatureInvalid;
-         if(!m_first_message.empty()) {
+         if(m_has_first_message) {
             // single call to update: perform single-part operation
             m_key.module()->C_Verify(m_key.session().handle(),
                                      m_first_message.data(),
-                                     static_cast<Ulong>(m_first_message.size()),
+                                     checked_ulong_cast(m_first_message.size()),
                                      sig.data(),
-                                     static_cast<Ulong>(sig.size()),
+                                     checked_ulong_cast(sig.size()),
                                      &return_value);
             m_first_message.clear();
+            m_has_first_message = false;
          } else {
-            // multiple calls to update (or none): finish multiple-part operation
+            // multiple calls to update: finish multiple-part operation
             m_key.module()->C_VerifyFinal(
-               m_key.session().handle(), sig.data(), static_cast<Ulong>(sig.size()), &return_value);
+               m_key.session().handle(), sig.data(), checked_ulong_cast(sig.size()), &return_value);
          }
          m_initialized = false;
-         if(return_value != ReturnValue::OK && return_value != ReturnValue::SignatureInvalid) {
+         if(return_value == ReturnValue::SignatureInvalid || return_value == ReturnValue::SignatureLenRange) {
+            return false;
+         } else if(return_value == ReturnValue::OK) {
+            return true;
+         } else {
             throw PKCS11_ReturnError(return_value);
          }
-         return return_value == ReturnValue::OK;
       }
 
       std::string hash_function() const override { return m_hash; }
@@ -170,19 +209,26 @@ class PKCS11_ECDSA_Verification_Operation final : public PK_Ops::Verification {
       const std::string m_hash;
       secure_vector<uint8_t> m_first_message;
       bool m_initialized = false;
+      bool m_has_first_message = false;
 };
 
 }  // namespace
 
-std::unique_ptr<PK_Ops::Verification> PKCS11_ECDSA_PublicKey::create_verification_op(
-   std::string_view params, std::string_view /*provider*/) const {
-   return std::make_unique<PKCS11_ECDSA_Verification_Operation>(*this, params);
+std::unique_ptr<PK_Ops::Verification> PKCS11_ECDSA_PublicKey::_create_verification_op(
+   const PK_Signature_Options& options) const {
+   if(options.using_provider() && options.provider().value() != "pkcs11") {
+      throw Provider_Not_Found(algo_name(), options.provider().value());
+   }
+   return std::make_unique<PKCS11_ECDSA_Verification_Operation>(*this, options);
 }
 
-std::unique_ptr<PK_Ops::Signature> PKCS11_ECDSA_PrivateKey::create_signature_op(RandomNumberGenerator& /*rng*/,
-                                                                                std::string_view params,
-                                                                                std::string_view /*provider*/) const {
-   return std::make_unique<PKCS11_ECDSA_Signature_Operation>(*this, params);
+std::unique_ptr<PK_Ops::Signature> PKCS11_ECDSA_PrivateKey::_create_signature_op(
+   RandomNumberGenerator& rng, const PK_Signature_Options& options) const {
+   BOTAN_UNUSED(rng);
+   if(options.using_provider() && options.provider().value() != "pkcs11") {
+      throw Provider_Not_Found(algo_name(), options.provider().value());
+   }
+   return std::make_unique<PKCS11_ECDSA_Signature_Operation>(*this, options);
 }
 
 PKCS11_ECDSA_KeyPair generate_ecdsa_keypair(Session& session,
@@ -191,14 +237,14 @@ PKCS11_ECDSA_KeyPair generate_ecdsa_keypair(Session& session,
    ObjectHandle pub_key_handle = 0;
    ObjectHandle priv_key_handle = 0;
 
-   Mechanism mechanism = {static_cast<CK_MECHANISM_TYPE>(MechanismType::EcKeyPairGen), nullptr, 0};
+   const Mechanism mechanism = {static_cast<CK_MECHANISM_TYPE>(MechanismType::EcKeyPairGen), nullptr, 0};
 
    session.module()->C_GenerateKeyPair(session.handle(),
                                        &mechanism,
                                        pub_props.data(),
-                                       static_cast<Ulong>(pub_props.count()),
+                                       checked_ulong_cast(pub_props.count()),
                                        priv_props.data(),
-                                       static_cast<Ulong>(priv_props.count()),
+                                       checked_ulong_cast(priv_props.count()),
                                        &pub_key_handle,
                                        &priv_key_handle);
 

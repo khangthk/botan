@@ -1,16 +1,15 @@
-<defines>
+<internal_defines>
 GHASH_CLMUL_CPU -> 20201002
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "GHASH SIMD"
 brief -> "GHASH using SIMD instructions"
 </module_info>
 
-endian little
-
 <requires>
-simd
+cpuid
+simd_4x32
 </requires>
 
 <isa>

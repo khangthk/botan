@@ -11,16 +11,26 @@
 
    #include <botan/base64.h>
    #include <botan/ed25519.h>
-   #include <botan/hash.h>
-   #include <botan/hex.h>
-   #include <botan/rng.h>
    #include <botan/roughtime.h>
    #include <botan/internal/calendar.h>
 
    #include <fstream>
    #include <iomanip>
+   #include <sstream>
 
 namespace Botan_CLI {
+
+namespace {
+
+// Format the time point as YYYY-MM-DDTHH:MM:SS in UTC
+std::string format_utc_datetime(const std::chrono::system_clock::time_point& tp) {
+   const Botan::calendar_point c(tp);
+   std::ostringstream out;
+   out << std::setfill('0') << std::setw(4) << c.year() << "-" << std::setw(2) << c.month() << "-" << std::setw(2)
+       << c.day() << "T" << std::setw(2) << c.hour() << ":" << std::setw(2) << c.minutes() << ":" << std::setw(2)
+       << c.seconds();
+   return out.str();
+}
 
 class RoughtimeCheck final : public Command {
    public:
@@ -39,7 +49,7 @@ class RoughtimeCheck final : public Command {
                output()
                   << Botan::Roughtime::Response::sys_microseconds64(response.utc_midpoint()).time_since_epoch().count();
             } else {
-               output() << Botan::calendar_point(response.utc_midpoint()).to_string();
+               output() << format_utc_datetime(response.utc_midpoint());
             }
             output() << " (+-" << Botan::Roughtime::Response::microseconds32(response.utc_radius()).count() << "us)\n";
          }
@@ -69,7 +79,7 @@ class Roughtime final : public Command {
       Google-Sandbox-Roughtime ed25519 etPaaIxcBMY1oUeGpwvPMCJMwlRVNxv51KK/tktoJTQ= udp roughtime.sandbox.google.com:2002
 
 --chain-file=<filename>
-   Succesfull queries are appended to this file.
+   Successful queries are appended to this file.
    If limit of --max-chain-size records is reached, the oldest records are truncated.
    This queries records can be replayed using command roughtime_check <chain-file>.
 
@@ -86,8 +96,8 @@ class Roughtime final : public Command {
                  const size_t max_chain_size,
                  const std::string& address,
                  const Botan::Ed25519_PublicKey& public_key) {
-         Botan::Roughtime::Nonce nonce;
-         Botan::Roughtime::Nonce blind;
+         Botan::Roughtime::Nonce nonce{};
+         Botan::Roughtime::Nonce blind{};
          if(chain) {
             blind = Botan::Roughtime::Nonce(rng());
             nonce = chain->next_nonce(blind);
@@ -101,7 +111,7 @@ class Roughtime final : public Command {
                << "UTC "
                << Botan::Roughtime::Response::sys_microseconds64(response.utc_midpoint()).time_since_epoch().count();
          } else {
-            output() << "UTC " << Botan::calendar_point(response.utc_midpoint()).to_string();
+            output() << "UTC " << format_utc_datetime(response.utc_midpoint());
          }
          output() << " (+-" << Botan::Roughtime::Response::microseconds32(response.utc_radius()).count() << "us)";
          if(!response.validate(public_key)) {
@@ -110,7 +120,7 @@ class Roughtime final : public Command {
             return;
          }
          const auto tolerance = get_arg_sz("check-local-clock");
-         if(tolerance) {
+         if(tolerance > 0) {
             const auto now = std::chrono::system_clock::now();
             const auto diff_abs =
                now >= response.utc_midpoint() ? now - response.utc_midpoint() : response.utc_midpoint() - now;
@@ -180,6 +190,8 @@ class Roughtime final : public Command {
 };
 
 BOTAN_REGISTER_COMMAND("roughtime", Roughtime);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

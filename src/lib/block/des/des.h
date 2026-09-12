@@ -9,6 +9,7 @@
 #define BOTAN_DES_H_
 
 #include <botan/block_cipher.h>
+#include <botan/secmem.h>
 
 namespace Botan {
 
@@ -26,10 +27,12 @@ class DES final : public Block_Cipher_Fixed_Params<8, 8> {
 
       std::unique_ptr<BlockCipher> new_object() const override { return std::make_unique<DES>(); }
 
+      size_t parallelism() const override { return 32; }
+
       bool has_keying_material() const override;
 
    private:
-      void key_schedule(std::span<const uint8_t>) override;
+      void key_schedule(std::span<const uint8_t> key) override;
 
       secure_vector<uint32_t> m_round_key;
 };
@@ -48,10 +51,12 @@ class TripleDES final : public Block_Cipher_Fixed_Params<8, 16, 24, 8> {
 
       std::unique_ptr<BlockCipher> new_object() const override { return std::make_unique<TripleDES>(); }
 
+      size_t parallelism() const override { return 32; }
+
       bool has_keying_material() const override;
 
    private:
-      void key_schedule(std::span<const uint8_t>) override;
+      void key_schedule(std::span<const uint8_t> key) override;
 
       secure_vector<uint32_t> m_round_key;
 };

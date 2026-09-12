@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 LOCKING_ALLOCATOR -> 20131128
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "Locking Allocator"
@@ -13,5 +13,6 @@ virtual_lock
 </os_features>
 
 <requires>
+os_utils
 mem_pool
 </requires>

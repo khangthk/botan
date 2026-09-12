@@ -9,6 +9,7 @@
 
 #include <botan/exceptn.h>
 #include <botan/hex.h>
+#include <botan/mem_ops.h>
 #include <algorithm>
 
 namespace Botan {
@@ -24,7 +25,6 @@ const size_t HEX_CODEC_BUFFER_SIZE = 256;
 Hex_Encoder::Hex_Encoder(bool breaks, size_t length, Case c) : m_casing(c), m_line_length(breaks ? length : 0) {
    m_in.resize(HEX_CODEC_BUFFER_SIZE);
    m_out.resize(2 * m_in.size());
-   m_counter = m_position = 0;
 }
 
 /*
@@ -33,7 +33,6 @@ Hex_Encoder::Hex_Encoder(bool breaks, size_t length, Case c) : m_casing(c), m_li
 Hex_Encoder::Hex_Encoder(Case c) : m_casing(c), m_line_length(0) {
    m_in.resize(HEX_CODEC_BUFFER_SIZE);
    m_out.resize(2 * m_in.size());
-   m_counter = m_position = 0;
 }
 
 /*
@@ -45,9 +44,10 @@ void Hex_Encoder::encode_and_send(const uint8_t block[], size_t length) {
    if(m_line_length == 0) {
       send(m_out, 2 * length);
    } else {
-      size_t remaining = 2 * length, offset = 0;
-      while(remaining) {
-         size_t sent = std::min(m_line_length - m_counter, remaining);
+      size_t remaining = 2 * length;
+      size_t offset = 0;
+      while(remaining > 0) {
+         const size_t sent = std::min(m_line_length - m_counter, remaining);
          send(&m_out[offset], sent);
          m_counter += sent;
          remaining -= sent;
@@ -87,7 +87,7 @@ void Hex_Encoder::write(const uint8_t input[], size_t length) {
 */
 void Hex_Encoder::end_msg() {
    encode_and_send(m_in.data(), m_position);
-   if(m_counter && m_line_length) {
+   if(m_counter > 0 && m_line_length > 0) {
       send('\n');
    }
    m_counter = m_position = 0;
@@ -99,21 +99,39 @@ void Hex_Encoder::end_msg() {
 Hex_Decoder::Hex_Decoder(Decoder_Checking c) : m_checking(c) {
    m_in.resize(HEX_CODEC_BUFFER_SIZE);
    m_out.resize(m_in.size() / 2);
-   m_position = 0;
 }
+
+namespace {
+
+// Whitespace ignored by hex_char_to_bin() in hex.cpp. Dropping it before
+// buffering keeps the decoder buffer bounded (see Hex_Decoder::write).
+bool hex_ignorable_whitespace(uint8_t c) {
+   return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+}  // namespace
 
 /*
 * Convert some data from hex format
 */
 void Hex_Decoder::write(const uint8_t input[], size_t length) {
-   while(length) {
-      size_t to_copy = std::min<size_t>(length, m_in.size() - m_position);
-      copy_mem(&m_in[m_position], input, to_copy);
-      m_position += to_copy;
+   const bool ignore_ws = (m_checking != FULL_CHECK);
+
+   size_t pos = 0;
+   while(pos < length) {
+      // Drop ignored whitespace before buffering so a partial trailing nibble
+      // stays next to its pair and the fixed buffer can't fill with whitespace.
+      while(pos < length && m_position < m_in.size()) {
+         const uint8_t c = input[pos++];
+         if(ignore_ws && hex_ignorable_whitespace(c)) {
+            continue;
+         }
+         m_in[m_position++] = c;
+      }
 
       size_t consumed = 0;
-      size_t written =
-         hex_decode(m_out.data(), cast_uint8_ptr_to_char(m_in.data()), m_position, consumed, m_checking != FULL_CHECK);
+      const size_t written =
+         hex_decode(m_out.data(), cast_uint8_ptr_to_char(m_in.data()), m_position, consumed, ignore_ws);
 
       send(m_out, written);
 
@@ -123,9 +141,6 @@ void Hex_Decoder::write(const uint8_t input[], size_t length) {
       } else {
          m_position = 0;
       }
-
-      length -= to_copy;
-      input += to_copy;
    }
 }
 
@@ -134,7 +149,7 @@ void Hex_Decoder::write(const uint8_t input[], size_t length) {
 */
 void Hex_Decoder::end_msg() {
    size_t consumed = 0;
-   size_t written =
+   const size_t written =
       hex_decode(m_out.data(), cast_uint8_ptr_to_char(m_in.data()), m_position, consumed, m_checking != FULL_CHECK);
 
    send(m_out, written);

@@ -179,13 +179,15 @@ additional information about the connection.
      This callback is optional, and can be used to inspect all handshake messages
      while the session establishment occurs.
 
- .. cpp:function:: void tls_modify_extensions(Extensions& extn, Connection_Side which_side)
+ .. cpp:function:: void tls_modify_extensions(Extensions& extn, Connection_Side which_side, \
+                                              Handshake_Type which_message)
 
      This callback is optional, and can be used to modify extensions before they
      are sent to the peer. For example this enables adding a custom extension,
      or replacing or removing an extension set by the library.
 
- .. cpp:function:: void tls_examine_extensions(const Extensions& extn, Connection_Side which_side)
+ .. cpp:function:: void tls_examine_extensions(const Extensions& extn, Connection_Side which_side, \
+                                               Handshake_Type which_message)
 
      This callback is optional, and can be used to examine extensions sent by
      the peer.
@@ -255,6 +257,13 @@ available:
      this connection and the connection has not been subsequently
      closed.
 
+   .. cpp:function:: std::optional<std::chrono::milliseconds> next_retransmission_timeout()
+
+      Returns the remaining time until a call to ``timeout_check`` might
+      retransmit DTLS handshake data. A zero duration means that a
+      retransmission is due. If ``std::nullopt`` is returned, no timeout check
+      is currently needed.
+
    .. cpp:function:: bool is_closed()
 
       Returns true if and only if either a close notification or a
@@ -275,10 +284,8 @@ available:
    .. cpp:function:: bool timeout_check()
 
       This function does nothing unless the channel represents a DTLS
-      connection and a handshake is actively in progress. In this case
-      it will check the current timeout state and potentially initiate
-      retransmission of handshake packets. Returns true if a timeout
-      condition occurred.
+      connection with a handshake in progress. Returns true if a timeout
+      condition occurred and handshake packets were retransmitted.
 
    .. cpp:function:: void renegotiate(bool force_full_renegotiation = false)
 
@@ -303,6 +310,11 @@ available:
 
       After a successful handshake, this will update our traffic keys and
       may send a request to do the same to the peer.
+
+      Note that a TLS 1.3 channel initiates such a key update by itself
+      after encrypting ``Policy::records_per_traffic_key()`` records with
+      the same key. Applications only need to call this method to force a
+      key update at a specific point in time.
 
       Note that this is a TLS 1.3 feature and invocations on a channel
       using TLS 1.2 will throw.
@@ -483,7 +495,7 @@ included that provides information about that session:
        Returns the :cpp:class:`protocol version <TLS::Protocol_Version>`
        that was negotiated
 
-   .. cpp:function:: Ciphersuite ciphersite() const
+   .. cpp:function:: Ciphersuite ciphersuite() const
 
        Returns the :cpp:class:`ciphersuite <TLS::Ciphersuite>` that
        was negotiated.
@@ -547,7 +559,7 @@ implementation must implement. There are more methods that provide applications
 with full flexibility to handle session objects. More detail can be found in
 the API documentation inline.
 
-.. cpp:class:: TLS::Session_Mananger
+.. cpp:class:: TLS::Session_Manager
 
  .. cpp:function:: void store(const Session& session, const Session_Handle& handle)
 
@@ -607,7 +619,7 @@ lock internally.
 
     Limits the maximum number of saved sessions to *max_sessions*.
 
-Noop Session Mananger
+Noop Session Manager
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The ``TLS::Session_Manager_Noop`` implementation does not save
@@ -695,19 +707,19 @@ policy settings from a file.
 
      No export key exchange mechanisms or ciphersuites are supported
      by botan. The null encryption ciphersuites (which provide only
-     authentication, sending data in cleartext) are also not supported
-     by the implementation and cannot be negotiated.
+     authentication, sending data in cleartext) are only supported if
+     they are explicitly enabled at build time by activating the
+     tls_null module.
 
      Cipher names without an explicit mode refers to CBC+HMAC ciphersuites.
 
-     Default value: "ChaCha20Poly1305", "AES-256/GCM", "AES-128/GCM"
+     Default value: "AES-256/GCM", "AES-128/GCM", "ChaCha20Poly1305"
 
      Also allowed: "AES-256", "AES-128",
      "AES-256/CCM", "AES-128/CCM", "AES-256/CCM(8)", "AES-128/CCM(8)",
      "Camellia-256/GCM", "Camellia-128/GCM", "ARIA-256/GCM", "ARIA-128/GCM"
 
-     Also allowed (though currently experimental): "AES-128/OCB(12)",
-     "AES-256/OCB(12)"
+     Also allowed (though currently experimental): "AES-256/OCB(12)"
 
      In versions up to 2.8.0, the CBC and CCM ciphersuites "AES-256",
      "AES-128", "AES-256/CCM" and "AES-128/CCM" were enabled by default.
@@ -793,17 +805,22 @@ policy settings from a file.
  .. cpp:function:: std::vector<Group_Params> key_exchange_groups() const
 
      Return a list of ECC curve and DH group TLS identifiers we are willing to use, in order of preference.
-     The default ordering puts the best performing ECC first.
 
      Default:
-     Group_Params::X25519,
-     Group_Params::SECP256R1, Group_Params::BRAINPOOL256R1,
-     Group_Params::SECP384R1, Group_Params::BRAINPOOL384R1,
-     Group_Params::SECP521R1, Group_Params::BRAINPOOL512R1,
-     Group_Params::FFDHE_2048, Group_Params::FFDHE_3072, Group_Params::FFDHE_4096,
-     Group_Params::FFDHE_6144, Group_Params::FFDHE_8192
 
-     No other values are currently defined.
+     Group_Params::X25519,
+     Group_Params::SECP256R1,
+     Group_Params_Code::HYBRID_X25519_ML_KEM_768,
+     Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768,
+     Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
+     Group_Params::X448,
+     Group_Params::SECP384R1,
+     Group_Params::SECP521R1,
+     Group_Params::BRAINPOOL256R1,
+     Group_Params::BRAINPOOL384R1,
+     Group_Params::BRAINPOOL512R1,
+     Group_Params::FFDHE_2048,
+     Group_Params::FFDHE_3072,
 
  .. cpp:function:: std::vector<Group_Param> key_exchange_groups_to_offer() const
 
@@ -929,10 +946,6 @@ policy settings from a file.
 
      Minimum accepted RSA key size. Default 2048 bits.
 
- .. cpp:function:: size_t minimum_dsa_group_size() const
-
-     Minimum accepted DSA key size. Default 2048 bits.
-
  .. cpp:function:: size_t minimum_ecdsa_group_size() const
 
      Minimum size for ECDSA keys (256 bits).
@@ -991,6 +1004,22 @@ policy settings from a file.
 
      Default: no preference (use maximum allowed by the protocol)
 
+ .. cpp:function:: uint64_t records_per_traffic_key() const
+
+     The maximum number of records to encrypt with a single traffic key
+     before a TLS 1.3 channel initiates a KeyUpdate on its own. Such
+     automatic key updates request a reciprocal update from the peer, so
+     that a peer which never initiates key updates gets its keys rotated
+     as well. Return 0 to disable automatic key updates.
+
+     If 1.5 times this many records were received without the peer
+     updating its keys, the channel will also request a key update from
+     the peer, at most once until the peer complies.
+
+     This has no effect on TLS 1.2 connections.
+
+     Default: 2^23 records
+
  .. cpp:function:: bool tls_13_middlebox_compatibility_mode() const
 
      Enables middlebox compatibility mode as defined in RFC 8446 Appendix D.4.
@@ -1036,7 +1065,7 @@ TLS Ciphersuites
      undesirable for whatever reason without having to reimplement
      :cpp:func:`TLS::Ciphersuite::ciphersuite_list`
 
- .. cpp:function:: std::vector<uint16_t> ciphersuite_list(Protocol_Version version, bool have_srp) const
+ .. cpp:function:: std::vector<uint16_t> ciphersuite_list(Protocol_Version version) const
 
      Return allowed ciphersuites in order of preference
 
@@ -1130,27 +1159,18 @@ groups. For text-based policy configurations use the identifiers in parenthesis.
 
 Currently, Botan supports the following post-quantum secure key exchanges:
 
-* used `in Open Quantum Safe <https://github.com/open-quantum-safe/oqs-provider/blob/main/oqs-template/oqs-kem-info.md>`_
-  (PQC algorithm without a classical algorithm)
+* ML-KEM plus ECC hybrid, as deployed by Google, Cloudflare, etc and likely
+  to be in the future standardized by IETF
 
-  * ``KYBER_512_R3`` ("Kyber-512-r3")
-  * ``KYBER_768_R3`` ("Kyber-768-r3")
-  * ``KYBER_1024_R3`` ("Kyber-1024-r3")
+  * ``HYBRID_SECP256R1_ML_KEM_768`` ("secp256r1/ML-KEM-768")
+  * ``HYBRID_SECP384R1_ML_KEM_1024`` ("secp384r1/ML-KEM-1024")
+  * ``HYBRID_X25519_ML_KEM_768`` ("x25519/ML-KEM-768")
 
-* used `in Open Quantum Safe <https://github.com/open-quantum-safe/oqs-provider/blob/main/oqs-template/oqs-kem-info.md>`_
-  (hybrid between Kyber and a classical ECDH algorithm)
+* Pure ML-KEM as documented in IETF draft ``draft-connolly-tls-mlkem-key-agreement``
 
-  * ``HYBRID_X25519_KYBER_512_R3_OQS`` ("x25519/Kyber-512-r3")
-  * ``HYBRID_X25519_KYBER_768_R3_OQS`` ("x25519/Kyber-768-r3")
-  * ``HYBRID_SECP256R1_KYBER_512_R3_OQS`` ("secp256r1/Kyber-512-r3")
-  * ``HYBRID_SECP384R1_KYBER_768_R3_OQS`` ("secp384r1/Kyber-768-r3")
-  * ``HYBRID_SECP521R1_KYBER_1024_R3_OQS`` ("secp521r1/Kyber-1024-r3")
-
-* used `by Cloudflare <https://blog.cloudflare.com/post-quantum-for-all/>`_
-  (hybrid between Kyber and the classical X25519 algorithm)
-
-  * ``HYBRID_X25519_KYBER_512_R3_CLOUDFLARE`` ("x25519/Kyber-512-r3/cloudflare")
-  * ``HYBRID_X25519_KYBER_768_R3_CLOUDFLARE`` ("x25519/Kyber-768-r3/cloudflare")
+  * ``ML_KEM_512``
+  * ``ML_KEM_768``
+  * ``ML_KEM_1024``
 
 .. _tls_hybrid_client_example:
 
@@ -1178,7 +1198,7 @@ To use custom curves with the Botan :cpp:class:`TLS::Client` or :cpp:class:`TLS:
 additional adjustments have to be implemented as shown in the following code examples.
 
 1. Registration of the custom curve
-2. Implementation TLS callbacks ``tls_generate_ephemeral_key`` and ``tls_ephemeral_key_agreement``
+2. Implementation of TLS callbacks ``tls_generate_ephemeral_key`` and ``tls_deserialize_peer_public_key``
 3. Adjustment of the TLS policy by allowing the custom curve
 
 Below is a code example for a TLS client using a custom curve.
@@ -1189,6 +1209,21 @@ Code Example: TLS Client using Custom Curve
 
 .. literalinclude:: /../src/examples/tls_custom_curves_client.cpp
    :language: cpp
+
+Special Case: Custom ECDH provider for TLS 1.2
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Users that wish to implement a custom ECDH provider for TLS 1.2 (e.g. to offload the implementation of
+standard curves to some crypto hardware), must take the negotiated ECC point encoding (compressed vs.
+uncompressed) into account. They should use the special callback  ``tls12_generate_ephemeral_ecdh_key``
+which provides the desired ECC point encoding as an input parameter.
+
+This special callback is called *only for TLS 1.2* and *only for ECDH using standardized curves* that
+Botan is aware of (for instance ``secp256r1``, ``brainpool256r1`` and such). Explicitly, that *does not
+include X25519 and X448* as those algorithms have a well-defined point format. TLS 1.3 does not allow
+negotiating the ECC point encoding (see `RFC 8446 Section 4.2.8.2 <https://www.rfc-editor.org/rfc/rfc8446#section-4.2.8.2>`_)
+and thus does not call this callback either. Support for compressed points in TLS 1.2 is deprecated in
+Botan and this callback will disappear when it is removed in a future release.
 
 .. _tls_asio_stream:
 
@@ -1309,7 +1344,7 @@ The asio Stream offers the following interface:
 
    Constructor for TLS::Context.
 
-   .. cpp:function:: void set_verify_callback(Verify_Callback_T callback)
+   .. cpp:function:: void set_verify_callback(Verify_Callback callback)
 
    Set a user-defined callback function for certificate chain verification. This
    will cause the stream to override the default implementation of the
@@ -1345,9 +1380,9 @@ your policy via the :cpp:class:`TLS::Context` to the :cpp:class:`TLS::Stream`.
 Aside of the modern coroutines-based approach, the ASIO stream may also be used
 in a more traditional way, using callback handler methods instead of coroutines.
 
-Also, this example shows how to use a custom :cpp:class:`Credentials_Manager`
-and pass it to the :cpp:class:`TLS::Stream` via a :cpp:class:`TLS::Context`
-object.
+Also, this example shows how to use custom :cpp:class:`Credentials_Manager` and
+:cpp:class:`TLS::Policy` subclasses, passing them to the :cpp:class:`TLS::Stream`
+via a :cpp:class:`TLS::Context` object.
 
 .. literalinclude:: /../src/examples/tls_stream_client.cpp
    :language: cpp
@@ -1378,7 +1413,7 @@ Then a key used for AES-256 in GCM mode is created by first choosing a 128 bit
 random seed, and HMAC'ing it to produce a 256-bit value. This means for any one
 master key as many as 2\ :sup:`128` GCM keys can be created. This is done
 because NIST recommends that when using random nonces no one GCM key be used to
-encrypt more than 2\ :sup:`32` messages (to avoid the possiblity of nonce
+encrypt more than 2\ :sup:`32` messages (to avoid the possibility of nonce
 reuse).
 
 A random 96-bit nonce is created and included in the header.

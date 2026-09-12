@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 AES_VAES -> 20240803
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "AES-VAES"
@@ -8,7 +8,8 @@ brief -> "AES using VAES"
 </module_info>
 
 <requires>
-simd_avx2
+cpuid
+simd_8x32
 </requires>
 
 <isa>

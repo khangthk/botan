@@ -8,6 +8,7 @@ API Reference
    footguns
    versions
    secmem
+   encoding
    rng
    hash
    block_cipher
@@ -15,7 +16,9 @@ API Reference
    message_auth_codes
    cipher_modes
    pubkey
+   names
    x509
+   pkcs12
    tls
    credentials_manager
    bigint
@@ -24,11 +27,13 @@ API Reference
    keywrap
    passhash
    cryptobox
+   spake2p
    srp
    psk_db
    filters
    fpe
    tss
+   ec_group
    ecc
    compression
    providers
@@ -36,6 +41,7 @@ API Reference
    tpm
    otp
    roughtime
+   sodium
    zfec
    ffi
    env_vars

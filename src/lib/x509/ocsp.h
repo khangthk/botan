@@ -9,6 +9,7 @@
 #define BOTAN_OCSP_H_
 
 #include <botan/asn1_obj.h>
+#include <botan/asn1_time.h>
 #include <botan/bigint.h>
 #include <botan/pkix_types.h>
 #include <botan/x509cert.h>
@@ -18,7 +19,9 @@
 
 namespace Botan {
 
+class Path_Validation_Restrictions;
 class Certificate_Store;
+class URI;
 
 namespace OCSP {
 
@@ -27,6 +30,8 @@ class BOTAN_PUBLIC_API(2, 0) CertID final : public ASN1_Object {
       CertID() = default;
 
       CertID(const X509_Certificate& issuer, const BigInt& subject_serial);
+
+      CertID(const X509_Certificate& issuer, const X509_Serial_Number& subject_serial);
 
       bool is_id_for(const X509_Certificate& issuer, const X509_Certificate& subject) const;
 
@@ -40,28 +45,65 @@ class BOTAN_PUBLIC_API(2, 0) CertID final : public ASN1_Object {
       AlgorithmIdentifier m_hash_id;
       std::vector<uint8_t> m_issuer_dn_hash;
       std::vector<uint8_t> m_issuer_key_hash;
-      BigInt m_subject_serial;
+      X509_Serial_Number m_subject_serial;
 };
 
 class BOTAN_PUBLIC_API(2, 0) SingleResponse final : public ASN1_Object {
    public:
+      SingleResponse() = default;
+
+      /**
+      * Create a SingleResponse asserting a good status, as emitted by an
+      * OCSP responder. All times must be tagged as GeneralizedTime; an
+      * unset next_update omits the optional nextUpdate field.
+      */
+      static SingleResponse good(CertID certid, X509_Time this_update, X509_Time next_update);
+
+      /// As good(), but asserting an unknown status
+      static SingleResponse unknown(CertID certid, X509_Time this_update, X509_Time next_update);
+
+      /// As good(), but asserting a revoked status with the given RevokedInfo
+      static SingleResponse revoked(CertID certid,
+                                    X509_Time revocation_time,
+                                    std::optional<CRL_Code> reason,
+                                    X509_Time this_update,
+                                    X509_Time next_update);
+
       const CertID& certid() const { return m_certid; }
 
       size_t cert_status() const { return m_cert_status; }
 
-      X509_Time this_update() const { return m_thisupdate; }
+      const X509_Time& this_update() const { return m_thisupdate; }
 
-      X509_Time next_update() const { return m_nextupdate; }
+      const X509_Time& next_update() const { return m_nextupdate; }
+
+      /// The revocationTime; set only when cert_status() is 1 (revoked)
+      const std::optional<X509_Time>& revocation_time() const { return m_revocation_time; }
+
+      /// The revocationReason, when cert_status() is 1 and one was provided
+      const std::optional<CRL_Code>& revocation_reason() const { return m_revocation_reason; }
 
       void encode_into(DER_Encoder& to) const override;
 
       void decode_from(BER_Decoder& from) override;
 
+      bool has_unknown_critical_extension() const { return m_has_unknown_critical_ext; }
+
    private:
+      SingleResponse(CertID certid,
+                     size_t cert_status,
+                     std::optional<X509_Time> revocation_time,
+                     std::optional<CRL_Code> revocation_reason,
+                     X509_Time this_update,
+                     X509_Time next_update);
+
       CertID m_certid;
       size_t m_cert_status = 2;  // unknown
       X509_Time m_thisupdate;
       X509_Time m_nextupdate;
+      std::optional<X509_Time> m_revocation_time;
+      std::optional<CRL_Code> m_revocation_reason;
+      bool m_has_unknown_critical_ext = false;
 };
 
 /**
@@ -95,8 +137,11 @@ class BOTAN_PUBLIC_API(2, 0) Request final {
 
       /**
       * @return subject certificate
+      * TODO(Botan4) remove this function
       */
-      const X509_Certificate& subject() const { throw Not_Implemented("Method have been deprecated"); }
+      const X509_Certificate& subject() const {  // NOLINT(*-convert-member-functions-to-static)
+         throw Not_Implemented("Method have been deprecated");
+      }
 
       const std::vector<uint8_t>& issuer_key_hash() const { return m_certid.issuer_key_hash(); }
 
@@ -110,7 +155,7 @@ class BOTAN_PUBLIC_API(2, 0) Request final {
 *
 * see https://tools.ietf.org/html/rfc6960#section-4.2.1
 */
-enum class Response_Status_Code {
+enum class Response_Status_Code : uint8_t {
    Successful = 0,
    Malformed_Request = 1,
    Internal_Error = 2,
@@ -129,14 +174,17 @@ class BOTAN_PUBLIC_API(2, 0) Response final {
       /**
       * Create a fake OCSP response from a given status code.
       * @param status the status code the check functions will return
+      *
+      * TODO(Botan4) make this constructor private
       */
-      Response(Certificate_Status_Code status);
+      BOTAN_FUTURE_EXPLICIT Response(Certificate_Status_Code status);
 
       /**
       * Parses an OCSP response.
       * @param response_bits response bits received
       */
-      Response(const std::vector<uint8_t>& response_bits) : Response(response_bits.data(), response_bits.size()) {}
+      BOTAN_FUTURE_EXPLICIT Response(const std::vector<uint8_t>& response_bits) :
+            Response(response_bits.data(), response_bits.size()) {}
 
       /**
       * Parses an OCSP response.
@@ -170,6 +218,21 @@ class BOTAN_PUBLIC_API(2, 0) Response final {
       * @return status code indicating the validity of the signature
       */
       Certificate_Status_Code verify_signature(const X509_Certificate& signing_certificate) const;
+
+      /**
+      * Check signature of the OCSP response.
+      *
+      * Note: It is the responsibility of the caller to verify that signing
+      *       certificate is trustworthy and authorized to do so.
+      *
+      * @param signing_certificate the certificate that signed this response
+      *                            (@sa Response::find_signing_certificate)
+      * @param restrictions on the signature validation
+      *
+      * @return status code indicating the validity of the signature
+      */
+      Certificate_Status_Code verify_signature(const X509_Certificate& signing_certificate,
+                                               const Path_Validation_Restrictions& restrictions) const;
 
       /**
       * @return the status of the response
@@ -221,7 +284,30 @@ class BOTAN_PUBLIC_API(2, 0) Response final {
       const std::vector<X509_Certificate>& certificates() const { return m_certs; }
 
       /**
-      * @return the dummy response if this is a 'fake' OCSP response otherwise std::nullopt
+       * @return the SingleResponses included in this response (empty for a 'fake'
+       *         or non-successful response)
+       */
+      const std::vector<SingleResponse>& responses() const { return m_responses; }
+
+      /**
+      * Return a fake OCSP response indicating the server was not available
+      * This is not normally useful for applications
+      */
+      static Response dummy_server_not_available_response() {
+         return Response(Certificate_Status_Code::OCSP_SERVER_NOT_AVAILABLE);
+      }
+
+      /**
+      * Return a fake OCSP response indicating there was no usable OCSP URL
+      * This is not normally useful for applications
+      */
+      static Response dummy_no_revocation_url_response() {
+         return Response(Certificate_Status_Code::OCSP_NO_REVOCATION_URL);
+      }
+
+      /**
+      * Return the dummy response if this is a 'fake' OCSP response otherwise std::nullopt
+      * This is not normally useful for applications
       */
       std::optional<Certificate_Status_Code> dummy_status() const { return m_dummy_response_status; }
 
@@ -242,19 +328,35 @@ class BOTAN_PUBLIC_API(2, 0) Response final {
       std::vector<SingleResponse> m_responses;
 
       std::optional<Certificate_Status_Code> m_dummy_response_status;
+
+      bool m_has_unknown_critical_ext = false;
 };
 
 #if defined(BOTAN_HAS_HTTP_UTIL)
 
 /**
-* Makes an online OCSP request via HTTP and returns the (unverified) OCSP response.
+* Makes an online OCSP request via HTTP and returns the (unverified!) OCSP response.
 * @param issuer issuer certificate
 * @param subject_serial the subject's serial number
 * @param ocsp_responder the OCSP responder to query
 * @param timeout a timeout on the HTTP request
 * @return OCSP response
 */
-BOTAN_PUBLIC_API(3, 0)
+BOTAN_PUBLIC_API(3, 13)
+Response online_check(const X509_Certificate& issuer,
+                      const BigInt& subject_serial,
+                      const URI& ocsp_responder,
+                      std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
+
+/**
+* Makes an online OCSP request via HTTP and returns the (unverified!) OCSP response.
+* @param issuer issuer certificate
+* @param subject_serial the subject's serial number
+* @param ocsp_responder the OCSP responder to query
+* @param timeout a timeout on the HTTP request
+* @return OCSP response
+*/
+BOTAN_DEPRECATED_API("Prefer version taking a URI")
 Response online_check(const X509_Certificate& issuer,
                       const BigInt& subject_serial,
                       std::string_view ocsp_responder,

@@ -10,6 +10,7 @@
 
 #include <botan/symkey.h>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -26,9 +27,11 @@ namespace Botan {
 * and iterated hashing to make brute force attacks harder.
 *
 * Starting in 2.8 this functionality is also offered by PasswordHash.
-* The PBKDF interface may be removed in a future release.
+*
+* @warning
+* This class will be removed in a future major release. Use PasswordHash
 */
-class BOTAN_PUBLIC_API(2, 0) PBKDF {
+class BOTAN_PUBLIC_API(2, 0) PBKDF /* NOLINT(*-special-member-functions) */ {
    public:
       /**
       * Create an instance based on a name
@@ -49,22 +52,25 @@ class BOTAN_PUBLIC_API(2, 0) PBKDF {
       static std::unique_ptr<PBKDF> create_or_throw(std::string_view algo_spec, std::string_view provider = "");
 
       /**
+      * List the providers available for a given PBKDF
       * @return list of available providers for this algorithm, empty if not available
       */
       static std::vector<std::string> providers(std::string_view algo_spec);
 
       /**
+      * Create a new uninitialized object of the same type
       * @return new instance of this same algorithm
       */
       virtual std::unique_ptr<PBKDF> new_object() const = 0;
 
       /**
+      * Create a new uninitialized object of the same type
       * @return new instance of this same algorithm
       */
       PBKDF* clone() const { return this->new_object().release(); }
 
       /**
-      * @return name of this PBKDF
+      * Return free-form string identifying this algorithm
       */
       virtual std::string name() const = 0;
 
@@ -228,8 +234,8 @@ class BOTAN_PUBLIC_API(2, 0) PBKDF {
       }
 };
 
-/*
-* Compatibility typedef
+/**
+* Compatibility typedef for PBKDF
 */
 typedef PBKDF S2K;
 
@@ -244,6 +250,11 @@ inline PBKDF* get_pbkdf(std::string_view algo_spec, std::string_view provider = 
    return PBKDF::create_or_throw(algo_spec, provider).release();
 }
 
+/**
+* Password based key derivation function factory method
+* @param algo_spec the name of the desired PBKDF algorithm
+* @return pointer to newly allocated object of that type
+*/
 BOTAN_DEPRECATED("Use PasswordHashFamily + PasswordHash") inline PBKDF* get_s2k(std::string_view algo_spec) {
    return PBKDF::create_or_throw(algo_spec).release();
 }

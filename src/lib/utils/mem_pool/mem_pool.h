@@ -28,7 +28,7 @@ class BOTAN_TEST_API Memory_Pool final {
       */
       Memory_Pool(const std::vector<void*>& pages, size_t page_size);
 
-      ~Memory_Pool();
+      ~Memory_Pool() noexcept;
 
       void* allocate(size_t size);
 
@@ -47,8 +47,8 @@ class BOTAN_TEST_API Memory_Pool final {
 
       std::deque<uint8_t*> m_free_pages;
       std::map<size_t, std::deque<Bucket>> m_buckets_for;
-      uintptr_t m_min_page_ptr;
-      uintptr_t m_max_page_ptr;
+      uintptr_t m_min_page_ptr = ~static_cast<uintptr_t>(0);
+      uintptr_t m_max_page_ptr = 0;
 };
 
 }  // namespace Botan

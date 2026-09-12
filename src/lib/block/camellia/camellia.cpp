@@ -11,6 +11,10 @@
 #include <botan/internal/prefetch.h>
 #include <botan/internal/rotate.h>
 
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
+
 namespace Botan {
 
 namespace {
@@ -84,28 +88,57 @@ alignas(256) const uint8_t SBOX4[256] = {
    0xF5, 0xB6, 0xFD, 0x59, 0x98, 0x6A, 0x46, 0xBA, 0x25, 0x42, 0xA2, 0xFA, 0x07, 0x55, 0xEE, 0x0A, 0x49, 0x68, 0x38,
    0xA4, 0x28, 0x7B, 0xC9, 0xC1, 0xE3, 0xF4, 0xC7, 0x9E};
 
-uint64_t F(uint64_t v, uint64_t K) {
-   const uint64_t M1 = 0x0101010001000001;
-   const uint64_t M2 = 0x0001010101010000;
-   const uint64_t M3 = 0x0100010100010100;
-   const uint64_t M4 = 0x0101000100000101;
-   const uint64_t M5 = 0x0001010100010101;
-   const uint64_t M6 = 0x0100010101000101;
-   const uint64_t M7 = 0x0101000101010001;
-   const uint64_t M8 = 0x0101010001010100;
+/*
+* See Section 4.6 of "Specification of Camellia - A 128-bit Block Cipher"
+* (Aoki, Ichikawa, Kanda, Matsui, Moriai, Nakajima, Tokita)
+* https://www.cryptrec.go.jp/en/cryptrec_03_spec_cypherlist_files/PDF/06_01espec.pdf
+*/
+inline uint64_t P(uint8_t z1, uint8_t z2, uint8_t z3, uint8_t z4, uint8_t z5, uint8_t z6, uint8_t z7, uint8_t z8) {
+   constexpr uint64_t M1 = 0x0101010001000001;
+   constexpr uint64_t M2 = 0x0001010101010000;
+   constexpr uint64_t M3 = 0x0100010100010100;
+   constexpr uint64_t M4 = 0x0101000100000101;
+   constexpr uint64_t M5 = 0x0001010100010101;
+   constexpr uint64_t M6 = 0x0100010101000101;
+   constexpr uint64_t M7 = 0x0101000101010001;
+   constexpr uint64_t M8 = 0x0101010001010100;
 
-   const uint64_t x = v ^ K;
-
-   const uint64_t Z1 = M1 * SBOX1[get_byte<0>(x)];
-   const uint64_t Z2 = M2 * SBOX2[get_byte<1>(x)];
-   const uint64_t Z3 = M3 * SBOX3[get_byte<2>(x)];
-   const uint64_t Z4 = M4 * SBOX4[get_byte<3>(x)];
-   const uint64_t Z5 = M5 * SBOX2[get_byte<4>(x)];
-   const uint64_t Z6 = M6 * SBOX3[get_byte<5>(x)];
-   const uint64_t Z7 = M7 * SBOX4[get_byte<6>(x)];
-   const uint64_t Z8 = M8 * SBOX1[get_byte<7>(x)];
+   const uint64_t Z1 = M1 * z1;
+   const uint64_t Z2 = M2 * z2;
+   const uint64_t Z3 = M3 * z3;
+   const uint64_t Z4 = M4 * z4;
+   const uint64_t Z5 = M5 * z5;
+   const uint64_t Z6 = M6 * z6;
+   const uint64_t Z7 = M7 * z7;
+   const uint64_t Z8 = M8 * z8;
 
    return Z1 ^ Z2 ^ Z3 ^ Z4 ^ Z5 ^ Z6 ^ Z7 ^ Z8;
+}
+
+uint64_t F(uint64_t v, uint64_t K) {
+   const uint64_t x = v ^ K;
+
+   return P(SBOX1[get_byte<0>(x)],
+            SBOX2[get_byte<1>(x)],
+            SBOX3[get_byte<2>(x)],
+            SBOX4[get_byte<3>(x)],
+            SBOX2[get_byte<4>(x)],
+            SBOX3[get_byte<5>(x)],
+            SBOX4[get_byte<6>(x)],
+            SBOX1[get_byte<7>(x)]);
+}
+
+uint64_t F_1tab(uint64_t v, uint64_t K) {
+   const uint64_t x = v ^ K;
+
+   return P(SBOX1[get_byte<0>(x)],
+            rotl<1>(SBOX1[get_byte<1>(x)]),
+            rotl<7>(SBOX1[get_byte<2>(x)]),
+            SBOX1[rotl<1>(get_byte<3>(x))],
+            rotl<1>(SBOX1[get_byte<4>(x)]),
+            rotl<7>(SBOX1[get_byte<5>(x)]),
+            SBOX1[rotl<1>(get_byte<6>(x))],
+            SBOX1[get_byte<7>(x)]);
 }
 
 inline uint64_t FL(uint64_t v, uint64_t K) {
@@ -137,12 +170,12 @@ inline uint64_t FLINV(uint64_t v, uint64_t K) {
 /*
 * Camellia Encryption
 */
-void encrypt(const uint8_t in[], uint8_t out[], size_t blocks, const secure_vector<uint64_t>& SK, const size_t rounds) {
+void encrypt(const uint8_t in[], uint8_t out[], size_t blocks, const secure_vector<uint64_t>& SK, size_t rounds) {
    prefetch_arrays(SBOX1, SBOX2, SBOX3, SBOX4);
 
    for(size_t i = 0; i < blocks; ++i) {
-      uint64_t D1, D2;
-      load_be(in + 16 * i, D1, D2);
+      uint64_t D1 = load_be<uint64_t>(in, 2 * i + 0);
+      uint64_t D2 = load_be<uint64_t>(in, 2 * i + 1);
 
       const uint64_t* K = SK.data();
 
@@ -175,12 +208,12 @@ void encrypt(const uint8_t in[], uint8_t out[], size_t blocks, const secure_vect
 /*
 * Camellia Decryption
 */
-void decrypt(const uint8_t in[], uint8_t out[], size_t blocks, const secure_vector<uint64_t>& SK, const size_t rounds) {
+void decrypt(const uint8_t in[], uint8_t out[], size_t blocks, const secure_vector<uint64_t>& SK, size_t rounds) {
    prefetch_arrays(SBOX1, SBOX2, SBOX3, SBOX4);
 
    for(size_t i = 0; i < blocks; ++i) {
-      uint64_t D1, D2;
-      load_be(in + 16 * i, D1, D2);
+      uint64_t D1 = load_be<uint64_t>(in, 2 * i + 0);
+      uint64_t D2 = load_be<uint64_t>(in, 2 * i + 1);
 
       const uint64_t* K = &SK[SK.size() - 1];
 
@@ -228,12 +261,14 @@ inline uint64_t left_rot_lo(uint64_t h, uint64_t l, size_t shift) {
 * Camellia Key Schedule
 */
 void key_schedule(secure_vector<uint64_t>& SK, std::span<const uint8_t> key) {
-   const uint64_t Sigma1 = 0xA09E667F3BCC908B;
-   const uint64_t Sigma2 = 0xB67AE8584CAA73B2;
-   const uint64_t Sigma3 = 0xC6EF372FE94F82BE;
-   const uint64_t Sigma4 = 0x54FF53A5F1D36F1C;
-   const uint64_t Sigma5 = 0x10E527FADE682D1D;
-   const uint64_t Sigma6 = 0xB05688C2B3E6C1FD;
+   prefetch_arrays(SBOX1);
+
+   constexpr uint64_t Sigma1 = 0xA09E667F3BCC908B;
+   constexpr uint64_t Sigma2 = 0xB67AE8584CAA73B2;
+   constexpr uint64_t Sigma3 = 0xC6EF372FE94F82BE;
+   constexpr uint64_t Sigma4 = 0x54FF53A5F1D36F1C;
+   constexpr uint64_t Sigma5 = 0x10E527FADE682D1D;
+   constexpr uint64_t Sigma6 = 0xB05688C2B3E6C1FD;
 
    const uint64_t KL_H = load_be<uint64_t>(key.data(), 0);
    const uint64_t KL_L = load_be<uint64_t>(key.data(), 1);
@@ -252,20 +287,20 @@ void key_schedule(secure_vector<uint64_t>& SK, std::span<const uint8_t> key) {
 
    uint64_t D1 = KL_H ^ KR_H;
    uint64_t D2 = KL_L ^ KR_L;
-   D2 ^= F(D1, Sigma1);
-   D1 ^= F(D2, Sigma2);
+   D2 ^= F_1tab(D1, Sigma1);
+   D1 ^= F_1tab(D2, Sigma2);
    D1 ^= KL_H;
    D2 ^= KL_L;
-   D2 ^= F(D1, Sigma3);
-   D1 ^= F(D2, Sigma4);
+   D2 ^= F_1tab(D1, Sigma3);
+   D1 ^= F_1tab(D2, Sigma4);
 
    const uint64_t KA_H = D1;
    const uint64_t KA_L = D2;
 
    D1 = KA_H ^ KR_H;
    D2 = KA_L ^ KR_L;
-   D2 ^= F(D1, Sigma5);
-   D1 ^= F(D2, Sigma6);
+   D2 ^= F_1tab(D1, Sigma5);
+   D1 ^= F_1tab(D2, Sigma6);
 
    const uint64_t KB_H = D1;
    const uint64_t KB_L = D2;
@@ -345,37 +380,195 @@ void key_schedule(secure_vector<uint64_t>& SK, std::span<const uint8_t> key) {
    }
 }
 
+std::string provider() {
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return *feat;
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(auto feat = CPUID::check(CPUID::Feature::GFNI)) {
+      return *feat;
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(auto feat = CPUID::check(CPUID::Feature::HW_AES)) {
+      return *feat;
+   }
+#endif
+
+   return "base";
+}
+
+size_t parallelism() {
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return 16;
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return 4;
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return 2;
+   }
+#endif
+
+   return 1;
+}
+
 }  // namespace Camellia_F
 
 }  // namespace
 
 void Camellia_128::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::encrypt(in, out, blocks, m_SK, 9);
 }
 
 void Camellia_192::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::encrypt(in, out, blocks, m_SK, 12);
 }
 
 void Camellia_256::encrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_encrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::encrypt(in, out, blocks, m_SK, 12);
 }
 
 void Camellia_128::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::decrypt(in, out, blocks, m_SK, 9);
 }
 
 void Camellia_192::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::decrypt(in, out, blocks, m_SK, 12);
 }
 
 void Camellia_256::decrypt_n(const uint8_t in[], uint8_t out[], size_t blocks) const {
    assert_key_material_set();
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return avx512_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_AVX2_GFNI)
+   if(CPUID::has(CPUID::Feature::GFNI)) {
+      return avx2_gfni_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
+#if defined(BOTAN_HAS_CAMELLIA_HWAES)
+   if(CPUID::has(CPUID::Feature::HW_AES)) {
+      return hwaes_decrypt(in, out, blocks, m_SK);
+   }
+#endif
+
    Camellia_F::decrypt(in, out, blocks, m_SK, 12);
 }
 
@@ -413,6 +606,30 @@ void Camellia_192::clear() {
 
 void Camellia_256::clear() {
    zap(m_SK);
+}
+
+std::string Camellia_128::provider() const {
+   return Camellia_F::provider();
+}
+
+std::string Camellia_192::provider() const {
+   return Camellia_F::provider();
+}
+
+std::string Camellia_256::provider() const {
+   return Camellia_F::provider();
+}
+
+size_t Camellia_128::parallelism() const {
+   return Camellia_F::parallelism();
+}
+
+size_t Camellia_192::parallelism() const {
+   return Camellia_F::parallelism();
+}
+
+size_t Camellia_256::parallelism() const {
+   return Camellia_F::parallelism();
 }
 
 }  // namespace Botan

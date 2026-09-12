@@ -9,33 +9,21 @@
 #ifndef BOTAN_TLS_RECORD_LAYER_13_H_
 #define BOTAN_TLS_RECORD_LAYER_13_H_
 
-#include <optional>
+#include <botan/secmem.h>
+#include <botan/tls_magic.h>
+#include <botan/internal/tls_record_13.h>
+#include <deque>
+#include <memory>
 #include <span>
 #include <variant>
 #include <vector>
 
-#include <botan/secmem.h>
-#include <botan/tls_magic.h>
-#include <botan/internal/tls_channel_impl.h>
-
 namespace Botan::TLS {
-
-/**
- * Resembles the `TLSPlaintext` structure in RFC 8446 5.1
- * minus the record protocol specifics and ossified bytes.
- */
-struct Record {
-      Record_Type type;
-      secure_vector<uint8_t> fragment;
-      std::optional<uint64_t> seq_no;  // unprotected records have no sequence number
-
-      Record(Record_Type record_type, secure_vector<uint8_t> frgmnt) :
-            type(record_type), fragment(std::move(frgmnt)), seq_no(std::nullopt) {}
-};
 
 using BytesNeeded = size_t;
 
 class Cipher_State;
+class Policy;
 
 /**
  * Implementation of the TLS 1.3 record protocol layer
@@ -45,7 +33,13 @@ class Cipher_State;
  */
 class BOTAN_TEST_API Record_Layer {
    public:
-      Record_Layer(Connection_Side side);
+      Record_Layer(Connection_Side side, std::shared_ptr<const Policy> policy);
+
+      ~Record_Layer() = default;
+      Record_Layer(const Record_Layer&) = delete;
+      Record_Layer& operator=(const Record_Layer&) = delete;
+      Record_Layer(Record_Layer&&) noexcept = default;
+      Record_Layer& operator=(Record_Layer&&) noexcept = default;
 
       template <typename ResT>
       using ReadResult = std::variant<BytesNeeded, ResT>;
@@ -69,7 +63,7 @@ class BOTAN_TEST_API Record_Layer {
        *                      cipher_state should be ready to decrypt data. Pass nullptr to
        *                      process plaintext data.
        */
-      ReadResult<Record> next_record(Cipher_State* cipher_state = nullptr);
+      ReadResult<Record_Content> next_record(Cipher_State* cipher_state = nullptr);
 
       std::vector<uint8_t> prepare_records(Record_Type type,
                                            std::span<const uint8_t> data,
@@ -79,7 +73,7 @@ class BOTAN_TEST_API Record_Layer {
        * Clears any data currently stored in the read buffer. This is typically
        * used for memory cleanup when the peer sent a CloseNotify alert.
        */
-      void clear_read_buffer() { zap(m_read_buffer); }
+      void clear_read_buffer() { m_incoming_records.clear(); }
 
       /**
        * Set the record size limits as negotiated by the "record_size_limit"
@@ -101,8 +95,12 @@ class BOTAN_TEST_API Record_Layer {
       void disable_receiving_compat_mode() { m_receiving_compat_mode = false; }
 
    private:
-      std::vector<uint8_t> m_read_buffer;
+      std::deque<Record_TLS> m_incoming_records;
+
       Connection_Side m_side;
+
+      // Queried for Record Padding as defined in RFC 9846 5.4
+      std::shared_ptr<const Policy> m_policy;
 
       // Those are either the limits set by the TLS 1.3 specification (RFC 8446),
       // or the ones negotiated via the "record_size_limit" extension (RFC 8449).

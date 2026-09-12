@@ -54,7 +54,7 @@ class BOTAN_PUBLIC_API(2, 0) Ciphersuite final {
       * e.g "RSA_WITH_RC4_128_SHA" or "ECDHE_RSA_WITH_AES_128_GCM_SHA256"
       * @return RFC ciphersuite string identifier
       */
-      std::string to_string() const { return (!m_iana_id) ? "unknown cipher suite" : m_iana_id; }
+      std::string to_string() const { return (m_iana_id == nullptr) ? "unknown cipher suite" : m_iana_id; }
 
       /**
       * @return ciphersuite number
@@ -77,11 +77,30 @@ class BOTAN_PUBLIC_API(2, 0) Ciphersuite final {
       bool cbc_ciphersuite() const;
 
       /**
+       * @return true if this suite uses a NULL cipher
+       */
+      bool null_ciphersuite() const;
+
+      /**
        * @return true if this suite uses a AEAD cipher
        */
       bool aead_ciphersuite() const;
 
+      /**
+       * @return true if this suite uses a short (less than 128 bit)
+       * authentication tag, for instance one of the _CCM_8 suites.
+       */
+      bool uses_short_authentication_tag() const;
+
       bool signature_used() const;
+
+      /**
+      * @return true if this ciphersuite requires the server to present
+      * a certificate. True for both signature-authenticated suites and
+      * static RSA key exchange (which uses the server's RSA cert for
+      * key transport).
+      */
+      bool is_certificate_required() const;
 
       /**
       * @return key exchange algorithm used by this ciphersuite
@@ -134,7 +153,7 @@ class BOTAN_PUBLIC_API(2, 0) Ciphersuite final {
       bool operator<(const uint16_t c) const { return ciphersuite_code() < c; }
 
    private:
-      bool is_usable() const;
+      static bool is_known_usable(uint16_t code);
 
       Ciphersuite(uint16_t ciphersuite_code,
                   const char* iana_id,
@@ -155,9 +174,8 @@ class BOTAN_PUBLIC_API(2, 0) Ciphersuite final {
             m_cipher_algo(cipher_algo),
             m_mac_algo(mac_algo),
             m_cipher_keylen(cipher_keylen),
-            m_mac_keylen(mac_keylen) {
-         m_usable = is_usable();
-      }
+            m_mac_keylen(mac_keylen),
+            m_usable(is_known_usable(ciphersuite_code)) {}
 
       uint16_t m_ciphersuite_code = 0;
 

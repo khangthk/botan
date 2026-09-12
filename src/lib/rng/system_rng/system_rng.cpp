@@ -8,6 +8,10 @@
 
 #include <botan/system_rng.h>
 
+#include <botan/assert.h>
+#include <botan/exceptn.h>
+#include <botan/internal/target_info.h>
+
 #if defined(BOTAN_TARGET_OS_HAS_WIN32)
    #define NOMINMAX 1
    #define _WINSOCKAPI_  // stop windows.h including winsock.h
@@ -16,6 +20,7 @@
 
 #if defined(BOTAN_TARGET_OS_HAS_RTLGENRANDOM)
    #include <botan/internal/dyn_load.h>
+   #include <limits>
 #elif defined(BOTAN_TARGET_OS_HAS_CRYPTO_NG)
    #include <bcrypt.h>
    #include <windows.h>
@@ -224,6 +229,10 @@ class System_RNG_Impl final : public RandomNumberGenerator {
                   continue;
                }
                throw System_Error("System_RNG getrandom failed", errno);
+            }
+
+            if(got == 0) {
+               throw System_Error("System_RNG getrandom unexpectedly returned 0");
             }
 
             buf += got;

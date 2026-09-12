@@ -1,6 +1,6 @@
 #include <botan/aead.h>
-#include <botan/assert.h>
 #include <botan/auto_rng.h>
+#include <botan/exceptn.h>
 #include <botan/hex.h>
 #include <botan/pwdhash.h>
 
@@ -27,7 +27,7 @@ Botan::secure_vector<uint8_t> derive_key_material(std::string_view password,
                                                   std::span<const uint8_t> salt,
                                                   size_t output_length) {
    // Here, we use statically defined password hash parameters. Alternatively
-   // you could use Botan::PasswordHashFamily::tune() to automatically select
+   // you could use Botan::PasswordHashFamily::tune_params() to automatically select
    // parameters based on your desired runtime and memory usage.
    //
    // Defining those parameters highly depends on your use case and the
@@ -38,7 +38,7 @@ Botan::secure_vector<uint8_t> derive_key_material(std::string_view password,
    constexpr size_t p = 2;           // parallelism
 
    auto pbkdf = Botan::PasswordHashFamily::create_or_throw(pbkdf_algo)->from_params(M, t, p);
-   BOTAN_ASSERT_NONNULL(pbkdf);
+   // create_or_throw always either throws or returns a non-null pointer
 
    Botan::secure_vector<uint8_t> key(output_length);
    pbkdf->hash(key, password, salt);
@@ -57,7 +57,12 @@ std::unique_ptr<Botan::AEAD_Mode> prepare_aead(std::string_view password,
    // Stretch the password into enough cryptographically strong key material
    // to initialize the AEAD with a key and nonce (aka. initialization vector).
    const auto keydata = derive_key_material(password, salt, key_length + nonce_length);
-   BOTAN_ASSERT_NOMSG(keydata.size() == key_length + nonce_length);
+
+   // The function always returns the requested length but lets check to make sure
+   if(keydata.size() != key_length + nonce_length) {
+      throw std::runtime_error("Unexpected output from derive_key_material");
+   }
+
    const auto key = std::span{keydata}.first(key_length);
    const auto nonce = std::span{keydata}.last(nonce_length);
 
@@ -79,7 +84,7 @@ std::unique_ptr<Botan::AEAD_Mode> prepare_aead(std::string_view password,
 std::vector<uint8_t> encrypt_by_password(std::string_view password,
                                          Botan::RandomNumberGenerator& rng,
                                          std::span<const uint8_t> plaintext) {
-   const auto kdf_salt = rng.random_vec(salt_length);
+   const auto kdf_salt = rng.random_array<salt_length>();
    auto aead = prepare_aead(password, kdf_salt, Botan::Cipher_Dir::Encryption);
 
    Botan::secure_vector<uint8_t> out(plaintext.begin(), plaintext.end());
@@ -99,7 +104,7 @@ Botan::secure_vector<uint8_t> decrypt_by_password(std::string_view password, std
       throw std::runtime_error("Encrypted data is too short");
    }
 
-   const auto kdf_salt = wrapped_data.first(salt_length);
+   const auto kdf_salt = wrapped_data.first<salt_length>();
    auto aead = prepare_aead(password, kdf_salt, Botan::Cipher_Dir::Decryption);
 
    const auto ciphertext = wrapped_data.subspan(salt_length);
@@ -122,17 +127,14 @@ int main() {
    // Note: For simplicity we omit the authentication of any associated data.
    //       If your use case would benefit from it, you should add it. Perhaps
    //       to both the password hashing and the AEAD.
-   const std::string password = "geheimnis";
-   const std::string message = "Attack at dawn!";
+   const std::string_view password = "geheimnis";
+   const std::string_view message = "Attack at dawn!";
 
    try {
       const auto ciphertext = encrypt_by_password(password, rng, as<Botan::secure_vector<uint8_t>>(message));
       std::cout << "Ciphertext: " << Botan::hex_encode(ciphertext) << "\n";
 
       const auto decrypted_message = decrypt_by_password(password, ciphertext);
-      BOTAN_ASSERT_NOMSG(message.size() == decrypted_message.size() &&
-                         std::equal(message.begin(), message.end(), decrypted_message.begin()));
-
       std::cout << "Decrypted message: " << as<std::string>(decrypted_message) << "\n";
    } catch(const std::exception& ex) {
       std::cerr << "Something went wrong: " << ex.what() << "\n";

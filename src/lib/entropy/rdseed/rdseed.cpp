@@ -8,15 +8,20 @@
 
 #include <botan/internal/rdseed.h>
 
+#include <botan/compiler.h>
+#include <botan/rng.h>
 #include <botan/internal/cpuid.h>
+#include <botan/internal/target_info.h>
 
-#include <immintrin.h>
+#if !defined(BOTAN_USE_GCC_INLINE_ASM)
+   #include <immintrin.h>
+#endif
 
 namespace Botan {
 
 namespace {
 
-BOTAN_FUNC_ISA("rdseed") bool read_rdseed(secure_vector<uint32_t>& seed) {
+BOTAN_FUNC_ISA("rdseed,sse2") bool read_rdseed(secure_vector<uint32_t>& seed) {
    /*
    * RDSEED is not guaranteed to generate an output within any specific number
    * of attempts. However in testing on a Skylake system, with all hyperthreads
@@ -32,11 +37,11 @@ BOTAN_FUNC_ISA("rdseed") bool read_rdseed(secure_vector<uint32_t>& seed) {
    const size_t RDSEED_RETRIES = 1024;
 
    for(size_t i = 0; i != RDSEED_RETRIES; ++i) {
-      uint32_t r = 0;
-      int cf = 0;
+      uint32_t r = 0;  // NOLINT(*-const-correctness) clang-tidy doesn't understand inline asm
+      int cf = 0;      // NOLINT(*-const-correctness) clang-tidy doesn't understand inline asm
 
 #if defined(BOTAN_USE_GCC_INLINE_ASM)
-      asm("rdseed %0; adcl $0,%1" : "=r"(r), "=r"(cf) : "0"(r), "1"(cf) : "cc");
+      asm volatile("rdseed %0; adcl $0,%1" : "=r"(r), "=r"(cf) : "0"(r), "1"(cf) : "cc");  // NOLINT(*-no-assembler)
 #else
       cf = _rdseed32_step(&r);
 #endif
@@ -47,7 +52,11 @@ BOTAN_FUNC_ISA("rdseed") bool read_rdseed(secure_vector<uint32_t>& seed) {
       }
 
       // Intel suggests pausing if RDSEED fails.
-      _mm_pause();
+#if defined(BOTAN_USE_GCC_INLINE_ASM)
+      asm volatile("pause");  // NOLINT(*-no-assembler)
+#else
+      _mm_pause();  // NOLINT(portability-simd-intrinsics)
+#endif
    }
 
    return false;  // failed to produce an output after many attempts
@@ -59,7 +68,7 @@ size_t Intel_Rdseed::poll(RandomNumberGenerator& rng) {
    const size_t RDSEED_BYTES = 1024;
    static_assert(RDSEED_BYTES % 4 == 0, "Bad RDSEED configuration");
 
-   if(CPUID::has_rdseed()) {
+   if(CPUID::has(CPUID::Feature::RDSEED)) {
       secure_vector<uint32_t> seed;
       seed.reserve(RDSEED_BYTES / 4);
 

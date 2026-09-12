@@ -18,11 +18,22 @@
 
 namespace Botan {
 
-class BOTAN_PUBLIC_API(3, 0) DilithiumMode {
+class BOTAN_PUBLIC_API(3, 0) DilithiumMode final {
    public:
-      enum Mode { Dilithium4x4 = 1, Dilithium4x4_AES, Dilithium6x5, Dilithium6x5_AES, Dilithium8x7, Dilithium8x7_AES };
+      enum Mode : uint8_t /* NOLINT(*-use-enum-class) */ {
+         Dilithium4x4 BOTAN_DEPRECATED("Dilithium R3 is deprecated - use ML-DSA") = 1,
+         Dilithium4x4_AES BOTAN_DEPRECATED("Dilithium AES mode is deprecated"),
+         Dilithium6x5 BOTAN_DEPRECATED("Dilithium R3 is deprecated - use ML-DSA"),
+         Dilithium6x5_AES BOTAN_DEPRECATED("Dilithium AES mode is deprecated"),
+         Dilithium8x7 BOTAN_DEPRECATED("Dilithium R3 is deprecated - use ML-DSA"),
+         Dilithium8x7_AES BOTAN_DEPRECATED("Dilithium AES mode is deprecated"),
+         ML_DSA_4x4,
+         ML_DSA_6x5,
+         ML_DSA_8x7,
+      };
 
    public:
+      // NOLINTNEXTLINE(*-explicit-conversions)
       DilithiumMode(Mode mode) : m_mode(mode) {}
 
       explicit DilithiumMode(const OID& oid);
@@ -31,11 +42,13 @@ class BOTAN_PUBLIC_API(3, 0) DilithiumMode {
       OID object_identifier() const;
       std::string to_string() const;
 
-      bool is_aes() const {
-         return m_mode == Dilithium4x4_AES || m_mode == Dilithium6x5_AES || m_mode == Dilithium8x7_AES;
-      }
+      BOTAN_DEPRECATED("Dilithium AES mode is deprecated") bool is_aes() const;
+      BOTAN_DEPRECATED("Dilithium AES mode is deprecated") bool is_modern() const;
+      bool is_ml_dsa() const;
 
-      bool is_modern() const { return !is_aes(); }
+      bool is_dilithium_round3() const { return !is_ml_dsa(); }
+
+      bool is_available() const;
 
       Mode mode() const { return m_mode; }
 
@@ -54,10 +67,6 @@ class Dilithium_PrivateKeyInternal;
  */
 class BOTAN_PUBLIC_API(3, 0) Dilithium_PublicKey : public virtual Public_Key {
    public:
-      Dilithium_PublicKey& operator=(const Dilithium_PublicKey& other) = default;
-
-      ~Dilithium_PublicKey() override = default;
-
       std::string algo_name() const override;
 
       AlgorithmIdentifier algorithm_identifier() const override;
@@ -72,7 +81,7 @@ class BOTAN_PUBLIC_API(3, 0) Dilithium_PublicKey : public virtual Public_Key {
 
       std::vector<uint8_t> public_key_bits() const override;
 
-      bool check_key(RandomNumberGenerator&, bool) const override;
+      bool check_key(RandomNumberGenerator& rng, bool strong) const override;
 
       bool supports_operation(PublicKeyOperation op) const override { return (op == PublicKeyOperation::Signature); }
 
@@ -82,8 +91,7 @@ class BOTAN_PUBLIC_API(3, 0) Dilithium_PublicKey : public virtual Public_Key {
 
       Dilithium_PublicKey(std::span<const uint8_t> pk, DilithiumMode mode);
 
-      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                   std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const override;
 
       std::unique_ptr<PK_Ops::Verification> create_x509_verification_op(const AlgorithmIdentifier& signature_algorithm,
                                                                         std::string_view provider) const override;
@@ -94,7 +102,7 @@ class BOTAN_PUBLIC_API(3, 0) Dilithium_PublicKey : public virtual Public_Key {
       friend class Dilithium_Verification_Operation;
       friend class Dilithium_Signature_Operation;
 
-      std::shared_ptr<Dilithium_PublicKeyInternal> m_public;
+      std::shared_ptr<const Dilithium_PublicKeyInternal> m_public;  // NOLINT(*non-private-member-variable*)
 };
 
 BOTAN_DIAGNOSTIC_PUSH
@@ -104,6 +112,8 @@ class BOTAN_PUBLIC_API(3, 0) Dilithium_PrivateKey final : public virtual Dilithi
                                                           public virtual Botan::Private_Key {
    public:
       std::unique_ptr<Public_Key> public_key() const override;
+
+      bool check_key(RandomNumberGenerator& rng, bool strong) const override;
 
       /**
        * Generates a new key pair
@@ -124,19 +134,13 @@ class BOTAN_PUBLIC_API(3, 0) Dilithium_PrivateKey final : public virtual Dilithi
 
       secure_vector<uint8_t> raw_private_key_bits() const override;
 
-      /**
-       * Create a signature operation that produces a Dilithium signature either
-       * with "Randomized" or "Deterministic" rhoprime. Pass either of those
-       * strings as @p params. Default (i.e. empty @p params is "Randomized").
-       */
-      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator&,
-                                                             std::string_view params,
-                                                             std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                              const PK_Signature_Options& options) const override;
 
    private:
       friend class Dilithium_Signature_Operation;
 
-      std::shared_ptr<Dilithium_PrivateKeyInternal> m_private;
+      std::shared_ptr<const Dilithium_PrivateKeyInternal> m_private;
 };
 
 BOTAN_DIAGNOSTIC_POP

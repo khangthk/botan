@@ -20,14 +20,14 @@ optimization_flags "/O2 /Oi /Zc:throwingNew"
 size_optimization_flags "/O1 /Os"
 
 # for debug info in the object file (required if using sccache):
-#debug_info_flags "/Z7"
+debug_info_flags "/Z7"
 
 # for using a PDB file:
-debug_info_flags "/Zi /FS"
+#debug_info_flags "/Zi /FS"
 
 preproc_flags "/nologo /EP /Zc:preprocessor"
 
-lang_flags "/Zc:preprocessor /std:c++20 /EHs /GR"
+lang_flags "/Zc:preprocessor /Zc:inline /std:c++20 /EHs /GR"
 
 # 4251: STL types used in DLL interface
 # 4275: ???
@@ -61,11 +61,17 @@ ssse3  -> ""
 sse41 -> ""
 x86_64:avx2   -> "/arch:AVX"
 x86_64:avx512 -> "/arch:AVX512"
+x86_64:avx512_clmul -> "/arch:AVX512"
 aesni  -> ""
 clmul  -> ""
 rdrand -> ""
 rdseed -> ""
 sha    -> ""
+bmi2   -> ""
+gfni   -> ""
+
+arm64:armv8crypto -> ""
+arm64:neon        -> ""
 </isa_flags>
 
 <lib_flags>
@@ -89,3 +95,13 @@ all              -> "/bigobj"
 rt               -> "/MD"
 rt-debug         -> "/MDd"
 </mach_abi_linking>
+
+# Currently, MSVC is not known to perform the sorts of optimizations
+# which break constant time code. Using inline asm as a value barrier
+# is not an option in MSVC, leaving only use of volatile. Using
+# volatile is likely to introduce a significant performance
+# regression, and does not seem worth it at this time.
+
+<ct_value_barrier>
+default -> none
+</ct_value_barrier>

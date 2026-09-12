@@ -4,7 +4,7 @@
 # Strips the KAT harness produced by the Dilithium reference implementation down
 # to a less space consuming version. This script was used to generate
 # `src/tests/data/pubkey/dilithium_[...].vec` test data from the *.rsp files of
-# the reference implemenation.
+# the reference implementation.
 #
 # (C) 2022,2023 Jack Lloyd
 # (C) 2022 René Meusel, Rohde & Schwarz Cybersecurity
@@ -12,9 +12,10 @@
 # Botan is released under the Simplified BSD License (see license.txt)
 #
 
-import sys
-import hashlib
 import binascii
+import hashlib
+import sys
+
 
 class KatReader:
     def __init__(self, file):
@@ -41,7 +42,7 @@ class KatReader:
         while True:
             key, val = self.next_value()
 
-            if key == None:
+            if key is None:
                 return # eof
 
             if key not in ['count', 'seed', 'mlen', 'msg', 'pk', 'sk', 'smlen', 'sm']:
@@ -106,18 +107,20 @@ def main(args = None):
         args = sys.argv
 
     randomized = True
+    is_mldsa = True
 
     type = 'Randomized' if randomized else 'Deterministic'
+    name = 'ml-dsa' if is_mldsa else 'dilithium'
 
     for file in args[1:]:
         mode = map_mode(open(file).readline().strip()[2:])
 
         reader = KatReader(open(file))
 
-        output = open('src/tests/data/pubkey/dilithium_%s_%s.vec' % (mode, type), 'w')
+        output = open('src/tests/data/pubkey/%s_%s_%s.vec' % (name, mode, type), 'w')
 
-        print("# See src/scripts/dilithium_kat_compress.py\n", file=output)
-        print("[Dilithium_%s]" % (mode), file=output)
+        print("# See src/scripts/dev_tools/gen_dilithium_kat.py\n", file=output)
+        print("[%s_%s]" % (name.upper() if is_mldsa else name.capitalize(), mode), file=output)
 
         for kat in reader.read_kats():
             kat = compress_kat(kat)

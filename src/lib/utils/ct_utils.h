@@ -14,10 +14,13 @@
 #ifndef BOTAN_CT_UTILS_H_
 #define BOTAN_CT_UTILS_H_
 
-#include <botan/concepts.h>
+#include <botan/assert.h>
+#include <botan/range_concepts.h>
 #include <botan/secmem.h>
 #include <botan/internal/bit_ops.h>
-#include <botan/internal/stl_util.h>
+#include <botan/internal/scoped_cleanup.h>
+#include <botan/internal/target_info.h>
+#include <botan/internal/value_barrier.h>
 
 #include <optional>
 #include <span>
@@ -92,16 +95,21 @@ inline bool poison_has_effect() {
 /// @name Constant Time Check Annotation Convenience overloads
 /// @{
 
+template <typename T>
+concept custom_poisonable = requires(const T& v) { v._const_time_poison(); };
+template <typename T>
+concept custom_unpoisonable = requires(const T& v) { v._const_time_unpoison(); };
+
 /**
  * Poison a single integral object
  */
 template <std::integral T>
-constexpr void poison(T& p) {
+constexpr void poison(const T& p) {
    poison(&p, 1);
 }
 
 template <std::integral T>
-constexpr void unpoison(T& p) {
+constexpr void unpoison(const T& p) {
    unpoison(&p, 1);
 }
 
@@ -109,16 +117,16 @@ constexpr void unpoison(T& p) {
  * Poison a contiguous buffer of trivial objects (e.g. integers and such)
  */
 template <ranges::spanable_range R>
-   requires std::is_trivially_copyable_v<std::ranges::range_value_t<R>>
-constexpr void poison(R&& r) {
-   std::span s{r};
+   requires std::is_trivially_copyable_v<std::ranges::range_value_t<R>> && (!custom_poisonable<R>)
+constexpr void poison(const R& r) {
+   const std::span s{r};
    poison(s.data(), s.size());
 }
 
 template <ranges::spanable_range R>
-   requires std::is_trivially_copyable_v<std::ranges::range_value_t<R>>
-constexpr void unpoison(R&& r) {
-   std::span s{r};
+   requires std::is_trivially_copyable_v<std::ranges::range_value_t<R>> && (!custom_unpoisonable<R>)
+constexpr void unpoison(const R& r) {
+   const std::span s{r};
    unpoison(s.data(), s.size());
 }
 
@@ -126,16 +134,33 @@ constexpr void unpoison(R&& r) {
  * Poison a class type that provides a public `_const_time_poison()` method
  * For instance: BigInt, CT::Mask<>, FrodoMatrix, ...
  */
-template <typename T>
-   requires requires(const T& x) { x._const_time_poison(); }
+template <custom_poisonable T>
 constexpr void poison(const T& x) {
    x._const_time_poison();
 }
 
-template <typename T>
-   requires requires(const T& x) { x._const_time_unpoison(); }
+template <custom_unpoisonable T>
 constexpr void unpoison(const T& x) {
    x._const_time_unpoison();
+}
+
+/**
+ * Poison an optional object if it has a value.
+ */
+template <typename T>
+   requires requires(const T& v) { ::Botan::CT::poison(v); }
+constexpr void poison(const std::optional<T>& x) {
+   if(x.has_value()) {
+      poison(*x);
+   }
+}
+
+template <typename T>
+   requires requires(const T& v) { ::Botan::CT::unpoison(v); }
+constexpr void unpoison(const std::optional<T>& x) {
+   if(x.has_value()) {
+      unpoison(*x);
+   }
 }
 
 /// @}
@@ -153,7 +178,7 @@ concept unpoisonable = requires(const T& v) { ::Botan::CT::unpoison(v); };
  */
 template <std::ranges::range R>
    requires poisonable<std::ranges::range_value_t<R>>
-constexpr void poison_range(R&& r) {
+constexpr void poison_range(const R& r) {
    for(const auto& v : r) {
       poison(v);
    }
@@ -161,7 +186,7 @@ constexpr void poison_range(R&& r) {
 
 template <std::ranges::range R>
    requires unpoisonable<std::ranges::range_value_t<R>>
-constexpr void unpoison_range(R&& r) {
+constexpr void unpoison_range(const R& r) {
    for(const auto& v : r) {
       unpoison(v);
    }
@@ -173,13 +198,13 @@ constexpr void unpoison_range(R&& r) {
  */
 template <poisonable... Ts>
    requires(sizeof...(Ts) > 0)
-constexpr void poison_all(Ts&&... ts) {
+constexpr void poison_all(const Ts&... ts) {
    (poison(ts), ...);
 }
 
 template <unpoisonable... Ts>
    requires(sizeof...(Ts) > 0)
-constexpr void unpoison_all(Ts&&... ts) {
+constexpr void unpoison_all(const Ts&... ts) {
    (unpoison(ts), ...);
 }
 
@@ -225,38 +250,6 @@ template <unpoisonable T>
 /// @}
 
 /**
-* This function returns its argument, but (if called in a non-constexpr context)
-* attempts to prevent the compiler from reasoning about the value or the possible
-* range of values. Such optimizations have a way of breaking constant time code.
-*/
-template <typename T>
-constexpr inline T value_barrier(T x) {
-   if(!std::is_constant_evaluated()) {
-      /*
-      * For compilers without inline asm, is there something else we can do?
-      *
-      * For instance we could potentially launder the value through a
-      * `volatile T` or `volatile T*`. This would require some experimentation.
-      *
-      * GCC has an attribute noipa which disables interprocedural analysis, which
-      * might be useful here. However Clang does not currently support this attribute.
-      *
-      * We may want a "stronger" statement such as
-      *     asm volatile("" : "+r,m"(x) : : "memory);
-      * (see https://theunixzoo.co.uk/blog/2021-10-14-preventing-optimisations.html)
-      * however the current approach seems sufficient with current compilers,
-      * and is minimally damaging with regards to degrading code generation.
-      */
-#if defined(BOTAN_USE_GCC_INLINE_ASM) && !defined(BOTAN_HAS_SANITIZER_MEMORY)
-      asm("" : "+r"(x) : /* no input */);
-#endif
-      return x;
-   } else {
-      return x;
-   }
-}
-
-/**
 * A Choice is used for constant-time conditionals.
 *
 * Internally it always is either |0| (all 0 bits) or |1| (all 1 bits)
@@ -265,26 +258,51 @@ constexpr inline T value_barrier(T x) {
 */
 class Choice final {
    public:
+      using underlying_type = word;
+
       /**
       * If v == 0 return an unset (false) Choice, otherwise a set Choice
       */
       template <typename T>
          requires std::unsigned_integral<T> && (!std::same_as<bool, T>)
       constexpr static Choice from_int(T v) {
-         // Mask of T that is either |0| or |1|
-         const T v_is_0 = ct_is_zero<T>(value_barrier<T>(v));
+         if constexpr(sizeof(T) <= sizeof(underlying_type)) {
+            return !Choice(ct_is_zero<underlying_type>(v));
+         } else {
+            // Mask of T that is either |0| or |1|
+            const T v_is_0 = ct_is_zero<T>(value_barrier<T>(v));
 
-         // We want the mask to be set if v != 0 so we must check that
-         // v_is_0 is itself zero.
-         //
-         // Also sizeof(T) may not equal sizeof(uint32_t) so we must
-         // use ct_is_zero<uint32_t>. It's ok to either truncate or
-         // zero extend v_is_0 to 32 bits since we know it is |0| or |1|
-         // so even just the low bit is sufficient.
-         return Choice(ct_is_zero<uint32_t>(static_cast<uint32_t>(v_is_0)));
+            // We want the mask to be set if v != 0 so we must check that
+            // v_is_0 is itself zero.
+            //
+            // Also sizeof(T) may not equal sizeof(underlying_type) so we must
+            // use ct_is_zero<underlying_type>. It's ok to either truncate or
+            // zero extend v_is_0 to 32 bits since we know it is |0| or |1|
+            // so even just the low bit is sufficient.
+            return Choice(ct_is_zero<underlying_type>(static_cast<underlying_type>(v_is_0)));
+         }
       }
 
-      constexpr static Choice yes() { return Choice(static_cast<uint32_t>(-1)); }
+      /**
+      * Return a bitmask |1| if the choice is set, or |0| otherwise
+      */
+      template <typename T>
+         requires std::unsigned_integral<T> && (!std::same_as<bool, T>)
+      constexpr T into_bitmask() const {
+         if constexpr(sizeof(T) <= sizeof(underlying_type)) {
+            // The inner mask is already |0| or |1| so just truncate
+            return static_cast<T>(value());
+         } else {
+            return ~ct_is_zero<T>(value());
+         }
+      }
+
+      /**
+      * Create a Choice directly from a mask value - this assumes v is either |0| or |1|
+      */
+      constexpr static Choice from_mask(underlying_type v) { return Choice(v); }
+
+      constexpr static Choice yes() { return !no(); }
 
       constexpr static Choice no() { return Choice(0); }
 
@@ -311,17 +329,18 @@ class Choice final {
       constexpr bool as_bool() const { return m_value != 0; }
 
       /// Return the masked value
-      constexpr uint32_t value() const { return value_barrier(m_value); }
+      constexpr underlying_type value() const { return value_barrier(m_value); }
 
       constexpr Choice(const Choice& other) = default;
       constexpr Choice(Choice&& other) = default;
       constexpr Choice& operator=(const Choice& other) noexcept = default;
       constexpr Choice& operator=(Choice&& other) noexcept = default;
+      constexpr ~Choice() = default;
 
    private:
-      constexpr explicit Choice(uint32_t v) : m_value(v) {}
+      constexpr explicit Choice(underlying_type v) : m_value(CT::value_barrier<underlying_type>(v)) {}
 
-      uint32_t m_value;
+      underlying_type m_value;
 };
 
 /**
@@ -340,17 +359,20 @@ concept ct_conditional_assignable = requires(T lhs, const T& rhs, Choice c) { lh
 template <typename T>
 class Mask final {
    public:
-      static_assert(std::is_unsigned<T>::value && !std::is_same<bool, T>::value,
+      static_assert(std::is_unsigned_v<T> && !std::is_same_v<bool, T>,
                     "Only unsigned integer types are supported by CT::Mask");
 
       Mask(const Mask<T>& other) = default;
+      Mask(Mask<T>&& other) = default;
       Mask<T>& operator=(const Mask<T>& other) = default;
+      Mask<T>& operator=(Mask<T>&& other) = default;
+      ~Mask() = default;
 
       /**
       * Derive a Mask from a Mask of a larger type
       */
       template <typename U>
-      constexpr Mask(Mask<U> o) : m_mask(static_cast<T>(o.value())) {
+      constexpr explicit Mask(Mask<U> o) : m_mask(static_cast<T>(o.value())) {
          static_assert(sizeof(U) > sizeof(T), "sizes ok");
       }
 
@@ -370,10 +392,15 @@ class Mask final {
       static constexpr Mask<T> expand(T v) { return ~Mask<T>::is_zero(value_barrier<T>(v)); }
 
       /**
+      * Return a Mask<T> which is set if v is true
+      */
+      static constexpr Mask<T> expand_bool(bool v) { return Mask<T>::expand(static_cast<T>(v)); }
+
+      /**
       * Return a Mask<T> which is set if choice is set
       */
       static constexpr Mask<T> from_choice(Choice c) {
-         if constexpr(sizeof(T) <= sizeof(uint32_t)) {
+         if constexpr(sizeof(T) <= sizeof(Choice::underlying_type)) {
             // Take advantage of the fact that Choice's mask is always
             // either |0| or |1|
             return Mask<T>(static_cast<T>(c.value()));
@@ -385,7 +412,7 @@ class Mask final {
       /**
       * Return a Mask<T> which is set if the top bit of v is set
       */
-      static constexpr Mask<T> expand_top_bit(T v) { return Mask<T>(Botan::expand_top_bit<T>(value_barrier<T>(v))); }
+      static constexpr Mask<T> expand_top_bit(T v) { return Mask<T>(ct_expand_top_bit<T>(v)); }
 
       /**
        * Return a Mask<T> which is set if the given @p bit of @p v is set.
@@ -488,17 +515,17 @@ class Mask final {
       /**
       * AND-combine two masks
       */
-      friend Mask<T> operator&(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() & y.value()); }
+      friend constexpr Mask<T> operator&(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() & y.value()); }
 
       /**
       * XOR-combine two masks
       */
-      friend Mask<T> operator^(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() ^ y.value()); }
+      friend constexpr Mask<T> operator^(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() ^ y.value()); }
 
       /**
       * OR-combine two masks
       */
-      friend Mask<T> operator|(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() | y.value()); }
+      friend constexpr Mask<T> operator|(Mask<T> x, Mask<T> y) { return Mask<T>(x.value() | y.value()); }
 
       /**
       * Negate this mask
@@ -552,6 +579,20 @@ class Mask final {
       }
 
       /**
+     * If this mask is set, swap x and y
+     */
+      template <typename U>
+      void conditional_swap(U& x, U& y) const
+         requires(sizeof(U) <= sizeof(T))
+      {
+         auto cnd = Mask<U>(*this);
+         U t0 = cnd.select(y, x);
+         U t1 = cnd.select(x, y);
+         x = t0;
+         y = t1;
+      }
+
+      /**
       * Return the value of the mask, unpoisoned
       */
       constexpr T unpoisoned_value() const {
@@ -575,7 +616,13 @@ class Mask final {
       /**
       * Return a Choice based on this mask
       */
-      constexpr CT::Choice as_choice() const { return CT::Choice::from_int(unpoisoned_value()); }
+      constexpr CT::Choice as_choice() const {
+         if constexpr(sizeof(T) >= sizeof(Choice::underlying_type)) {
+            return CT::Choice::from_mask(static_cast<Choice::underlying_type>(unpoisoned_value()));
+         } else {
+            return CT::Choice::from_int(unpoisoned_value());
+         }
+      }
 
       /**
       * Return the underlying value of the mask
@@ -587,7 +634,7 @@ class Mask final {
       constexpr void _const_time_unpoison() const { CT::unpoison(m_mask); }
 
    private:
-      constexpr Mask(T m) : m_mask(m) {}
+      constexpr explicit Mask(T m) : m_mask(m) {}
 
       T m_mask;
 };
@@ -600,13 +647,13 @@ class Mask final {
 * to access the inner value if the Choice is unset.
 */
 template <typename T>
-class Option {
+class Option final {
    public:
       /// Construct an Option which contains the specified value, and is set or not
       constexpr Option(T v, Choice valid) : m_has_value(valid), m_value(std::move(v)) {}
 
       /// Construct a set option with the provided value
-      constexpr Option(T v) : Option(std::move(v), Choice::yes()) {}
+      constexpr explicit Option(T v) : Option(std::move(v), Choice::yes()) {}
 
       /// Construct an unset option with a default inner value
       constexpr Option()
@@ -676,40 +723,51 @@ class Option {
       T m_value;
 };
 
+/**
+* Conditional memory copy (constant time)
+*
+* If mask is set, then sets dest to if_set, otherwise sets dest to if_unset
+*/
 template <typename T>
-constexpr inline Mask<T> conditional_copy_mem(Mask<T> mask, T* to, const T* from0, const T* from1, size_t elems) {
-   mask.select_n(to, from0, from1, elems);
+constexpr inline Mask<T> conditional_copy_mem(Mask<T> mask, T* dest, const T* if_set, const T* if_unset, size_t elems) {
+   mask.select_n(dest, if_set, if_unset, elems);
    return mask;
 }
 
 template <typename T>
-constexpr inline Mask<T> conditional_copy_mem(T cnd, T* to, const T* from0, const T* from1, size_t elems) {
+constexpr inline Mask<T> conditional_copy_mem(T cnd, T* dest, const T* if_set, const T* if_unset, size_t elems) {
    const auto mask = CT::Mask<T>::expand(cnd);
-   return CT::conditional_copy_mem(mask, to, from0, from1, elems);
+   return CT::conditional_copy_mem(mask, dest, if_set, if_unset, elems);
 }
 
+/**
+* Conditional memory assignment (constant time)
+*
+* If mask is set overwrites dest with src
+*/
 template <typename T>
-constexpr inline Mask<T> conditional_assign_mem(T cnd, T* sink, const T* src, size_t elems) {
+constexpr inline Mask<T> conditional_assign_mem(T cnd, T* dest, const T* src, size_t elems) {
    const auto mask = CT::Mask<T>::expand(cnd);
-   mask.select_n(sink, src, sink, elems);
+   mask.select_n(dest, src, dest, elems);
    return mask;
 }
 
+/**
+* Conditional memory assignment (constant time)
+*
+* If mask is set overwrites dest with src
+*/
 template <typename T>
-constexpr inline Mask<T> conditional_assign_mem(Choice cnd, T* sink, const T* src, size_t elems) {
+constexpr inline Mask<T> conditional_assign_mem(Choice cnd, T* dest, const T* src, size_t elems) {
    const auto mask = CT::Mask<T>::from_choice(cnd);
-   mask.select_n(sink, src, sink, elems);
+   mask.select_n(dest, src, dest, elems);
    return mask;
 }
 
 template <typename T>
 constexpr inline void conditional_swap(bool cnd, T& x, T& y) {
    const auto swap = CT::Mask<T>::expand(cnd);
-
-   T t0 = swap.select(y, x);
-   T t1 = swap.select(x, y);
-   x = t0;
-   y = t1;
+   swap.conditional_swap(x, y);
 }
 
 template <typename T>
@@ -719,8 +777,8 @@ constexpr inline void conditional_swap_ptr(bool cnd, T& x, T& y) {
 
    conditional_swap<uintptr_t>(cnd, xp, yp);
 
-   x = reinterpret_cast<T>(xp);
-   y = reinterpret_cast<T>(yp);
+   x = reinterpret_cast<T>(xp);  // NOLINT(*-no-int-to-ptr)
+   y = reinterpret_cast<T>(yp);  // NOLINT(*-no-int-to-ptr)
 }
 
 template <typename T>
@@ -755,6 +813,21 @@ constexpr inline CT::Mask<T> is_equal(const T x[], const T y[], size_t len) {
 
       return CT::Mask<T>::is_zero(difference);
    }
+}
+
+/**
+* Compare two spans and return a Mask which is set iff they were identical.
+*
+* If the spans are of different length then the function returns early without
+* looking at either span
+*/
+template <typename T>
+constexpr inline CT::Mask<T> is_equal(std::span<const T> x, std::span<const T> y) {
+   if(x.size() != y.size()) {
+      return CT::Mask<T>::cleared();
+   }
+
+   return is_equal(x.data(), y.data(), x.size());
 }
 
 /**

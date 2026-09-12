@@ -10,7 +10,6 @@
 #define BOTAN_GMAC_H_
 
 #include <botan/mac.h>
-#include <botan/internal/alignment_buffer.h>
 
 namespace Botan {
 
@@ -27,6 +26,7 @@ class GMAC final : public MessageAuthenticationCode {
    public:
       void clear() override;
       std::string name() const override;
+      std::string provider() const override;
       size_t output_length() const override;
       std::unique_ptr<MessageAuthenticationCode> new_object() const override;
 
@@ -41,21 +41,22 @@ class GMAC final : public MessageAuthenticationCode {
       */
       explicit GMAC(std::unique_ptr<BlockCipher> cipher);
 
-      GMAC(const GMAC&) = delete;
-      GMAC& operator=(const GMAC&) = delete;
+      GMAC(const GMAC& other) = delete;
+      GMAC(GMAC&& other) = default;
+      GMAC& operator=(const GMAC& other) = delete;
+      GMAC& operator=(GMAC&& other) = default;
 
       ~GMAC() override;
 
    private:
-      void add_data(std::span<const uint8_t>) override;
-      void final_result(std::span<uint8_t>) override;
+      void add_data(std::span<const uint8_t> input) override;
+      void final_result(std::span<uint8_t> output) override;
       void start_msg(std::span<const uint8_t> nonce) override;
       void key_schedule(std::span<const uint8_t> key) override;
 
       static const size_t GCM_BS = 16;
       std::unique_ptr<BlockCipher> m_cipher;
       std::unique_ptr<GHASH> m_ghash;
-      AlignmentBuffer<uint8_t, GCM_BS> m_aad_buf;
       secure_vector<uint8_t> m_H;
       bool m_initialized;
 };

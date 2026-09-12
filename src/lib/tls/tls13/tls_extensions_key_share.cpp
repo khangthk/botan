@@ -8,47 +8,78 @@
 * Botan is released under the Simplified BSD License (see license.txt)
 */
 
-#include <botan/tls_extensions.h>
+#include <botan/tls_extensions_13.h>
 
-#include <botan/rng.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_exceptn.h>
 #include <botan/tls_policy.h>
-#include <botan/internal/ct_utils.h>
+#include <botan/internal/scoped_cleanup.h>
 #include <botan/internal/stl_util.h>
 #include <botan/internal/tls_reader.h>
-
-#include <functional>
-#include <iterator>
+#include <algorithm>
+#include <unordered_set>
 #include <utility>
-
-#if defined(BOTAN_HAS_X25519)
-   #include <botan/x25519.h>
-#endif
-
-#if defined(BOTAN_HAS_X448)
-   #include <botan/x448.h>
-#endif
-
-#include <botan/dh.h>
-#include <botan/dl_group.h>
-#include <botan/ecdh.h>
 
 namespace Botan::TLS {
 
 namespace {
 
+// RFC 8446 4.2.8.2: TLS 1.3 removes ec_point_formats negotiation and
+// requires that ECDH key shares are uncompressed.
+//
+// This logic happens to also work for the existing PQ shares since they
+// place the ECDH part of the key share first
+void check_ecdh_uncompressed_format(Group_Params group, std::span<const uint8_t> bytes) {
+   const auto hybrid_ecc = group.pqc_hybrid_ecc();
+   const bool has_ecdh =
+      group.is_ecdh_named_curve() || (hybrid_ecc.has_value() && Group_Params(hybrid_ecc.value()).is_ecdh_named_curve());
+   if(!has_ecdh) {
+      return;
+   }
+   if(bytes.empty() || bytes[0] != 0x04) {
+      throw TLS_Exception(Alert::IllegalParameter, "TLS 1.3 ECDH key share must use uncompressed point format");
+   }
+}
+
+// RFC 8446 4.2.8.1
+//    The opaque value contains the Diffie-Hellman public value (Y = g^X mod p)
+//    for the specified group (see [RFC7919] for group definitions) encoded as a
+//    big-endian integer and padded to the left with zeros to the size of p in bytes.
+void check_ffdhe_padding(Group_Params group, std::span<const uint8_t> bytes) {
+   const size_t p_bytes = [&]() -> size_t {
+      switch(group.code()) {
+         case Group_Params_Code::FFDHE_2048:
+            return 2048 / 8;
+         case Group_Params_Code::FFDHE_3072:
+            return 3072 / 8;
+         case Group_Params_Code::FFDHE_4096:
+            return 4096 / 8;
+         case Group_Params_Code::FFDHE_6144:
+            return 6144 / 8;
+         case Group_Params_Code::FFDHE_8192:
+            return 8192 / 8;
+         default:
+            return 0;
+      }
+   }();
+
+   if(p_bytes > 0 && bytes.size() != p_bytes) {
+      throw TLS_Exception(Alert::IllegalParameter, "TLS 1.3 FFDHE key share must be padded to the size of p");
+   }
+}
+
 class Key_Share_Entry {
    public:
-      Key_Share_Entry(TLS_Data_Reader& reader) {
+      explicit Key_Share_Entry(TLS_Data_Reader& reader) {
          // TODO check that the group actually exists before casting...
          m_group = static_cast<Named_Group>(reader.get_uint16_t());
-         m_key_exchange = reader.get_tls_length_value(2);
+         // RFC 8446 4.2.8: opaque key_exchange<1..2^16-1>
+         m_key_exchange = reader.get_range<uint8_t>(2, 1, 65535);
       }
 
       // Create an empty Key_Share_Entry with the selected group
       // but don't pre-generate a keypair, yet.
-      Key_Share_Entry(const TLS::Group_Params group) : m_group(group) {}
+      explicit Key_Share_Entry(const TLS::Group_Params group) : m_group(group) {}
 
       Key_Share_Entry(const TLS::Group_Params group, Callbacks& cb, RandomNumberGenerator& rng) :
             m_group(group), m_private_key(cb.tls_kem_generate_key(group, rng)) {
@@ -56,31 +87,7 @@ class Key_Share_Entry {
             throw TLS_Exception(Alert::InternalError, "Application did not provide a suitable ephemeral key pair");
          }
 
-         if(group.is_kem()) {
-            m_key_exchange = m_private_key->public_key_bits();
-         } else if(group.is_ecdh_named_curve()) {
-            auto pkey = dynamic_cast<ECDH_PublicKey*>(m_private_key.get());
-            if(!pkey) {
-               throw TLS_Exception(Alert::InternalError, "Application did not provide a ECDH_PublicKey");
-            }
-
-            // RFC 8446 Ch. 4.2.8.2
-            //
-            //   Note: Versions of TLS prior to 1.3 permitted point format
-            //   negotiation; TLS 1.3 removes this feature in favor of a single point
-            //   format for each curve.
-            //
-            // Hence, we neither need to take Policy::use_ecc_point_compression() nor
-            // ClientHello::prefers_compressed_ec_points() into account here.
-            m_key_exchange = pkey->public_value(EC_Point_Format::Uncompressed);
-         } else {
-            auto pkey = dynamic_cast<PK_Key_Agreement_Key*>(m_private_key.get());
-            if(!pkey) {
-               throw TLS_Exception(Alert::InternalError, "Application did not provide a key-agreement key");
-            }
-
-            m_key_exchange = pkey->public_value();
-         }
+         m_key_exchange = m_private_key->raw_public_key_bits();
       }
 
       bool empty() const { return (m_group == Group_Params::NONE) && m_key_exchange.empty(); }
@@ -103,6 +110,8 @@ class Key_Share_Entry {
                                          const Policy& policy,
                                          Callbacks& cb,
                                          RandomNumberGenerator& rng) {
+         check_ecdh_uncompressed_format(m_group, client_share.m_key_exchange);
+         check_ffdhe_padding(m_group, client_share.m_key_exchange);
          auto [encapsulated_shared_key, shared_key] =
             KEM_Encapsulation::destructure(cb.tls_kem_encapsulate(m_group, client_share.m_key_exchange, rng, policy));
          m_key_exchange = std::move(encapsulated_shared_key);
@@ -119,22 +128,12 @@ class Key_Share_Entry {
                                          const Policy& policy,
                                          Callbacks& cb,
                                          RandomNumberGenerator& rng) {
+         auto scope = scoped_cleanup([&] { m_private_key.reset(); });
          BOTAN_ASSERT_NOMSG(m_group == received.m_group);
          BOTAN_STATE_CHECK(m_private_key != nullptr);
-
-         auto shared_secret = cb.tls_kem_decapsulate(m_group, *m_private_key, received.m_key_exchange, rng, policy);
-         m_private_key.reset();
-
-         // RFC 8422 - 5.11.
-         //   With X25519 and X448, a receiving party MUST check whether the
-         //   computed premaster secret is the all-zero value and abort the
-         //   handshake if so, as described in Section 6 of [RFC7748].
-         if((m_group == Named_Group::X25519 || m_group == Named_Group::X448) &&
-            CT::all_zeros(shared_secret.data(), shared_secret.size()).as_bool()) {
-            throw TLS_Exception(Alert::DecryptError, "Bad X25519 or X448 key exchange");
-         }
-
-         return shared_secret;
+         check_ecdh_uncompressed_format(m_group, received.m_key_exchange);
+         check_ffdhe_padding(m_group, received.m_key_exchange);
+         return cb.tls_kem_decapsulate(m_group, *m_private_key, received.m_key_exchange, rng, policy);
       }
 
    private:
@@ -147,7 +146,7 @@ class Key_Share_ClientHello;
 
 class Key_Share_ServerHello {
    public:
-      Key_Share_ServerHello(TLS_Data_Reader& reader, uint16_t) : m_server_share(reader) {}
+      Key_Share_ServerHello(TLS_Data_Reader& reader, uint16_t /*len*/) : m_server_share(reader) {}
 
       Key_Share_ServerHello(Named_Group group,
                             const Key_Share_ClientHello& client_keyshare,
@@ -188,25 +187,22 @@ class Key_Share_ServerHello {
 class Key_Share_ClientHello {
    public:
       Key_Share_ClientHello(TLS_Data_Reader& reader, uint16_t /* extension_size */) {
-         // This construction is a crutch to make working with the incoming
-         // TLS_Data_Reader bearable. Currently, this reader spans the entire
-         // Client_Hello message. Hence, if offset or length fields are skewed
-         // or maliciously fabricated, it is possible to read further than the
-         // bounds of the current extension.
-         // Note that this aplies to many locations in the code base.
-         //
-         // TODO: Overhaul the TLS_Data_Reader to allow for cheap "sub-readers"
-         //       that enforce read bounds of sub-structures while parsing.
+         // The reader is per-extension (Extensions::deserialize binds it to
+         // exactly extension_size bytes). Enforce that the inner
+         // client_shares length matches what the outer extension has left,
+         // then let the entry loop consume everything; extn_reader's
+         // assert_done() at the deserialize call site catches any leftover.
          const auto client_key_share_length = reader.get_uint16_t();
-         const auto read_bytes_so_far_begin = reader.read_so_far();
-         auto remaining = [&] {
-            const auto read_so_far = reader.read_so_far() - read_bytes_so_far_begin;
-            BOTAN_STATE_CHECK(read_so_far <= client_key_share_length);
-            return client_key_share_length - read_so_far;
-         };
+         if(reader.remaining_bytes() != client_key_share_length) {
+            throw TLS_Exception(Alert::DecodeError, "Inconsistent length in client KeyShare extension");
+         }
 
-         while(reader.has_remaining() && remaining() > 0) {
-            if(remaining() < 4) {
+         std::unordered_set<uint16_t> seen_groups;
+         while(reader.has_remaining()) {
+            // Each KeyShareEntry is at least 4 bytes (group + 2-byte length).
+            // Cleaner failure than the reader underflow we'd otherwise hit
+            // when the inner buffer ends mid-entry.
+            if(reader.remaining_bytes() < 4) {
                throw TLS_Exception(Alert::DecodeError, "Not enough data to read another KeyShareEntry");
             }
 
@@ -217,17 +213,11 @@ class Key_Share_ClientHello {
             //    group. [...]
             //    Servers MAY check for violations of these rules and abort the
             //    handshake with an "illegal_parameter" alert if one is violated.
-            if(std::find_if(m_client_shares.begin(), m_client_shares.end(), [&](const auto& entry) {
-                  return entry.group() == new_entry.group();
-               }) != m_client_shares.end()) {
+            if(!seen_groups.insert(new_entry.group().wire_code()).second) {
                throw TLS_Exception(Alert::IllegalParameter, "Received multiple key share entries for the same group");
             }
 
             m_client_shares.emplace_back(std::move(new_entry));
-         }
-
-         if((reader.read_so_far() - read_bytes_so_far_begin) != client_key_share_length) {
-            throw Decoding_Error("Read bytes are not equal client KeyShare length");
          }
       }
 
@@ -374,7 +364,7 @@ class Key_Share_HelloRetryRequest {
          m_selected_group = static_cast<Named_Group>(reader.get_uint16_t());
       }
 
-      Key_Share_HelloRetryRequest(Named_Group selected_group) : m_selected_group(selected_group) {}
+      explicit Key_Share_HelloRetryRequest(Named_Group selected_group) : m_selected_group(selected_group) {}
 
       ~Key_Share_HelloRetryRequest() = default;
 
@@ -407,10 +397,9 @@ class Key_Share::Key_Share_Impl {
    public:
       using Key_Share_Type = std::variant<Key_Share_ClientHello, Key_Share_ServerHello, Key_Share_HelloRetryRequest>;
 
-      Key_Share_Impl(Key_Share_Type ks) : key_share(std::move(ks)) {}
+      explicit Key_Share_Impl(Key_Share_Type ks) : key_share(std::move(ks)) {}
 
-      // NOLINTNEXTLINE(*-non-private-member-variables-in-classes)
-      Key_Share_Type key_share;
+      Key_Share_Type key_share;  // NOLINT(*-non-private-member-variable*)
 };
 
 Key_Share::Key_Share(TLS_Data_Reader& reader, uint16_t extension_size, Handshake_Type message_type) {

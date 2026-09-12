@@ -10,12 +10,14 @@
 
 #include <botan/tls_server.h>
 
-#include <botan/tls_magic.h>
-#include <botan/tls_messages.h>
-#include <botan/internal/stl_util.h>
-#include <botan/internal/tls_handshake_state.h>
+#include <botan/tls_policy.h>
+#include <botan/x509cert.h>
+#include <botan/internal/tls_channel_impl.h>
 
-#include <botan/internal/tls_server_impl_12.h>
+#if defined(BOTAN_HAS_TLS_12)
+   #include <botan/internal/tls_server_impl_12.h>
+#endif
+
 #if defined(BOTAN_HAS_TLS_13)
    #include <botan/internal/tls_server_impl_13.h>
 #endif
@@ -34,19 +36,29 @@ Server::Server(const std::shared_ptr<Callbacks>& callbacks,
                size_t io_buf_sz) {
    const auto max_version = policy->latest_supported_version(is_datagram);
 
-   if(!max_version.is_pre_tls_13()) {
 #if defined(BOTAN_HAS_TLS_13)
-      m_impl = std::make_unique<Server_Impl_13>(callbacks, session_manager, creds, policy, rng);
+   if(!max_version.is_pre_tls_13()) {
+      m_impl = Server_Impl_13::create(callbacks, session_manager, creds, policy, rng);
 
+   #if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
       if(m_impl->expects_downgrade()) {
          m_impl->set_io_buffer_size(io_buf_sz);
       }
-#else
-      throw Not_Implemented("TLS 1.3 server is not available in this build");
-#endif
-   } else {
-      m_impl = std::make_unique<Server_Impl_12>(callbacks, session_manager, creds, policy, rng, is_datagram, io_buf_sz);
+   #endif
+
+      return;
    }
+#endif
+
+#if defined(BOTAN_HAS_TLS_12)
+   if(max_version.is_pre_tls_13()) {
+      m_impl = Server_Impl_12::create(callbacks, session_manager, creds, policy, rng, is_datagram, io_buf_sz);
+      return;
+   }
+#endif
+
+   BOTAN_UNUSED(max_version, callbacks, session_manager, creds, policy, rng, is_datagram, io_buf_sz);
+   throw Not_Implemented("Requested TLS server version is not available in this build");
 }
 
 Server::~Server() = default;
@@ -54,13 +66,17 @@ Server::~Server() = default;
 size_t Server::from_peer(std::span<const uint8_t> data) {
    auto read = m_impl->from_peer(data);
 
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+   // If TLS 1.2 is not available, we will never downgrade, the downgrade info
+   // won't even be created and `is_downgrading()` would always return false.
    if(m_impl->is_downgrading()) {
       auto info = m_impl->extract_downgrade_info();
-      m_impl = std::make_unique<Server_Impl_12>(*info);
+      m_impl = Server_Impl_12::create_for_downgrade(*info);
 
       // replay peer data received so far
       read = m_impl->from_peer(info->peer_transcript);
    }
+#endif
 
    return read;
 }
@@ -71,6 +87,10 @@ bool Server::is_handshake_complete() const {
 
 bool Server::is_active() const {
    return m_impl->is_active();
+}
+
+std::optional<std::chrono::milliseconds> Server::next_retransmission_timeout() const {
+   return m_impl->next_retransmission_timeout();
 }
 
 bool Server::is_closed() const {

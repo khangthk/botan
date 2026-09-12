@@ -8,20 +8,26 @@
 #ifndef BOTAN_CREDENTIALS_MANAGER_H_
 #define BOTAN_CREDENTIALS_MANAGER_H_
 
-#include <botan/asn1_obj.h>
-#include <botan/certstor.h>
-#include <botan/pk_keys.h>
-#include <botan/strong_type.h>
 #include <botan/symkey.h>
-#include <botan/tls_external_psk.h>
 #include <botan/tls_magic.h>
-#include <botan/x509cert.h>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace Botan {
 
+class AlgorithmIdentifier;
+class Certificate_Store;
+class Public_Key;
+class Private_Key;
+class X509_Certificate;
 class X509_DN;
-class BigInt;
+
+namespace TLS {
+
+class ExternalPSK;
+
+}
 
 /**
 * Interface for a credentials manager.
@@ -31,7 +37,7 @@ class BigInt;
 * and "tls-server". Context represents a hostname, email address,
 * username, or other identifier.
 */
-class BOTAN_PUBLIC_API(2, 0) Credentials_Manager {
+class BOTAN_PUBLIC_API(2, 0) Credentials_Manager /* NOLINT(*-special-member-functions) */ {
    public:
       virtual ~Credentials_Manager() = default;
 
@@ -235,6 +241,8 @@ class BOTAN_PUBLIC_API(2, 0) Credentials_Manager {
       * and "dtls-cookie-secret" to the methods session_ticket_key() and
       * dtls_cookie_secret() respectively. New applications should implement
       * those methods and rely on the default implementation of psk().
+      *
+      * TODO(Botan4) remove this interface
       *
       * @param type specifies the type of operation occurring
       * @param context specifies a context relative to type.

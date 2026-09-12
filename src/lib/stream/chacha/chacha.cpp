@@ -8,14 +8,24 @@
 #include <botan/internal/chacha.h>
 
 #include <botan/exceptn.h>
-#include <botan/internal/cpuid.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/rotate.h>
 
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
+
 namespace Botan {
 
 namespace {
+
+/*
+* RFC 8439 defines ChaCha with 96-bit nonces by stealing one of the
+* words used for the block counter. With 64-bit nonces, the block
+* counter is also 64 bits and practically not exhaustible.
+*/
+constexpr uint64_t chacha_96bit_nonce_cap = uint64_t{1} << 38;
 
 inline void chacha_quarter_round(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d) {
    a += b;
@@ -38,9 +48,22 @@ inline void chacha_quarter_round(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t
 void hchacha(uint32_t output[8], const uint32_t input[16], size_t rounds) {
    BOTAN_ASSERT(rounds % 2 == 0, "Valid rounds");
 
-   uint32_t x00 = input[0], x01 = input[1], x02 = input[2], x03 = input[3], x04 = input[4], x05 = input[5],
-            x06 = input[6], x07 = input[7], x08 = input[8], x09 = input[9], x10 = input[10], x11 = input[11],
-            x12 = input[12], x13 = input[13], x14 = input[14], x15 = input[15];
+   uint32_t x00 = input[0];
+   uint32_t x01 = input[1];
+   uint32_t x02 = input[2];
+   uint32_t x03 = input[3];
+   uint32_t x04 = input[4];
+   uint32_t x05 = input[5];
+   uint32_t x06 = input[6];
+   uint32_t x07 = input[7];
+   uint32_t x08 = input[8];
+   uint32_t x09 = input[9];
+   uint32_t x10 = input[10];
+   uint32_t x11 = input[11];
+   uint32_t x12 = input[12];
+   uint32_t x13 = input[13];
+   uint32_t x14 = input[14];
+   uint32_t x15 = input[15];
 
    for(size_t i = 0; i != rounds / 2; ++i) {
       chacha_quarter_round(x00, x04, x08, x12);
@@ -72,13 +95,13 @@ ChaCha::ChaCha(size_t rounds) : m_rounds(rounds) {
 
 size_t ChaCha::parallelism() {
 #if defined(BOTAN_HAS_CHACHA_AVX512)
-   if(CPUID::has_avx512()) {
+   if(CPUID::has(CPUID::Feature::AVX512)) {
       return 16;
    }
 #endif
 
-#if defined(BOTAN_HAS_CHACHA_AVX2)
-   if(CPUID::has_avx2()) {
+#if defined(BOTAN_HAS_CHACHA_SIMD8X32)
+   if(CPUID::has(CPUID::Feature::SIMD_8X32)) {
       return 8;
    }
 #endif
@@ -88,20 +111,20 @@ size_t ChaCha::parallelism() {
 
 std::string ChaCha::provider() const {
 #if defined(BOTAN_HAS_CHACHA_AVX512)
-   if(CPUID::has_avx512()) {
-      return "avx512";
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512)) {
+      return *feat;
    }
 #endif
 
-#if defined(BOTAN_HAS_CHACHA_AVX2)
-   if(CPUID::has_avx2()) {
-      return "avx2";
+#if defined(BOTAN_HAS_CHACHA_SIMD8X32)
+   if(auto feat = CPUID::check(CPUID::Feature::SIMD_8X32)) {
+      return *feat;
    }
 #endif
 
 #if defined(BOTAN_HAS_CHACHA_SIMD32)
-   if(CPUID::has_simd_32()) {
-      return "simd32";
+   if(auto feat = CPUID::check(CPUID::Feature::SIMD_4X32)) {
+      return *feat;
    }
 #endif
 
@@ -112,7 +135,7 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
    BOTAN_ASSERT(rounds % 2 == 0, "Valid rounds");
 
 #if defined(BOTAN_HAS_CHACHA_AVX512)
-   if(CPUID::has_avx512()) {
+   if(CPUID::has(CPUID::Feature::AVX512)) {
       while(output_blocks >= 16) {
          ChaCha::chacha_avx512_x16(output, state, rounds);
          output += 16 * 64;
@@ -121,10 +144,10 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
    }
 #endif
 
-#if defined(BOTAN_HAS_CHACHA_AVX2)
-   if(CPUID::has_avx2()) {
+#if defined(BOTAN_HAS_CHACHA_SIMD8X32)
+   if(CPUID::has(CPUID::Feature::SIMD_8X32)) {
       while(output_blocks >= 8) {
-         ChaCha::chacha_avx2_x8(output, state, rounds);
+         ChaCha::chacha_simd8x32_x8(output, state, rounds);
          output += 8 * 64;
          output_blocks -= 8;
       }
@@ -132,7 +155,7 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
 #endif
 
 #if defined(BOTAN_HAS_CHACHA_SIMD32)
-   if(CPUID::has_simd_32()) {
+   if(CPUID::has(CPUID::Feature::SIMD_4X32)) {
       while(output_blocks >= 4) {
          ChaCha::chacha_simd32_x4(output, state, rounds);
          output += 4 * 64;
@@ -143,9 +166,22 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
 
    // TODO interleave rounds
    for(size_t i = 0; i != output_blocks; ++i) {
-      uint32_t x00 = state[0], x01 = state[1], x02 = state[2], x03 = state[3], x04 = state[4], x05 = state[5],
-               x06 = state[6], x07 = state[7], x08 = state[8], x09 = state[9], x10 = state[10], x11 = state[11],
-               x12 = state[12], x13 = state[13], x14 = state[14], x15 = state[15];
+      uint32_t x00 = state[0];
+      uint32_t x01 = state[1];
+      uint32_t x02 = state[2];
+      uint32_t x03 = state[3];
+      uint32_t x04 = state[4];
+      uint32_t x05 = state[5];
+      uint32_t x06 = state[6];
+      uint32_t x07 = state[7];
+      uint32_t x08 = state[8];
+      uint32_t x09 = state[9];
+      uint32_t x10 = state[10];
+      uint32_t x11 = state[11];
+      uint32_t x12 = state[12];
+      uint32_t x13 = state[13];
+      uint32_t x14 = state[14];
+      uint32_t x15 = state[15];
 
       for(size_t r = 0; r != rounds / 2; ++r) {
          chacha_quarter_round(x00, x04, x08, x12);
@@ -194,7 +230,9 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
       store_le(x15, output + 64 * i + 4 * 15);
 
       state[12]++;
-      state[13] += (state[12] == 0);
+      if(state[12] == 0) {
+         state[13] += 1;
+      }
    }
 }
 
@@ -203,6 +241,13 @@ void ChaCha::chacha(uint8_t output[], size_t output_blocks, uint32_t state[16], 
 */
 void ChaCha::cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) {
    assert_key_material_set();
+
+   if(m_iv_length == 12) {
+      if(length > m_bytes_remaining) {
+         throw Invalid_State("ChaCha 96-bit nonce keystream exhausted");
+      }
+      m_bytes_remaining -= length;
+   }
 
    while(length >= m_buffer.size() - m_position) {
       const size_t available = m_buffer.size() - m_position;
@@ -223,6 +268,13 @@ void ChaCha::cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) {
 
 void ChaCha::generate_keystream(uint8_t out[], size_t length) {
    assert_key_material_set();
+
+   if(m_iv_length == 12) {
+      if(length > m_bytes_remaining) {
+         throw Invalid_State("ChaCha 96-bit nonce keystream exhausted");
+      }
+      m_bytes_remaining -= length;
+   }
 
    while(length >= m_buffer.size() - m_position) {
       const size_t available = m_buffer.size() - m_position;
@@ -364,6 +416,12 @@ void ChaCha::set_iv_bytes(const uint8_t iv[], size_t length) {
       m_state[15] = load_le<uint32_t>(iv, 5);
    }
 
+   m_iv_length = length;
+   m_state13_post_iv = m_state[13];
+   if(length == 12) {
+      m_bytes_remaining = chacha_96bit_nonce_cap;
+   }
+
    chacha(m_buffer.data(), m_buffer.size() / 64, m_state.data(), m_rounds);
    m_position = 0;
 }
@@ -373,6 +431,16 @@ void ChaCha::clear() {
    zap(m_state);
    zap(m_buffer);
    m_position = 0;
+   m_iv_length = 0;
+   m_state13_post_iv = 0;
+   m_bytes_remaining = 0;
+}
+
+std::optional<uint64_t> ChaCha::remaining_keystream_bytes() const {
+   if(!has_keying_material() || m_iv_length != 12) {
+      return std::nullopt;
+   }
+   return m_bytes_remaining;
 }
 
 std::string ChaCha::name() const {
@@ -382,15 +450,21 @@ std::string ChaCha::name() const {
 void ChaCha::seek(uint64_t offset) {
    assert_key_material_set();
 
-   // Find the block offset
-   const uint64_t counter = offset / 64;
+   const uint64_t block = offset / 64;
 
-   uint8_t out[8];
-
-   store_le(counter, out);
-
-   m_state[12] = load_le<uint32_t>(out, 0);
-   m_state[13] += load_le<uint32_t>(out, 1);
+   if(m_iv_length == 12) {
+      // 96 bit nonce implies a 32-bit counter; prevent seeking beyond that
+      if((block >> 32) != 0) {
+         throw Invalid_Argument("ChaCha::seek with 96-bit nonce limited to 2^32 blocks (256 GiB)");
+      }
+      m_state[12] = static_cast<uint32_t>(block);
+      m_state[13] = m_state13_post_iv;
+      m_bytes_remaining = chacha_96bit_nonce_cap - offset;
+   } else {
+      // 64-bit block counter spanning state words 12 and 13.
+      m_state[12] = static_cast<uint32_t>(block);
+      m_state[13] = m_state13_post_iv + static_cast<uint32_t>(block >> 32);
+   }
 
    chacha(m_buffer.data(), m_buffer.size() / 64, m_state.data(), m_rounds);
    m_position = offset % 64;

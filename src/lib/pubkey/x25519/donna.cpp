@@ -37,7 +37,6 @@
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/donna128.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/mul128.h>
 
 namespace Botan {
 
@@ -113,11 +112,11 @@ inline void fscalar_product(uint64_t out[5], const uint64_t in[5], const uint64_
 * On return, out[i] < 2**52
 */
 inline void fmul(uint64_t out[5], const uint64_t in[5], const uint64_t in2[5]) {
-   const uint128_t s0 = in2[0];
-   const uint128_t s1 = in2[1];
-   const uint128_t s2 = in2[2];
-   const uint128_t s3 = in2[3];
-   const uint128_t s4 = in2[4];
+   const auto s0 = uint128_t(in2[0]);
+   const auto s1 = uint128_t(in2[1]);
+   const auto s2 = uint128_t(in2[2]);
+   const auto s3 = uint128_t(in2[3]);
+   const auto s4 = uint128_t(in2[4]);
 
    uint64_t r0 = in[0];
    uint64_t r1 = in[1];
@@ -153,10 +152,10 @@ inline void fmul(uint64_t out[5], const uint64_t in[5], const uint64_t in2[5]) {
    uint64_t c = carry_shift(t4, 51);
 
    r0 += c * 19;
-   c = r0 >> 51;
+   c = r0 >> 51U;
    r0 = r0 & MASK_63;
    r1 += c;
-   c = r1 >> 51;
+   c = r1 >> 51U;
    r1 = r1 & MASK_63;
    r2 += c;
 
@@ -181,7 +180,7 @@ inline void fsquare(uint64_t out[5], const uint64_t in[5], size_t count = 1) {
       const uint64_t d419 = r4 * 19;
       const uint64_t d4 = d419 * 2;
 
-      uint128_t t0 = uint128_t(r0) * r0 + uint128_t(d4) * r1 + uint128_t(d2) * (r3);
+      const uint128_t t0 = uint128_t(r0) * r0 + uint128_t(d4) * r1 + uint128_t(d2) * (r3);
       uint128_t t1 = uint128_t(d0) * r1 + uint128_t(d4) * r2 + uint128_t(r3) * (r3 * 19);
       uint128_t t2 = uint128_t(d0) * r2 + uint128_t(r1) * r1 + uint128_t(d4) * (r3);
       uint128_t t3 = uint128_t(d0) * r3 + uint128_t(d1) * r2 + uint128_t(r4) * (d419);
@@ -199,10 +198,10 @@ inline void fsquare(uint64_t out[5], const uint64_t in[5], size_t count = 1) {
       uint64_t c = carry_shift(t4, 51);
 
       r0 += c * 19;
-      c = r0 >> 51;
+      c = r0 >> 51U;
       r0 = r0 & MASK_63;
       r1 += c;
-      c = r1 >> 51;
+      c = r1 >> 51U;
       r1 = r1 & MASK_63;
       r2 += c;
    }
@@ -227,22 +226,22 @@ inline void fexpand(uint64_t* out, const uint8_t* in) {
 * little-endian, 32-byte array
 */
 inline void fcontract(uint8_t* out, const uint64_t input[5]) {
-   uint128_t t0 = input[0];
-   uint128_t t1 = input[1];
-   uint128_t t2 = input[2];
-   uint128_t t3 = input[3];
-   uint128_t t4 = input[4];
+   auto t0 = uint128_t(input[0]);
+   auto t1 = uint128_t(input[1]);
+   auto t2 = uint128_t(input[2]);
+   auto t3 = uint128_t(input[3]);
+   auto t4 = uint128_t(input[4]);
 
    for(size_t i = 0; i != 2; ++i) {
-      t1 += t0 >> 51;
+      t1 += t0 >> 51U;
       t0 &= MASK_63;
-      t2 += t1 >> 51;
+      t2 += t1 >> 51U;
       t1 &= MASK_63;
-      t3 += t2 >> 51;
+      t3 += t2 >> 51U;
       t2 &= MASK_63;
-      t4 += t3 >> 51;
+      t4 += t3 >> 51U;
       t3 &= MASK_63;
-      t0 += (t4 >> 51) * 19;
+      t0 += (t4 >> 51U) * 19;
       t4 &= MASK_63;
    }
 
@@ -251,15 +250,15 @@ inline void fcontract(uint8_t* out, const uint64_t input[5]) {
 
    t0 += 19;
 
-   t1 += t0 >> 51;
+   t1 += t0 >> 51U;
    t0 &= MASK_63;
-   t2 += t1 >> 51;
+   t2 += t1 >> 51U;
    t1 &= MASK_63;
-   t3 += t2 >> 51;
+   t3 += t2 >> 51U;
    t2 &= MASK_63;
-   t4 += t3 >> 51;
+   t4 += t3 >> 51U;
    t3 &= MASK_63;
-   t0 += (t4 >> 51) * 19;
+   t0 += (t4 >> 51U) * 19;
    t4 &= MASK_63;
 
    /* now between 19 and 2^255-1 in both cases, and offset by 19. */
@@ -272,13 +271,13 @@ inline void fcontract(uint8_t* out, const uint64_t input[5]) {
 
    /* now between 2^255 and 2^256-20, and offset by 2^255. */
 
-   t1 += t0 >> 51;
+   t1 += t0 >> 51U;
    t0 &= MASK_63;
-   t2 += t1 >> 51;
+   t2 += t1 >> 51U;
    t1 &= MASK_63;
-   t3 += t2 >> 51;
+   t3 += t2 >> 51U;
    t2 &= MASK_63;
-   t4 += t3 >> 51;
+   t4 += t3 >> 51U;
    t3 &= MASK_63;
    t4 &= MASK_63;
 
@@ -344,14 +343,13 @@ void fmonty(uint64_t result_two_q_x[5],
 * This function performs the swap without leaking any side-channel
 * information.
 */
-inline void swap_conditional(uint64_t a[5], uint64_t b[5], uint64_t c[5], uint64_t d[5], uint64_t iswap) {
-   const uint64_t swap = 0 - iswap;
-
+inline void swap_conditional(uint64_t a[5], uint64_t b[5], uint64_t c[5], uint64_t d[5], CT::Mask<uint64_t> swap) {
    for(size_t i = 0; i < 5; ++i) {
-      const uint64_t x0 = swap & (a[i] ^ b[i]);
-      const uint64_t x1 = swap & (c[i] ^ d[i]);
+      const uint64_t x0 = swap.if_set_return(a[i] ^ b[i]);
       a[i] ^= x0;
       b[i] ^= x0;
+
+      const uint64_t x1 = swap.if_set_return(c[i] ^ d[i]);
       c[i] ^= x1;
       d[i] ^= x1;
    }
@@ -376,14 +374,15 @@ void cmult(uint64_t resultx[5], uint64_t resultz[5], const uint8_t n[32], const 
    copy_mem(a, q, 5);
 
    for(size_t i = 0; i < 32; ++i) {
-      const uint64_t bit0 = (n[31 - i] >> 7) & 1;
-      const uint64_t bit1 = (n[31 - i] >> 6) & 1;
-      const uint64_t bit2 = (n[31 - i] >> 5) & 1;
-      const uint64_t bit3 = (n[31 - i] >> 4) & 1;
-      const uint64_t bit4 = (n[31 - i] >> 3) & 1;
-      const uint64_t bit5 = (n[31 - i] >> 2) & 1;
-      const uint64_t bit6 = (n[31 - i] >> 1) & 1;
-      const uint64_t bit7 = (n[31 - i] >> 0) & 1;
+      const uint64_t si = n[31 - i];
+      const auto bit0 = CT::Mask<uint64_t>::expand_bit(si, 7);
+      const auto bit1 = CT::Mask<uint64_t>::expand_bit(si, 6);
+      const auto bit2 = CT::Mask<uint64_t>::expand_bit(si, 5);
+      const auto bit3 = CT::Mask<uint64_t>::expand_bit(si, 4);
+      const auto bit4 = CT::Mask<uint64_t>::expand_bit(si, 3);
+      const auto bit5 = CT::Mask<uint64_t>::expand_bit(si, 2);
+      const auto bit6 = CT::Mask<uint64_t>::expand_bit(si, 1);
+      const auto bit7 = CT::Mask<uint64_t>::expand_bit(si, 0);
 
       swap_conditional(c, a, d, b, bit0);
       fmonty(g, h, e, f, c, d, a, b, q);
@@ -455,7 +454,10 @@ void curve25519_donna(uint8_t mypublic[32], const uint8_t secret[32], const uint
    CT::poison(secret, 32);
    CT::poison(basepoint, 32);
 
-   uint64_t bp[5], x[5], z[5], zmone[5];
+   uint64_t bp[5];
+   uint64_t x[5];
+   uint64_t z[5];
+   uint64_t zmone[5];
    uint8_t e[32];
 
    copy_mem(e, secret, 32);

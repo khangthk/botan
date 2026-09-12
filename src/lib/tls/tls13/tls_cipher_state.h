@@ -11,9 +11,10 @@
 
 #include <botan/secmem.h>
 #include <botan/tls_magic.h>
-#include <botan/tls_messages.h>
 
+#include <botan/internal/tls_record_13.h>
 #include <botan/internal/tls_transcript_hash_13.h>
+#include <botan/internal/tls_types_13.h>
 
 namespace Botan {
 
@@ -61,13 +62,19 @@ class Secret_Logger;
  */
 class BOTAN_TEST_API Cipher_State {
    public:
-      enum class PSK_Type {
-         Resumption,
-         External,  // currently not implemented
+      enum class PSK_Type : uint8_t {
+         Resumption,  // RFC 8446
+         External,    // RFC 8446
+         Imported,    // RFC 9258 PSK importer - uses "imp binder" label
       };
 
    public:
       ~Cipher_State();
+
+      Cipher_State(const Cipher_State& other) = delete;
+      Cipher_State(Cipher_State&& other) = delete;
+      Cipher_State& operator=(const Cipher_State& other) = delete;
+      Cipher_State& operator=(Cipher_State&& other) = delete;
 
       /**
        * Construct a Cipher_State from a Pre-Shared-Key.
@@ -111,37 +118,47 @@ class BOTAN_TEST_API Cipher_State {
       void advance_with_client_finished(const Transcript_Hash& transcript_hash);
 
       /**
-       * Encrypt a TLS record fragment (RFC 8446 5.2 -- TLSInnerPlaintext) using the
-       * currently available traffic secret keys and the current sequence number.
-       * This will internally increment the sequence number. Hence, multiple
-       * calls with the same input will not produce the same result.
+       * Protect a TLS record (RFC 9846 5.2 -- TLSInnerPlaintext) using the
+       * currently available traffic secret keys and the current sequence
+       * number. This will internally increment the sequence number. Hence,
+       * multiple calls with the same input will not produce the same result.
        *
-       * @returns  the sequence number of the encrypted record
+       * @param type           the record type to be protected
+       * @param plaintext      the record plaintext to be protected in-place
+       * @param padding_bytes  the number of padding zero-bytes to be added
+       *
+       * @returns the marshalled and protected record to be sent on the wire
        */
-      uint64_t encrypt_record_fragment(const std::vector<uint8_t>& header, secure_vector<uint8_t>& fragment);
+      [[nodiscard]] MarshalledRecord protect_record(Record_Type type,
+                                                    std::span<const uint8_t> plaintext,
+                                                    size_t padding_bytes);
 
       /**
-       * Decrypt a TLS record fragment (RFC 8446 5.2 -- TLSCiphertext.encrypted_record)
-       * using the currently available traffic secret keys and the current sequence number.
-       * This will internally increment the sequence number. Hence, multiple
-       * calls with the same input will not produce the same result.
+       * Deprotect a TLS record  (RFC 9846 5.2 --
+       * TLSCiphertext.encrypted_record) using the currently available traffic
+       * secret keys and the current sequence number. This will internally
+       * increment the sequence number. Hence, multiple calls with the same
+       * input will not produce the same result.
        *
-       * @returns  the sequence number of the decrypted record
+       * @param record                      the record to be deprotected in-place
+       * @param incoming_record_size_limit  the maximum allowed size for the incoming record
+       *
+       * @returns the record payload and deprotected content type
        */
-      uint64_t decrypt_record_fragment(const std::vector<uint8_t>& header, secure_vector<uint8_t>& encrypted_fragment);
+      [[nodiscard]] Record_Content deprotect_record(Record_TLS record, size_t incoming_record_size_limit);
 
       /**
-       * @returns  number of bytes needed to encrypt \p input_length bytes
+       * @returns number of bytes needed to encrypt \p input_length bytes
        */
       size_t encrypt_output_length(size_t input_length) const;
 
       /**
-       * @returns  number of bytes needed to decrypt \p input_length bytes
+       * @returns number of bytes needed to decrypt \p input_length bytes
        */
       size_t decrypt_output_length(size_t input_length) const;
 
       /**
-       * @returns  the minimum ciphertext length for decryption
+       * @returns the minimum ciphertext length for decryption
        */
       size_t minimum_decryption_input_length() const;
 
@@ -222,8 +239,8 @@ class BOTAN_TEST_API Cipher_State {
       std::string hash_algorithm() const;
 
       /**
-       * @returns  true if the selected cipher primitives are compatible with
-       *           the \p cipher suite.
+       * @returns true if the selected cipher primitives are compatible with
+       *          the \p cipher suite.
        *
        * Note that cipher suites are considered "compatible" as long as the
        * already selected cipher primitives in this cipher state are compatible.
@@ -247,6 +264,16 @@ class BOTAN_TEST_API Cipher_State {
        * application traffic.
        */
       void update_write_keys(const Secret_Logger& channel);
+
+      /**
+       * @returns the number of records encrypted with the current write key
+       */
+      uint64_t records_encrypted_with_current_key() const { return m_write_seq_no; }
+
+      /**
+       * @returns the number of records decrypted with the current read key
+       */
+      uint64_t records_decrypted_with_current_key() const { return m_read_seq_no; }
 
       /**
        * Remove handshake/traffic secrets for decrypting data from peer
@@ -295,7 +322,7 @@ class BOTAN_TEST_API Cipher_State {
       std::vector<uint8_t> empty_hash() const;
 
    private:
-      enum class State {
+      enum class State : uint8_t {
          Uninitialized,
          PskBinder,
          EarlyTraffic,
@@ -332,6 +359,7 @@ class BOTAN_TEST_API Cipher_State {
       uint32_t m_read_key_update_count;
 
       uint16_t m_ticket_nonce;
+      bool m_ticket_nonce_exhausted = false;
 
       secure_vector<uint8_t> m_finished_key;
       secure_vector<uint8_t> m_peer_finished_key;

@@ -10,8 +10,10 @@
 #ifndef BOTAN_TLS_CHANNEL_IMPL_13_H_
 #define BOTAN_TLS_CHANNEL_IMPL_13_H_
 
+#include <botan/tls_messages_13.h>
 #include <botan/internal/stl_util.h>
 #include <botan/internal/tls_channel_impl.h>
+#include <botan/internal/tls_connection_state_13.h>
 #include <botan/internal/tls_handshake_layer_13.h>
 #include <botan/internal/tls_record_layer_13.h>
 #include <botan/internal/tls_transcript_hash_13.h>
@@ -27,7 +29,7 @@ class Cipher_State;
  *
  * The class is split from the rest of the Channel_Impl_13 for mockability.
  */
-class Secret_Logger {
+class Secret_Logger /* NOLINT(*-special-member-functions) */ {
    public:
       virtual ~Secret_Logger() = default;
 
@@ -68,20 +70,17 @@ class Channel_Impl_13 : public Channel_Impl,
             ~AggregatedMessages() = default;
 
             /**
-             * Send the messages aggregated in the message buffer. The buffer
-             * is returned if the sender needs to also handle it somehow.
-             * Most notable use: book keeping for a potential protocol downgrade
-             * in the client implementation.
+             * Send the messages aggregated in the message buffer.
              */
-            std::vector<uint8_t> send();
+            void send() const;
 
             bool contains_messages() const { return !m_message_buffer.empty(); }
 
          protected:
-            std::vector<uint8_t> m_message_buffer;
+            std::vector<uint8_t> m_message_buffer;  // NOLINT(*non-private-member-variable*)
 
-            Channel_Impl_13& m_channel;
-            Handshake_Layer& m_handshake_layer;
+            Channel_Impl_13& m_channel;          // NOLINT(*non-private-member-variable*)
+            Handshake_Layer& m_handshake_layer;  // NOLINT(*non-private-member-variable*)
       };
 
       /**
@@ -136,9 +135,10 @@ class Channel_Impl_13 : public Channel_Impl,
                                const std::shared_ptr<const Policy>& policy,
                                bool is_server);
 
-      explicit Channel_Impl_13(const Channel_Impl_13&) = delete;
-
-      Channel_Impl_13& operator=(const Channel_Impl_13&) = delete;
+      Channel_Impl_13(const Channel_Impl_13& other) = delete;
+      Channel_Impl_13(Channel_Impl_13&& other) = delete;
+      Channel_Impl_13& operator=(const Channel_Impl_13& other) = delete;
+      Channel_Impl_13& operator=(Channel_Impl_13&& other) = delete;
 
       ~Channel_Impl_13() override;
 
@@ -219,14 +219,16 @@ class Channel_Impl_13 : public Channel_Impl,
       virtual void process_post_handshake_msg(Post_Handshake_Message_13 msg) = 0;
       virtual void process_dummy_change_cipher_spec() = 0;
 
-      /**
-       * @return whether a change cipher spec record should be prepended _now_
-       *
-       * This method can be used by subclasses to indicate that send_record
-       * should prepend a CCS before the actual record. This is useful for
-       * middlebox compatibility mode. See RFC 8446 D.4.
-       */
-      virtual bool prepend_ccs() { return false; }
+      enum class Compat_Mode_Situation : uint8_t {
+         BeforeSendingAlert,
+         AfterSendingFirstClientHello,
+         BeforeSendingSecondClientHello,
+         BeforeSendingEncryptedClientFlight,
+         AfterSendingFirstServerHello,
+         AfterSendingHelloRetryRequest,
+      };
+
+      virtual void maybe_handle_compatibility_mode(Compat_Mode_Situation situation) = 0;
 
       void handle(const Key_Update& key_update);
 
@@ -238,17 +240,17 @@ class Channel_Impl_13 : public Channel_Impl,
       void opportunistically_update_traffic_keys() { m_opportunistic_key_update = true; }
 
       template <typename... MsgTs>
-      std::vector<uint8_t> send_handshake_message(const std::variant<MsgTs...>& message) {
-         return aggregate_handshake_messages().add(generalize_to<Handshake_Message_13_Ref>(message)).send();
+      void send_handshake_message(const std::variant<MsgTs...>& message) {
+         aggregate_handshake_messages().add(generalize_to<Handshake_Message_13_Ref>(message)).send();
       }
 
       template <typename MsgT>
-      std::vector<uint8_t> send_handshake_message(std::reference_wrapper<MsgT> message) {
-         return send_handshake_message(generalize_to<Handshake_Message_13_Ref>(message));
+      void send_handshake_message(std::reference_wrapper<MsgT> message) {
+         send_handshake_message(generalize_to<Handshake_Message_13_Ref>(message));
       }
 
-      std::vector<uint8_t> send_post_handshake_message(Post_Handshake_Message_13 message) {
-         return aggregate_post_handshake_messages().add(std::move(message)).send();
+      void send_post_handshake_message(Post_Handshake_Message_13 message) {
+         aggregate_post_handshake_messages().add(std::move(message)).send();
       }
 
       void send_dummy_change_cipher_spec();
@@ -283,10 +285,12 @@ class Channel_Impl_13 : public Channel_Impl,
       void shutdown();
 
    protected:
-      const Connection_Side m_side;
-      Transcript_Hash_State m_transcript_hash;
-      std::unique_ptr<Cipher_State> m_cipher_state;
+      const Connection_Side m_side;                              // NOLINT(*non-private-member-variable*)
+      Transcript_Hash_State m_transcript_hash;                   // NOLINT(*non-private-member-variable*)
+      std::unique_ptr<Cipher_State> m_cipher_state;              // NOLINT(*non-private-member-variable*)
+      std::optional<Active_Connection_State_13> m_active_state;  // NOLINT(*non-private-member-variable*)
 
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
       /**
        * Indicate that we have to expect a downgrade to TLS 1.2. In which case the current
        * implementation (i.e. Client_Impl_13 or Server_Impl_13) will need to be replaced
@@ -297,6 +301,7 @@ class Channel_Impl_13 : public Channel_Impl,
        * @sa `Channel_Impl::Downgrade_Information`
        */
       void expect_downgrade(const Server_Information& server_info, const std::vector<std::string>& next_protocols);
+#endif
 
       /**
        * Set the record size limits as negotiated by the "record_size_limit"
@@ -334,8 +339,17 @@ class Channel_Impl_13 : public Channel_Impl,
       bool m_can_write;
 
       bool m_opportunistic_key_update;
+
+      /**
+       * True while a KeyUpdate with "update_requested" is outstanding, i.e.
+       * the peer has not yet replied with a KeyUpdate of its own.
+       */
+      bool m_key_update_requested;
+
       bool m_first_message_sent;
       bool m_first_message_received;
+
+      uint64_t m_last_key_update_ms = 0;
 };
 }  // namespace Botan::TLS
 

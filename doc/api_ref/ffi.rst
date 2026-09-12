@@ -20,7 +20,7 @@ Rules of Engagement
 
 Writing language bindings for C or C++ libraries is typically a tedious and
 bug-prone experience. This FFI layer was designed to make the experience, if not
-pleasant, at least straighforward.
+pleasant, at least straightforward.
 
 * All objects manipulated by the API are opaque structs. Each struct is tagged
   with a 32-bit magic number which is unique to its type; accidentally passing
@@ -103,6 +103,11 @@ The following enum values are defined in the FFI header:
 
    While decrypting in an AEAD mode, the tag failed to verify.
 
+.. cpp:enumerator:: BOTAN_FFI_ERROR_NO_VALUE = -3
+
+   Given the context of the invocation no semantically reasonable value could
+   be produced, any provided out-parameters must be ignored.
+
 .. cpp:enumerator:: BOTAN_FFI_ERROR_INSUFFICIENT_BUFFER_SPACE = -10
 
    Functions which write a variable amount of space return this if the indicated
@@ -165,6 +170,11 @@ The following enum values are defined in the FFI header:
    An operation was invoked that makes sense for the object, but it is in the
    wrong state to perform it.
 
+.. cpp:enumerator:: BOTAN_FFI_ERROR_OUT_OF_RANGE = -36
+
+   Querying an enumerable value resulted in an "out of range" error. This error
+   code may be used as the marker for the end of a value enumeration.
+
 .. cpp:enumerator:: BOTAN_FFI_ERROR_NOT_IMPLEMENTED = -40
 
    This is returned if the functionality is not available for some reason.  For
@@ -177,6 +187,10 @@ The following enum values are defined in the FFI header:
    calling :cpp:func:`botan_hash_destroy` on a ``botan_rng_t`` object will cause
    this error.
 
+.. cpp:enumerator:: BOTAN_FFI_TPM_ERROR = -78
+
+   An error occurred when performing TPM2 interactions.
+
 .. cpp:enumerator:: BOTAN_FFI_ERROR_UNKNOWN_ERROR = -100
 
    Something bad happened, but we are not sure why or how.
@@ -184,7 +198,7 @@ The following enum values are defined in the FFI header:
 Error values below -10000 are reserved for the application (these can be returned
 from view functions).
 
-Further information about the error that occured is available via
+Further information about the error that occurred is available via
 
 .. cpp:function:: const char* botan_error_last_exception_message()
 
@@ -245,6 +259,14 @@ supported it.
 ============== ===================
 FFI Version    Supported Starting
 ============== ===================
+20260811       3.13.0
+20260506       3.12.0
+20260303       3.11.0
+20250829       3.10.0
+20250506       3.8.0
+20240408       3.4.0
+20231009       3.2.0
+20230711       3.1.0
 20230403       3.0.0
 20210220       2.18.0
 20191214       2.13.0
@@ -336,7 +358,7 @@ Random Number Generators
    "user": ``AutoSeeded_RNG``,
    "user-threadsafe": serialized ``AutoSeeded_RNG``,
    "null": ``Null_RNG`` (always fails),
-   "hwrnd" or "rdrand": ``Processor_RNG`` (if available)
+   "hwrng" or "rdrand": ``Processor_RNG`` (if available)
 
 .. cpp:function:: int botan_rng_init_custom(botan_rng_t* rng,\
                   const char* rng_name, void* context, \
@@ -469,6 +491,12 @@ Hash Functions
 
    Return the output length of the hash function.
 
+.. cpp:function:: int botan_hash_security_level(botan_hash_t hash, size_t* security_level)
+
+   Return the estimated security level of the hash function, in bits, with
+   respect to collision resistance. Returns zero for checksums and any hash
+   where finding collisions is trivial.
+
 .. cpp:function:: int botan_hash_update(botan_hash_t hash, const uint8_t* input, size_t len)
 
    Add input to the hash computation.
@@ -515,7 +543,7 @@ Message Authentication Codes
 
    Add input to the MAC computation.
 
-.. cpp:function:: int botan_mac_final(botan_mac_t mac, uint8_t out[], size_t* out_len)
+.. cpp:function:: int botan_mac_final(botan_mac_t mac, uint8_t out[])
 
    Finalize the MAC and place the output in out. Exactly
    :cpp:func:`botan_mac_output_length` bytes will be written.
@@ -638,7 +666,7 @@ KDF
 Multiple Precision Integers
 ----------------------------------------
 
-.. versionadded: 2.1.0
+.. versionadded:: 2.1.0
 
 .. cpp:type:: opaque* botan_mp_t
 
@@ -654,11 +682,34 @@ Multiple Precision Integers
 
 .. cpp:function:: int botan_mp_to_hex(botan_mp_t mp, char* out)
 
-   Writes exactly ``botan_mp_num_bytes(mp)*2 + 1`` bytes to out
+   Writes the hex encoding to the ``out`` parameter. This must point to a pre-allocated
+   buffer of at least ``botan_mp_num_bytes(mp)*2 + 5`` bytes. Some number of bytes will
+   be written, followed by a null terminator.
 
-.. cpp:function:: int botan_mp_to_str(botan_mp_t mp, uint8_t base, char* out, size_t* out_len)
+   .. warning::
 
-   Base can be either 10 or 16.
+      This function is error-prone to use since the caller is not able to specify the
+      length of the buffer, so if insufficient space is allocated an overwrite will occur,
+      instead of the function returning ``BOTAN_FFI_ERROR_INSUFFICIENT_BUFFER_SPACE`` as
+      is typical for FFI. Prefer :cpp:func:`botan_mp_view_hex` which avoids this problem.
+
+.. cpp:function:: int botan_mp_view_hex(botan_mp_t mp, botan_view_ctx ctx, botan_view_str_fn view)
+
+   View the hex encoding of the integer.
+
+.. cpp:function:: int botan_mp_to_str(botan_mp_t mp, uint8_t radix, char* out, size_t* out_len)
+
+   The ``radix`` can currently be either 10 or 16. If ``radix`` is 16 this behaves
+   identically to :cpp:func:`botan_mp_to_hex` with the addition that the output length is
+   checked rather than assumed.
+
+   .. note::
+
+      Prefer using :cpp:func:`botan_mp_view_str`
+
+.. cpp:function:: int botan_mp_view_str(botan_mp_t mp, uint8_t radix, botan_view_ctx ctx, botan_view_str_fn view)
+
+   View the string encoding of the integer. The radix can currently be either 10 or 16.
 
 .. cpp:function:: int botan_mp_set_from_int(botan_mp_t mp, int initial_value)
 
@@ -683,6 +734,16 @@ Multiple Precision Integers
 .. cpp:function:: int botan_mp_to_bin(botan_mp_t mp, uint8_t vec[])
 
    Writes exactly ``botan_mp_num_bytes(mp)`` to ``vec``.
+
+   Note that the sign of ``mp`` is ignored.
+
+   .. note::
+
+      Prefer :cpp:func:`botan_mp_view_bin`.
+
+.. cpp:function:: int botan_mp_view_bin(botan_mp_t mp, botan_view_ctx ctx, botan_view_bin_fn view)
+
+   View the big-endian byte encoding of the integer. Note that the sign of ``mp`` is ignored.
 
 .. cpp:function:: int botan_mp_from_bin(botan_mp_t mp, const uint8_t vec[], size_t vec_len)
 
@@ -770,7 +831,7 @@ Multiple Precision Integers
 .. cpp:function:: int botan_mp_mod_inverse(botan_mp_t out, botan_mp_t in, botan_mp_t modulus)
 
    Compute modular inverse. If no modular inverse exists (for instance because ``in`` and
-   ``modulus`` are not relatively prime), then sets ``out`` to -1.
+   ``modulus`` are not relatively prime), then sets ``out`` to 0.
 
 .. cpp:function:: int botan_mp_rand_bits(botan_mp_t rand_out, botan_rng_t rng, size_t bits)
 
@@ -821,10 +882,247 @@ Password Hashing
 .. cpp:function:: int botan_bcrypt_is_valid(const char* pass, const char* hash)
 
    Check a previously created password hash.  Returns
-   :cpp:enumerator:`BOTAN_SUCCESS` if if this password/hash
+   :cpp:enumerator:`BOTAN_FFI_SUCCESS` if if this password/hash
    combination is valid, :cpp:enumerator:`BOTAN_FFI_INVALID_VERIFIER`
    if the combination is not valid (but otherwise well formed),
    negative on error.
+
+
+Object Identifiers
+----------------------------------------
+
+.. versionadded:: 3.8.0
+
+.. cpp:type:: opaque* botan_asn1_oid_t
+
+   An opaque data type for an object identifier. Don't mess with it.
+
+.. cpp:function:: int botan_oid_destroy(botan_asn1_oid_t oid)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_oid_from_string(botan_asn1_oid_t* oid, const char* oid_str)
+
+   Create an OID from a string, either dot notation (e.g. '1.2.3.4') or a registered name (e.g. 'RSA')
+
+.. cpp:function:: int botan_oid_register(botan_asn1_oid_t oid, const char* name)
+
+   Register an OID so that it may later be retrieved by name
+
+.. cpp:function:: int botan_oid_view_string(botan_asn1_oid_t oid, botan_view_ctx ctx, botan_view_str_fn view)
+
+   View the OID in dot notation
+
+.. cpp:function:: int botan_oid_view_name(botan_asn1_oid_t oid, botan_view_ctx ctx, botan_view_str_fn view)
+
+   View the OID as a name if it has one, otherwise as dot notation
+
+.. cpp:function:: int botan_oid_equal(botan_asn1_oid_t a, botan_asn1_oid_t b)
+
+   Three way comparison: set result to -1 if ``a`` is less than ``b``,
+   0 if ``a`` is equal to ``b``, and 1 if ``a`` is greater than ``b``.
+
+.. cpp:function:: int botan_oid_cmp(int* result, botan_asn1_oid_t a, botan_asn1_oid_t b)
+
+   Return 1 if ``a`` is equal to ``b``, 0 if ``a`` is not equal to ``b``
+
+
+EC Groups
+----------------------------------------
+
+.. versionadded:: 3.8.0
+
+.. cpp:type:: opaque* botan_ec_group_t
+
+   An opaque data type for an EC Group. Don't mess with it.
+
+.. cpp:function:: int botan_ec_group_destroy(botan_ec_group_t oid)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_ec_group_supports_application_specific_group(int* out)
+
+   Checks if in this build configuration it is possible to register an application specific elliptic curve,
+   and sets ``out`` to 1 if so, 0 otherwise.
+
+.. cpp:function:: int botan_ec_group_supports_named_group(const char* name, int* out)
+
+   Checks if in this build configuration botan_ec_group_from_name(group_ptr, name) will succeed,
+   and sets ``out`` to 1 if so, 0 otherwise.
+
+.. cpp:function:: int botan_ec_group_from_params(botan_ec_group_t* ec_group, \
+                               botan_asn1_oid_t oid, \
+                               botan_mp_t p, \
+                               botan_mp_t a, \
+                               botan_mp_t b, \
+                               botan_mp_t base_x, \
+                               botan_mp_t base_y, \
+                               botan_mp_t order)
+
+   Create a new EC Group from the given parameters.
+
+   .. warning::
+      Use only elliptic curve parameters you trust.
+
+.. cpp:function:: int botan_ec_group_from_ber(botan_ec_group_t* ec_group, const uint8_t* ber, size_t ber_len)
+
+   Decode a BER encoded ECC domain parameter set
+
+.. cpp:function:: int botan_ec_group_from_pem(botan_ec_group_t* ec_group, const char* pem)
+
+   Initialize an EC Group from the PEM/ASN.1 encoding
+
+.. cpp:function:: int botan_ec_group_from_oid(botan_ec_group_t* ec_group, botan_asn1_oid_t oid)
+
+   Initialize an EC Group from a group named by an object identifier
+
+.. cpp:function:: int botan_ec_group_from_name(botan_ec_group_t* ec_group, const char* name)
+
+   Initialize an EC Group from a common group name (eg "secp256r1")
+
+.. cpp:function:: int botan_ec_group_unregister(botan_asn1_oid_t oid)
+
+   Unregister a previously registered group. Returns 1 if the group was found and unregistered, else 0.
+
+   Using this is discouraged for normal use. This is only useful or necessary if
+   you are registering a very large number of distinct groups, and need to worry about memory constraints.
+
+.. cpp:function:: int botan_ec_group_view_der(botan_ec_group_t ec_group, botan_view_ctx ctx, botan_view_bin_fn view)
+
+   View an EC Group in DER encoding
+
+.. cpp:function:: int botan_ec_group_view_pem(botan_ec_group_t ec_group, botan_view_ctx ctx, botan_view_str_fn view)
+
+   View an EC Group in PEM encoding
+
+.. cpp:function:: int botan_ec_group_get_curve_oid(botan_asn1_oid_t* oid, botan_ec_group_t ec_group)
+
+   Get the curve OID of an EC Group
+
+.. cpp:function:: int botan_ec_group_get_p(botan_mp_t* p, botan_ec_group_t ec_group)
+
+   Get the prime modulus of the field
+
+.. cpp:function:: int botan_ec_group_get_a(botan_mp_t* a, botan_ec_group_t ec_group)
+
+   Get the a parameter of the elliptic curve equation
+
+.. cpp:function:: int botan_ec_group_get_b(botan_mp_t* b, botan_ec_group_t ec_group)
+
+   Get the b parameter of the elliptic curve equation
+
+.. cpp:function:: int botan_ec_group_get_g_x(botan_mp_t* g_x, botan_ec_group_t ec_group)
+
+   Get the x coordinate of the base point
+
+.. cpp:function:: int botan_ec_group_get_g_y(botan_mp_t* g_y, botan_ec_group_t ec_group)
+
+   Get the y coordinate of the base point
+
+.. cpp:function:: int botan_ec_group_get_order(botan_mp_t* order, botan_ec_group_t ec_group)
+
+   Get the order of the base point
+
+.. cpp:function:: int botan_ec_group_equal(botan_ec_group_t curve1, botan_ec_group_t curve2)
+
+   Return 1 if ``curve1`` is equal to ``curve2``, 0 if ``curve1`` is not equal to ``curve2``
+
+
+EC Points and Scalars
+----------------------------------------
+
+.. versionadded:: 3.12.0
+
+.. cpp:type:: opaque* botan_ec_scalar_t
+
+   An opaque data type for an EC Scalar. Don't mess with it.
+
+.. cpp:type:: opaque* botan_ec_point_t
+
+   An opaque data type for an EC Point. Don't mess with it.
+
+.. cpp:function:: int botan_ec_scalar_destroy(botan_ec_scalar_t ec_scalar)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_ec_scalar_random(botan_ec_scalar_t* ec_scalar, botan_ec_group_t ec_group, botan_rng_t rng);
+
+   Create a scalar with a random value.
+
+.. cpp:function:: int botan_ec_scalar_from_mp(botan_ec_scalar_t* ec_scalar, botan_ec_group_t ec_group, botan_mp_t mp);
+
+   Convert from an MPI to a scalar.
+
+.. cpp:function:: int botan_ec_scalar_to_mp(botan_ec_scalar_t ec_scalar, botan_mp_t* mp)
+
+   Convert from a scalar to an MPI.
+
+.. cpp:function:: int botan_ec_point_destroy(botan_ec_point_t ec_point)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_ec_point_identity(botan_ec_point_t* ec_point, botan_ec_group_t ec_group);
+
+   Create a point set to the identity element of the group.
+
+.. cpp:function:: int botan_ec_point_generator(botan_ec_point_t* ec_point, botan_ec_group_t ec_group);
+
+   Create a point set to the standard group generator.
+
+.. cpp:function:: int botan_ec_point_from_xy(botan_ec_point_t* ec_point, botan_ec_group_t ec_group, botan_mp_t x, botan_mp_t y);
+
+   Create a point from a pair (x,y) of integers.
+   The integers must be within the field and must satisfy the curve equation.
+
+.. cpp:function:: int botan_ec_point_from_bytes(botan_ec_point_t* ec_point, \
+                              botan_ec_group_t ec_group, \
+                              const uint8_t* bytes, \
+                              size_t bytes_len);
+
+   Create a point from a SEC1 compressed or uncompressed format.
+
+.. cpp:function:: int botan_ec_point_view_x_bytes(botan_ec_point_t ec_point, botan_view_ctx ctx, botan_view_bin_fn view);
+
+   View the fixed length encoding of the affine x coordinate.
+
+.. cpp:function:: int botan_ec_point_view_y_bytes(botan_ec_point_t ec_point, botan_view_ctx ctx, botan_view_bin_fn view);
+
+   View the fixed length encoding of the affine y coordinate.
+
+.. cpp:function:: int botan_ec_point_view_xy_bytes(botan_ec_point_t ec_point, botan_view_ctx ctx, botan_view_bin_fn view);
+
+   View the fixed length encoding of the affine x and y coordinates.
+
+.. cpp:function:: int botan_ec_point_view_uncompressed(botan_ec_point_t ec_point, botan_view_ctx ctx, botan_view_bin_fn view);
+
+   View the fixed length SEC1 uncompressed encoding.
+
+.. cpp:function:: int botan_ec_point_view_compressed(botan_ec_point_t ec_point, botan_view_ctx ctx, botan_view_bin_fn view);
+
+   View the fixed length SEC1 compressed encoding.
+
+.. cpp:function:: int botan_ec_point_is_identity(botan_ec_point_t ec_point);
+
+   Returns 1 if ``ec_point`` is equal to the group's identity element, otherwise 0.
+
+.. cpp:function:: int botan_ec_point_equal(botan_ec_point_t x, botan_ec_point_t y);
+
+   Returns 1 if ``x`` == ``y``, otherwise 0.
+
+.. cpp:function:: int botan_ec_point_negate(botan_ec_point_t* result, botan_ec_point_t ec_point);
+
+   Negates the provided point.
+
+.. cpp:function:: int botan_ec_point_add(botan_ec_point_t* result, botan_ec_point_t x, botan_ec_point_t y);
+
+   Computes ``x`` + ``y``.
+
+.. cpp:function:: int botan_ec_point_mul(botan_ec_point_t* result, \
+                       botan_ec_point_t ec_point, \
+                       botan_ec_scalar_t ec_scalar, \
+                       botan_rng_t rng);
+
+   Multiplies ``ec_point`` by the given ``ec_scalar``.
 
 Public Key Creation, Import and Export
 ----------------------------------------
@@ -842,6 +1140,11 @@ Public Key Creation, Import and Export
                                    const char* algo_params, \
                                    botan_rng_t rng)
 
+.. cpp:function:: int botan_ec_privkey_create(botan_privkey_t* key, \
+                                   const char* algo_name, \
+                                   botan_ec_group_t ec_group, \
+                                   botan_rng_t rng)
+
 .. cpp:function:: int botan_privkey_create_rsa(botan_privkey_t* key, botan_rng_t rng, size_t n_bits)
 
    Create an RSA key of the given size
@@ -856,8 +1159,13 @@ Public Key Creation, Import and Export
 
 .. cpp:function:: int botan_privkey_create_mceliece(botan_privkey_t* key, botan_rng_t rng, size_t n, size_t t)
 
-   Create a McEliece key using the specified parameters. See
-   :ref:`mceliece` for details on choosing parameters.
+   Create a McEliece key using one of the supported deprecated parameter sets.
+   See :ref:`mceliece` for details.
+
+   .. warning::
+
+      This McEliece implementation is deprecated and will be removed in a future major release.
+      Prefer the newer, widely implemented and standardized, Classic McEliece.
 
 .. cpp:function:: int botan_privkey_create_dh(botan_privkey_t* key, botan_rng_t rng, const char* params)
 
@@ -943,6 +1251,12 @@ Public Key Creation, Import and Export
 
    View the unencrypted PEM encoding of the private key
 
+.. cpp:function:: int botan_privkey_view_raw(botan_privkey_t key, \
+      botan_view_ctx ctx, botan_view_str_fn view)
+
+   View the unencrypted canonical raw encoding of the private key
+   This might not be defined for all key types and throw in that case.
+
 .. cpp:function:: int botan_privkey_export_encrypted(botan_privkey_t key, \
                                              uint8_t out[], size_t* out_len, \
                                              botan_rng_t rng, \
@@ -952,7 +1266,7 @@ Public Key Creation, Import and Export
 
    Deprecated, use ``botan_privkey_export_encrypted_msec`` or ``botan_privkey_export_encrypted_iter``
 
-.. cpp::function:: int botan_privkey_export_encrypted_pbkdf_msec(botan_privkey_t key,
+.. cpp:function:: int botan_privkey_export_encrypted_pbkdf_msec(botan_privkey_t key, \
                                                         uint8_t out[], size_t* out_len, \
                                                         botan_rng_t rng, \
                                                         const char* passphrase, \
@@ -968,7 +1282,7 @@ Public Key Creation, Import and Export
     ``cipher_algo`` must specify a CBC mode cipher (such as "AES-128/CBC") or as
     a Botan-specific extension a GCM mode may be used.
 
-.. cpp::function:: int botan_privkey_export_encrypted_pbkdf_iter(botan_privkey_t key, \
+.. cpp:function:: int botan_privkey_export_encrypted_pbkdf_iter(botan_privkey_t key, \
                                                         uint8_t out[], size_t* out_len, \
                                                         botan_rng_t rng, \
                                                         const char* passphrase, \
@@ -989,6 +1303,19 @@ Public Key Creation, Import and Export
     Read an algorithm specific field from the private key object, placing it into output.
     For example "p" or "q" for RSA keys, or "x" for DSA keys or ECC keys.
 
+.. cpp:function:: int botan_privkey_oid(botan_asn1_oid_t* oid, botan_privkey_t key)
+
+   Get the key's associated OID.
+
+.. cpp:function:: int botan_privkey_stateful_operation(botan_privkey_t key, int* out)
+
+   Checks whether a key is stateful and set ``out`` to 1 if it is, 0 otherwise.
+
+.. cpp:function:: int botan_privkey_remaining_operations(botan_privkey_t key, uint64_t* out)
+
+   Set ``out`` to the number of remaining operations.
+   If the key is not stateful, an error will be returned.
+
 .. cpp:type:: opaque* botan_pubkey_t
 
    An opaque data type for a public key. Don't mess with it.
@@ -1007,6 +1334,12 @@ Public Key Creation, Import and Export
 
    View the PEM encoding of the public key
 
+.. cpp:function:: int botan_pubkey_view_raw(botan_pubkey_t key, \
+      botan_view_ctx ctx, botan_view_bin_fn view)
+
+   View the canonical raw encoding of the public key.
+   This may not be defined for all public key types and throw.
+
 .. cpp:function:: int botan_pubkey_algo_name(botan_pubkey_t key, char out[], size_t* out_len)
 
 .. cpp:function:: int botan_pubkey_estimated_strength(botan_pubkey_t key, size_t* estimate)
@@ -1022,6 +1355,10 @@ Public Key Creation, Import and Export
 
     Read an algorithm specific field from the public key object, placing it into output.
     For example "n" or "e" for RSA keys or "p", "q", "g", and "y" for DSA keys.
+
+.. cpp:function:: int botan_pubkey_oid(botan_asn1_oid_t* oid, botan_privkey_t key)
+
+   Get the key's associated OID.
 
 RSA specific functions
 ----------------------------------------
@@ -1067,6 +1404,21 @@ RSA specific functions
                                     botan_mp_t n, botan_mp_t e)
 
    Initialize a public RSA key using parameters n and e.
+
+EC specific functions
+----------------------------------------
+
+.. cpp:function:: int botan_ec_privkey_get_private_key(botan_privkey_t key, botan_ec_scalar_t* value)
+
+   Get the private value of the EC key.
+
+.. cpp:function:: int botan_ec_privkey_get_group(botan_privkey_t key, botan_ec_group_t* ec_group)
+
+   Get the group of this EC private key.
+
+.. cpp:function:: int botan_ec_pubkey_get_group(botan_pubkey_t key, botan_ec_group_t* ec_group)
+
+   Get the group of this EC public key.
 
 DSA specific functions
 ----------------------------------------
@@ -1337,12 +1689,106 @@ Public Key Encapsulation
 
    Destroy the operation, freeing memory
 
+
+TPM 2.0 Functions
+----------------------------------------
+
+.. versionadded:: 3.6.0
+
+.. cpp:type:: opaque* botan_tpm2_ctx_t
+
+   An opaque data type for a TPM 2.0 context object. Don't mess with it.
+
+.. cpp:type:: opaque* botan_tpm2_session_t
+
+   An opaque data type for a TPM 2.0 session object. Don't mess with it.
+
+.. cpp:type:: opaque* botan_tpm2_crypto_backend_state_t
+
+   An opaque data type to hold the TPM 2.0 crypto backend state when registering
+   the botan-based crypto backend on a bare ESYS_CONTEXT. When the TPM 2.0
+   context is managed via Botan botan_tpm2_ctx_t, this state object is maintained
+   internally.
+
+.. cpp:function:: int botan_tpm2_supports_crypto_backend()
+
+   Returns 1 if the Botan-based TPM 2.0 crypto backend is available, 0 otherwise.
+
+.. cpp:function:: int botan_tpm2_ctx_init(botan_tpm2_ctx_t* ctx_out, const char* tcti_nameconf)
+
+   Initialize a TPM 2.0 context object. The TCTI name and configuration are
+   mangled into a single string separated by a colon. for instance "device:/dev/tpm0".
+
+.. cpp:function:: int botan_tpm2_ctx_init_ex(botan_tpm2_ctx_t* ctx_out, const char* tcti_name, const char* tcti_conf)
+
+   Initialize a TPM 2.0 context object. The TCTI name and configuration are
+   passed as separate strings.
+
+.. cpp:function:: int botan_tpm2_ctx_from_esys(botan_tpm2_ctx_t* ctx_out, ESYS_CONTEXT* esys_ctx)
+
+   Initialize a TPM 2.0 context object from a pre-existing ``ESYS_CONTEXT`` that
+   is managed by the application. Destroying this object *will not* finalize the
+   ``ESYS_CONTEXT``, this responsibility remains with the application.
+
+.. cpp:function:: int botan_tpm2_ctx_enable_crypto_backend(botan_tpm2_ctx_t ctx, botan_rng_t rng)
+
+   Enable the Botan-based TPM 2.0 crypto backend. Note that the random number
+   generator passed to this function must not be dependent on the TPM itself.
+   This should be used when the ``ESYS_CONTEXT`` is managed by the TPM 2.0
+   wrapper provided by Botan (i.e. the application did not explicitly instantiate
+   the ``ESYS_CONTEXT`` itself).
+
+.. cpp:function:: int botan_tpm2_enable_crypto_backend(botan_tpm2_crypto_backend_state_t* cbs_out, \
+                                                       ESYS_CONTEXT* esys_ctx, \
+                                                       botan_rng_t rng)
+
+   Enable the Botan-based TPM 2.0 crypto backend on a pre-existing ``ESYS_CONTEXT``
+   that is managed by the application. Note that the random number generator
+   passed to this function must not be dependent on the TPM itself.
+   The crypto backend has to keep internal state. The application is responsible
+   to keep this state alive and destroy it after the ``ESYS_CONTEXT`` is no longer
+   used.
+
+.. cpp:function:: int botan_tpm2_unauthenticated_session_init(botan_tpm2_session_t* session_out, botan_tpm2_ctx_t ctx)
+
+   Initialize an unauthenticated session that can be used to encrypt the
+   communication between your application and the TPM.
+
+.. cpp:function:: int botan_tpm2_rng_init(botan_rng_t* rng_out, \
+                                          botan_tpm2_ctx_t ctx, \
+                                          botan_tpm2_session_t s1, \
+                                          botan_tpm2_session_t s2, \
+                                          botan_tpm2_session_t s3)
+
+   Initialize a random number generator that uses the TPM as a source of entropy.
+
+.. cpp:function:: int botan_tpm2_ctx_destroy(botan_tpm2_ctx_t ctx)
+
+   Destroy a TPM 2.0 context object.
+
+.. cpp:function:: int botan_tpm2_session_destroy(botan_tpm2_session_t session)
+
+   Destroy a TPM 2.0 session object.
+
+.. cpp:function:: int botan_tpm2_crypto_backend_state_destroy(botan_tpm2_crypto_backend_state_t cbs)
+
+   Destroy a TPM 2.0 crypto backend state. This is required when registering the
+   botan-based crypto backend on an ESYS_CONTEXT managed by the application
+   using botan_tpm2_enable_crypto_backend. When the ESYS_CONTEXT is managed in
+   the botan wrapper, and botan_tpm2_ctx_enable_crypto_backend was used, this
+   state is managed within the library and does not need to be cleaned up.
+
 X.509 Certificates
 ----------------------------------------
 
 .. cpp:type:: opaque* botan_x509_cert_t
 
    An opaque data type for an X.509 certificate. Don't mess with it.
+
+.. cpp:type:: opaque* botan_x509_general_name_t
+
+   An opaque data type for an X.509 GeneralName used to query subject/issuer
+   alternative names and name constraints. Don't mess with it.
 
 .. cpp:function:: int botan_x509_cert_load(botan_x509_cert_t* cert_obj, \
                                         const uint8_t cert[], size_t cert_len)
@@ -1361,11 +1807,51 @@ X.509 Certificates
 
    Destroy the certificate object
 
-.. cpp:function:: int botan_x509_cert_gen_selfsigned(botan_x509_cert_t* cert, \
-                                             botan_privkey_t key, \
-                                             botan_rng_t rng, \
-                                             const char* common_name, \
-                                             const char* org_name)
+.. cpp:function:: int botan_x509_cert_view_binary_values(botan_x509_cert_t cert, \
+                                                         botan_x509_value_type value_type, \
+                                                         size_t index, \
+                                                         botan_view_ctx ctx, \
+                                                         botan_view_bin_fn view_fn)
+
+   Access various binary fields of information contained in the certificate.
+
+   Some of those may be multi-value fields, the `index` parameter may be used
+   to enumerate such values until :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE`
+   is returned. For singular values, an `index` of 0 must be used.
+
+   See :ref:`x509_getter_function` for further information about the available
+   values. If a value does not exist :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE`
+   is returned.
+
+.. cpp:function:: int botan_x509_cert_view_binary_values_count(botan_x509_cert_t cert, \
+                                                               botan_x509_value_type value_type, \
+                                                               size_t* count)
+
+   Get the number of entries for multi-value binary fields of information
+   contained in the certificate.
+
+.. cpp:function:: int botan_x509_cert_view_string_values(botan_x509_cert_t cert, \
+                                                         botan_x509_value_type value_type, \
+                                                         size_t index, \
+                                                         botan_view_ctx ctx, \
+                                                         botan_view_str_fn view_fn)
+
+   Access various string fields of information contained in the certificate.
+
+   Some of those may be multi-value fields, the `index` parameter may be used
+   to enumerate such values until :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE`
+   is returned. For singular values, an `index` of 0 must be used.
+
+   See :ref:`x509_getter_function` for further information about the available
+   values. If a value does not exist :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE`
+   is returned.
+
+.. cpp:function:: int botan_x509_cert_view_string_values_count(botan_x509_cert_t cert, \
+                                                               botan_x509_value_type value_type, \
+                                                               size_t* count)
+
+   Get the number of entries for multi-value string fields of information
+   contained in the certificate.
 
 .. cpp:function:: int botan_x509_cert_get_time_starts(botan_x509_cert_t cert, char out[], size_t* out_len)
 
@@ -1391,7 +1877,19 @@ X.509 Certificates
 
 .. cpp:function:: int botan_x509_cert_get_serial_number(botan_x509_cert_t cert, uint8_t out[], size_t* out_len)
 
-   Return the serial number of the certificate.
+   Return the serial number of the certificate as big-endian encoded bytes.
+
+.. cpp:function:: int botan_x509_cert_serial_number(botan_x509_cert_t cert, botan_mp_t* serial_number)
+
+   Return the serial number of the certificate as a multi-precision integer.
+
+.. cpp:function:: int botan_x509_cert_is_ca(botan_x509_cert_t cert)
+
+   Check whether the certificate is marked as a CA certificate.
+
+.. cpp:function:: int botan_x509_cert_get_path_length_constraint(botan_x509_cert_t cert, size_t* path_len)
+
+   Get the path length constraint for a CA certificate.
 
 .. cpp:function:: int botan_x509_cert_get_authority_key_id(botan_x509_cert_t cert, uint8_t out[], size_t* out_len)
 
@@ -1419,13 +1917,27 @@ X.509 Certificates
                                             const char* key, size_t index, \
                                             uint8_t out[], size_t* out_len)
 
-   Get a value from the issuer DN field.
+   Get a value from the issuer DN field. If the index is out of range,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_BAD_PARAMETER` is returned for historical
+   reasons.
+
+.. cpp:function:: int botan_x509_cert_get_issuer_dn_count(botan_x509_cert_t cert, \
+                                                          const char* key, size_t* count)
+
+   Get the number of values for a given key in the issuer DN field.
 
 .. cpp:function:: int botan_x509_cert_get_subject_dn(botan_x509_cert_t cert, \
                                              const char* key, size_t index, \
                                              uint8_t out[], size_t* out_len)
 
-   Get a value from the subject DN field.
+   Get a value from the subject DN field. If the index is out of range,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_BAD_PARAMETER` is returned for historical
+   reasons.
+
+.. cpp:function:: int botan_x509_cert_get_subject_dn_count(botan_x509_cert_t cert, \
+                                                           const char* key, size_t* count)
+
+   Get the number of values for a given key in the subject DN field.
 
 .. cpp:function:: int botan_x509_cert_to_string(botan_x509_cert_t cert, char out[], size_t* out_len)
 
@@ -1444,6 +1956,112 @@ X.509 Certificates
    `CRL_SIGN`, `ENCIPHER_ONLY`, `DECIPHER_ONLY`.
 
 .. cpp:function:: int botan_x509_cert_allowed_usage(botan_x509_cert_t cert, unsigned int key_usage)
+
+.. cpp:function:: int botan_x509_cert_allowed_extended_usage_str(botan_x509_cert_t cert, const char* oid)
+
+   Check whether the certificate has the specified extended key usage OID from
+   `RFC 5280 - 4.2.1.12 <https://www.rfc-editor.org/rfc/rfc5280#section-4.2.1.12>`_.
+   If the certificate has no extended key usage extension, this will always
+   behave as if the requested OID is *not present*.
+
+.. cpp:function:: int botan_x509_cert_allowed_extended_usage_oid(botan_x509_cert_t cert, botan_asn1_oid_t oid)
+
+   Check whether the certificate has the specified extended key usage OID from
+   `RFC 5280 - 4.2.1.12 <https://www.rfc-editor.org/rfc/rfc5280#section-4.2.1.12>`_.
+   If the certificate has no extended key usage extension, this will always
+   behave as if the requested OID is *not present*.
+
+.. cpp:enum:: botan_x509_general_name_types
+
+   GeneralName data types. Allowed values:
+   `BOTAN_X509_OTHER_NAME`, `BOTAN_X509_EMAIL_ADDRESS`, `BOTAN_X509_DNS_NAME`,
+   `BOTAN_X509_DIRECTORY_NAME`, `BOTAN_X509_URI`, `BOTAN_X509_IP_ADDRESS`.
+
+.. cpp:function:: int botan_x509_general_name_get_type(botan_x509_general_name_t name, unsigned int* type)
+
+   Get the data type of the GeneralName object as a member of
+   :cpp:enum:`botan_x509_general_name_types`. Depending on this type, one of the
+   view functions below can be used to extract the value.
+
+   `BOTAN_X509_DIRECTORY_NAME` is a binary DER encoding of a distinguished name.
+   `BOTAN_X509_IP_ADDRESS` is a big endian binary encoding of the IP address
+   optionally concatenated with the subnet mask.
+   `BOTAN_X509_EMAIL_ADDRESS`, `BOTAN_X509_DNS_NAME`, and `BOTAN_X509_URI` are
+   characters arrays.
+   Support for `BOTAN_X509_OTHER_NAME` is deprecated and cannot be viewed using
+   these functions.
+
+.. cpp:function:: int botan_x509_general_name_view_string_value(botan_x509_general_name_t name, \
+                                                                botan_view_ctx ctx, \
+                                                                botan_view_str_fn view)
+
+   Allows querying the value of GeneralName objects of type
+   `BOTAN_X509_EMAIL_ADDRESS`, `BOTAN_X509_DNS_NAME`, `BOTAN_X509_URI`, and
+   `BOTAN_X509_IP_ADDRESS`.
+
+.. cpp:function:: int botan_x509_general_name_view_binary_value(botan_x509_general_name_t name, \
+                                                                botan_view_ctx ctx, \
+                                                                botan_view_bin_fn view)
+
+   Allows querying the value of GeneralName objects of type
+   `BOTAN_X509_DIRECTORY_NAME` (as DER encoded distinguished name) and
+   `BOTAN_X509_IP_ADDRESS` (as big-endian encoded IP address + subnet mask).
+
+.. cpp:function:: int botan_x509_general_name_destroy(botan_x509_general_name_t alt_names)
+
+   Destroy the GeneralName object.
+
+.. cpp:function:: int botan_x509_cert_permitted_name_constraints(botan_x509_cert_t cert, \
+                                                                 size_t index, \
+                                                                 botan_x509_general_name_t* constraint)
+
+   Enumerate the permitted name constraints in the certificate as GeneralName
+   objects. If the given index is not available,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE` is returned.
+
+.. cpp:function:: int botan_x509_cert_permitted_name_constraints_count(botan_x509_cert_t cert, \
+                                                                       size_t* count)
+
+   Get the number of permitted name constraints in the certificate.
+
+.. cpp:function:: int botan_x509_cert_excluded_name_constraints(botan_x509_cert_t cert, \
+                                                                size_t index, \
+                                                                botan_x509_general_name_t* constraint)
+
+   Enumerate the excluded name constraints in the certificate as GeneralName
+   objects. If the given index is not available,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE` is returned.
+
+.. cpp:function:: int botan_x509_cert_excluded_name_constraints_count(botan_x509_cert_t cert, \
+                                                                       size_t* count)
+
+   Get the number of excluded name constraints in the certificate.
+
+.. cpp:function:: int botan_x509_cert_subject_alternative_names(botan_x509_cert_t cert, \
+                                                                size_t index, \
+                                                                botan_x509_general_name_t* alt_name)
+
+   Enumerate the subject alternative names in the certificate as GeneralName
+   objects. If the given index is not available,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE` is returned.
+
+.. cpp:function:: int botan_x509_cert_subject_alternative_names_count(botan_x509_cert_t cert, \
+                                                                      size_t* count)
+
+   Get the number of subject alternative names in the certificate.
+
+.. cpp:function:: int botan_x509_cert_issuer_alternative_names(botan_x509_cert_t cert, \
+                                                               size_t index, \
+                                                               botan_x509_general_name_t* alt_name)
+
+   Enumerate the issuer alternative names in the certificate as GeneralName
+   objects. If the given index is not available,
+   :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE` is returned.
+
+.. cpp:function:: int botan_x509_cert_issuer_alternative_names_count(botan_x509_cert_t cert, \
+                                                                      size_t* count)
+
+   Get the number of issuer alternative names in the certificate.
 
 .. cpp:function:: int botan_x509_cert_verify(int* validation_result, \
                   botan_x509_cert_t cert, \
@@ -1492,7 +2110,7 @@ X.509 Certificates
 
    Certificate path validation supporting Certificate Revocation Lists.
 
-   Works the same as ``botan_x509_cert_cerify``.
+   Works the same as ``botan_x509_cert_verify``.
 
    ``crls`` is an array of ``botan_x509_crl_t`` objects, ``crls_len`` is its length.
 
@@ -1501,12 +2119,89 @@ X.509 Certificates
    Return a (statically allocated) string associated with the verification
    result, or NULL if the code is not known.
 
+.. cpp:function:: int botan_x509_ext_ip_addr_blocks_get_counts(botan_x509_cert_t cert, \
+                  size_t* v4_count, \
+                  size_t* v6_count)
+
+   Get info about the IP Address Blocks extension from `RFC 3779 <https://www.rfc-editor.org/rfc/rfc3779>`_.
+   ``v4_count`` is set to the number of v4 families contained in the extension,
+   ``v6_count`` to the number of v6 families. If the extension is not present, :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE` is returned.
+
+   If the extension is not present or an error occurs, ``v4_count`` and ``v6_count`` are not modified.
+
+.. cpp:function:: int botan_x509_ext_ip_addr_blocks_get_family(botan_x509_cert_t cert, \
+                  int ipv6, \
+                  size_t i, \
+                  int* has_safi, \
+                  uint8_t* safi, \
+                  int* present, \
+                  size_t* count)
+
+   Get info about a specific family in the extension.
+   ``ipv6`` should be set to 0 for v4 families, 1 for v6 families.
+   ``i`` is the local index for each family type, the first v4 family is at (``i = 0``, ``ipv6 = 0``), the first v6 family is at (``i = 0``, ``ipv6 = 1``).
+   The number of v4 / v6 families corresponds to the ``v4_count`` / ``v6_count`` values obtained from :cpp:func:`botan_x509_ext_ip_addr_blocks_get_counts`.
+   ``has_safi`` is set to 1 if the family has an associated SAFI, else 0.
+   ``safi`` contains the SAFI if the family has one, otherwise its value is not modified.
+   ``present`` is set to 1 if the family has range values, 0 if it is marked as "inherit".
+   ``count`` is set to the number of ranges contained if any, otherwise its value is not modified.
+
+   The output parameters ``has_safi``, ``safi``, ``present`` and ``count`` may be modified even if the extension is not present or some other error occurs.
+   In this event, the value of each output parameter after the call returns is undefined.
+
+.. cpp:function:: int botan_x509_ext_ip_addr_blocks_get_address(botan_x509_cert_t cert, \
+                  int ipv6, \
+                  size_t i, \
+                  size_t entry, \
+                  uint8_t min_out[], \
+                  uint8_t max_out[], \
+                  size_t* out_len)
+
+   Get info about a specific range in the extension.
+   ``ipv6`` and ``i`` behave as in :cpp:func:`botan_x509_ext_ip_addr_blocks_get_family`.
+   ``entry`` is the index to the range in the family, between 0 and (not including) ``count``.
+   ``min_out`` and ``max_out`` are set to the min and max addresses of the range respectively.
+   ``out_len`` should be set to 4 for v4 families, 16 for v6 families, the two arrays must also be that size.
+
+   The output parameters ``min_out``, ``max_out`` and ``out_len`` may be modified even if the extension is not present or some other error occurs.
+   In this event, the value of each output parameter after the call returns is undefined.
+
+.. cpp:function:: int botan_x509_ext_as_blocks_get_info(botan_x509_cert_t cert, \
+                  int asnum, \
+                  int* present, \
+                  size_t* count)
+
+   Get info about the AS Blocks extension from `RFC 3779 <https://www.rfc-editor.org/rfc/rfc3779>`_.
+   ``asnum`` should be set to 1 to get info about the ASNUM part of the extension, 0 for RDI.
+   ``present`` is set to 1 if a value is contained, 0 if that part of the extension is marked as "inherit".
+   If the part is not present at all, :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE` will be returned.
+   ``count`` is set to the number of entries for that part if any, otherwise its value is not modified.
+
+   If the extension is not present or an error occurs, ``present`` and ``count`` are not modified.
+
+.. cpp:function:: int botan_x509_ext_as_blocks_get_entry_at(botan_x509_cert_t cert, \
+                  int asnum, \
+                  size_t i, \
+                  uint32_t* min, \
+                  uint32_t* max)
+
+   Get info about a specific entry from the extension.
+   ``asnum`` behaves as in :cpp:func:`botan_x509_ext_as_blocks_get_info`, ``i`` is the index for that part,
+   between 0 and (not including) ``count``.
+   ``min`` and ``max`` will be set to the minimum and maximum AS numbers of the range respectively.
+
+   If the extension is not present or an error occurs, ``min`` and ``max`` are not modified.
+
 X.509 Certificate Revocation Lists
 ----------------------------------------
 
 .. cpp:type:: opaque* botan_x509_crl_t
 
    An opaque data type for an X.509 CRL.
+
+.. cpp:type:: opaque* botan_x509_crl_entry_t
+
+   An opaque data type for an X.509 CRL entry.
 
 .. cpp:function:: int botan_x509_crl_load(botan_x509_crl_t* crl_obj, \
                                         const uint8_t crl[], size_t crl_len)
@@ -1517,14 +2212,391 @@ X.509 Certificate Revocation Lists
 
    Load a CRL from a file.
 
+.. cpp:function:: int botan_x509_crl_create(botan_x509_crl_t* crl_obj, \
+                  botan_rng_t rng, \
+                  botan_x509_cert_t ca_cert, \
+                  botan_privkey_t ca_key, \
+                  uint64_t issue_time, \
+                  uint32_t next_update, \
+                  const char* hash_fn, \
+                  const char* padding)
+
+   Create a new CRL. ``issue_time`` is expected to be a UNIX timestamp, in seconds.
+   ``next_update`` is the number of seconds after ``issue_time`` until the CRL expires.
+   ``hash_fn`` and ``padding`` may be NULL.
+
+.. cpp:enum:: botan_x509_crl_reason_code
+
+   CRL revocation reason codes. Allowed values: `BOTAN_CRL_ENTRY_UNSPECIFIED`,
+   `BOTAN_CRL_ENTRY_KEY_COMPROMISE`, `BOTAN_CRL_ENTRY_CA_COMPROMISE`, `BOTAN_CRL_ENTRY_AFFILIATION_CHANGED`,
+   `BOTAN_CRL_ENTRY_SUPERSEDED`, `BOTAN_CRL_ENTRY_CESSATION_OF_OPERATION`, `BOTAN_CRL_ENTRY_CERTIFICATE_HOLD`,
+   `BOTAN_CRL_ENTRY_REMOVE_FROM_CRL`, `BOTAN_CRL_ENTRY_PRIVILEGE_WITHDRAWN`, `BOTAN_CRL_ENTRY_AA_COMPROMISE`.
+
+.. cpp:function:: int botan_x509_crl_entry_create(botan_x509_crl_entry_t* entry, botan_x509_cert_t cert, int reason_code)
+
+   Create a new CRL entry to be added to a CRL later.
+
+.. cpp:function:: int botan_x509_crl_update(botan_x509_crl_t* crl_obj, \
+                  botan_x509_crl_t last_crl, \
+                  botan_rng_t rng, \
+                  botan_x509_cert_t ca_cert, \
+                  botan_privkey_t ca_key, \
+                  uint64_t issue_time, \
+                  uint32_t next_update, \
+                  const botan_x509_crl_entry_t* new_entries, \
+                  size_t new_entries_len, \
+                  const char* hash_fn, \
+                  const char* padding)
+
+   Revoke some certificates. This does not update the given CRL in place.
+   ``issue_time`` is expected to be a UNIX timestamp, in seconds.
+   ``next_update`` is the number of seconds after ``issue_time`` until the CRL expires.
+   ``hash_fn`` and ``padding`` may be NULL.
+   ``new_entries`` is an array of ``botan_x509_crl_entry_t`` objects, ``new_entries_len`` is its length.
+
+.. cpp:function:: int botan_x509_crl_verify_signature(botan_x509_crl_t crl, botan_pubkey_t key)
+
+   Verify the signature of a CRL. Returns 1 if the signature is valid, 0 otherwise.
+
 .. cpp:function:: int botan_x509_crl_destroy(botan_x509_crl_t crl)
 
    Destroy the CRL object.
+
+.. cpp:function:: int botan_x509_crl_this_update(botan_x509_crl_t crl, uint64_t* time_since_epoch)
+
+   Return the time the CRL becomes valid, as seconds since epoch.
+
+.. cpp:function:: int botan_x509_crl_next_update(botan_x509_crl_t crl, uint64_t* time_since_epoch)
+
+   Return the time the CRL expires, as seconds since epoch. Note that this field
+   is technically optional in CRLs, if the CRL does not specify a "next update"
+   timestamp, :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE` is returned.
+
+.. cpp:function:: int botan_x509_crl_view_binary_values(botan_x509_crl_t crl, \
+                                                        botan_x509_value_type value_type, \
+                                                        size_t index, \
+                                                        botan_view_ctx ctx, \
+                                                        botan_view_bin_fn view_fn)
+
+   Access various binary fields of information contained in the CRL.
+
+   Some of those may be multi-value fields, the `index` parameter may be used
+   to enumerate such values until :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE`
+   is returned. For singular values, an `index` of 0 must be used.
+
+   See :ref:`x509_getter_function` for further information about the available
+   values. If a value does not exist :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE`
+   is returned.
+
+.. cpp:function:: int botan_x509_crl_view_binary_values_count(botan_x509_crl_t crl, \
+                                                               botan_x509_value_type value_type, \
+                                                               size_t* count)
+
+   Get the number of entries for multi-value binary fields of information
+   contained in the CRL.
+
+.. cpp:function:: int botan_x509_crl_view_string_values(botan_x509_crl_t crl, \
+                                                        botan_x509_value_type value_type, \
+                                                        size_t index, \
+                                                        botan_view_ctx ctx, \
+                                                        botan_view_str_fn view_fn)
+
+   Access various string fields of information contained in the CRL.
+
+   Some of those may be multi-value fields, the `index` parameter may be used
+   to enumerate such values until :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE`
+   is returned. For singular values, an `index` of 0 must be used.
+
+   See :ref:`x509_getter_function` for further information about the available
+   values. If a value does not exist :cpp:enumerator:`BOTAN_FFI_ERROR_NO_VALUE`
+   is returned.
+
+.. cpp:function:: int botan_x509_crl_view_string_values_count(botan_x509_crl_t crl, \
+                                                               botan_x509_value_type value_type, \
+                                                               size_t* count)
+
+   Get the number of entries for multi-value string fields of information
+   contained in the CRL.
 
 .. cpp:function:: int botan_x509_is_revoked(botan_x509_crl_t crl, botan_x509_cert_t cert)
 
    Check whether a given ``crl`` contains a given ``cert``.
    Return ``0`` when the certificate is revoked, ``-1`` otherwise.
+
+.. cpp:function:: int botan_x509_crl_entries(botan_x509_crl_t crl, \
+                                             size_t index, \
+                                             botan_x509_crl_entry_t *entry)
+
+   List the entries in the CRL. Using the `index` parameter applications can
+   enumerate all entries in the CRL. If the list of entries is exhausted, this
+   will return :cpp:enumerator:`BOTAN_FFI_ERROR_OUT_OF_RANGE`.
+
+.. cpp:function:: int botan_x509_crl_entries_count(botan_x509_crl_t crl, size_t* count)
+
+   Get the number of entries in the CRL.
+
+.. cpp:function:: int botan_x509_crl_entry_reason(botan_x509_crl_entry_t entry, int* reason_code)
+
+   Get the revocation reason code for the given CRL entry. The reason code is
+   according to `RFC 5280 - 5.3.1 <https://www.rfc-editor.org/rfc/rfc5280#section-5.3.1>`, see :cpp:enum:`botan_x509_crl_reason_code`.
+
+.. cpp:function:: int botan_x509_crl_entry_revocation_date(botan_x509_crl_entry_t entry, uint64_t* time_since_epoch)
+
+   Get the revocation date for the given CRL entry, as seconds since epoch.
+
+.. cpp:function:: int botan_x509_crl_entry_serial_number(botan_x509_crl_entry_t entry, botan_mp_t* serial_number)
+
+   Get the serial number for the given CRL entry as a multi-precision integer.
+
+.. cpp:function:: int botan_x509_crl_entry_view_serial_number(botan_x509_crl_entry_t entry, botan_view_ctx ctx, botan_view_bin_fn view)
+
+   View the serial number for the given CRL entry, as big-endian encoded bytes.
+
+.. cpp:function:: int botan_x509_crl_entry_destroy(botan_x509_crl_entry_t entry)
+
+   Destroy the CRL entry object.
+
+.. _x509_getter_function:
+
+X.509 Available Generic Getter Values
+----------------------------------------
+
+Most X.509 objects may contain various data fields that may be of interest for
+using applications. Many of those values can be queried through a generic API
+that is extensible without introducing ABI incompatibilities.
+
+All available value types of the generic X.509 object getters are:
+
+.. cpp:enumerator:: BOTAN_X509_SERIAL_NUMBER
+
+   The binary big-endian encoded serial number of a certificate or CRL.
+
+.. cpp:enumerator:: BOTAN_X509_SUBJECT_DN_BITS
+
+   The DER encoded subject distinguished name of the certificate.
+
+.. cpp:enumerator:: BOTAN_X509_ISSUER_DN_BITS
+
+   The DER encoded issuer distinguished name of a certificate or CRL.
+
+.. cpp:enumerator:: BOTAN_X509_SUBJECT_KEY_IDENTIFIER
+
+   The subject key identifier (usually a hash of the certificate's public key)
+   in binary format.
+
+.. cpp:enumerator:: BOTAN_X509_AUTHORITY_KEY_IDENTIFIER
+
+   The issuer's key identifier (usually a hash of the issuer's public key) in
+   binary format.
+
+.. cpp:enumerator:: BOTAN_X509_PUBLIC_KEY_PKCS8_BITS
+
+   The certificate's public key in PKCS#8 format (DER encoding).
+
+.. cpp:enumerator:: BOTAN_X509_TBS_DATA_BITS
+
+   The "To-Be-Signed" data of a certificate or CRL (DER encoding).
+
+.. cpp:enumerator:: BOTAN_X509_SIGNATURE_SCHEME_BITS
+
+   The signature scheme descriptor of a certificate or CRL (DER encoding).
+
+.. cpp:enumerator:: BOTAN_X509_SIGNATURE_BITS
+
+   The raw signature data of a certificate or CRL. The encoding depends on the
+   signature algorithm but is always in binary format.
+
+.. cpp:enumerator:: BOTAN_X509_DER_ENCODING
+
+   The binary DER encoding of the entire certificate or CRL object.
+
+.. cpp:enumerator:: BOTAN_X509_PEM_ENCODING
+
+   The string-based PEM encoding of the entire certificate or CRL object.
+
+.. cpp:enumerator:: BOTAN_X509_CRL_DISTRIBUTION_URLS
+
+   The CRL distribution points (URLs) noted in the certificate as a character
+   array. There might be more than one such URL defined in a certificate.
+
+.. cpp:enumerator:: BOTAN_X509_OCSP_RESPONDER_URLS
+
+   The OCSP responders (URLs) noted in the certificate as a character array.
+   There might be more than one such URL defined in a certificate.
+
+.. cpp:enumerator:: BOTAN_X509_CA_ISSUERS_URLS
+
+   The URLs of the issuing CA certificate of a certificate as a character array.
+   There might be more than one such URL defined in a certificate.
+
+SPAKE2+ Password Authenticated Key Exchange
+--------------------------------------------
+
+.. versionadded:: 3.13.0
+
+An implementation of the SPAKE2+ password authenticated key exchange
+(RFC 9383). The *prover* knows the password itself, while the *verifier*
+stores only a registration record derived from the password. See
+:doc:`spake2p` for a description of the protocol and the expected
+message flow.
+
+The identity, salt, and context parameters of these functions may be null,
+if the corresponding length is zero. Since the lengths of the outputs vary
+with the system parameters, all outputs are produced using view callbacks.
+
+.. cpp:type:: opaque* botan_spake2p_params_t
+
+   An opaque data type for SPAKE2+ system parameters, which select the
+   elliptic curve group, the SPAKE2+ M/N group elements, and the hash
+   function. Objects created from the system parameters hold their own
+   copy, so the parameters may be destroyed at any time.
+
+.. cpp:function:: int botan_spake2p_params_init(botan_spake2p_params_t* params, const char* ciphersuite)
+
+   Create system parameters from an RFC 9383 ciphersuite name, one of
+   "P256-SHA256", "P256-SHA512", "P384-SHA256", "P384-SHA512", or
+   "P521-SHA512", all using HMAC key confirmation.
+
+.. cpp:function:: int botan_spake2p_params_init_custom(botan_spake2p_params_t* params, \
+                  botan_ec_group_t group, const uint8_t seed[], size_t seed_len, \
+                  const char* hash_fn)
+
+   Create custom system parameters for an arbitrary group, deriving the
+   M/N group elements from the seed using hash to curve; returns
+   ``BOTAN_FFI_ERROR_NOT_IMPLEMENTED`` if the group does not support hash
+   to curve. Both peers must use the same group, seed, and hash.
+
+.. cpp:function:: int botan_spake2p_params_destroy(botan_spake2p_params_t params)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_spake2p_params_share_size(botan_spake2p_params_t params, size_t* share_size)
+
+   Return the size in bytes of a key share (shareP or shareV).
+
+.. cpp:function:: int botan_spake2p_params_confirmation_size(botan_spake2p_params_t params, size_t* confirmation_size)
+
+   Return the size in bytes of a key confirmation message (confirmP or confirmV).
+
+.. cpp:function:: int botan_spake2p_derive_secret(botan_spake2p_params_t params, \
+                  const char* password, \
+                  const uint8_t prover_id[], size_t prover_id_len, \
+                  const uint8_t verifier_id[], size_t verifier_id_len, \
+                  const uint8_t salt[], size_t salt_len, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Derive a prover secret (w0 and w1) from a password, using Argon2id.
+   The view callback is invoked with the serialized prover secret, which
+   is password equivalent and must be protected accordingly. It is used
+   with ``botan_spake2p_registration_record`` and
+   ``botan_spake2p_prover_init``.
+
+.. cpp:function:: int botan_spake2p_registration_record(botan_spake2p_params_t params, \
+                  botan_rng_t rng, const uint8_t secret[], size_t secret_len, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Compute a registration record (w0 and L) from a serialized prover
+   secret. The record is provided to the verifier during registration.
+   While it does not allow directly impersonating the prover, it does
+   allow offline password guessing attacks, so it should be protected.
+
+.. cpp:type:: opaque* botan_spake2p_prover_t
+
+   An opaque data type for a SPAKE2+ prover.
+
+.. cpp:function:: int botan_spake2p_prover_init(botan_spake2p_prover_t* prover, \
+                  botan_spake2p_params_t params, \
+                  const uint8_t secret[], size_t secret_len, \
+                  const uint8_t prover_id[], size_t prover_id_len, \
+                  const uint8_t verifier_id[], size_t verifier_id_len, \
+                  const uint8_t context[], size_t context_len)
+
+   Initialize a prover from a serialized prover secret. The identities
+   and context must be agreed upon by both parties; the identities must
+   additionally match the values used when deriving the prover secret.
+
+.. cpp:function:: int botan_spake2p_prover_destroy(botan_spake2p_prover_t prover)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_spake2p_prover_generate_message(botan_spake2p_prover_t prover, \
+                  botan_rng_t rng, botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Generate the prover's key share (shareP), which is sent to the
+   verifier. This can be called only once per prover object.
+
+.. cpp:function:: int botan_spake2p_prover_process_message(botan_spake2p_prover_t prover, \
+                  botan_rng_t rng, const uint8_t peer_message[], size_t peer_message_len, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Consume the verifier's response (shareV followed by confirmV) and
+   produce the prover's key confirmation (confirmP), which is sent to the
+   verifier. Returns ``BOTAN_FFI_ERROR_BAD_MAC`` if the verifier's key
+   confirmation is wrong, typically meaning the passwords do not match.
+
+.. cpp:function:: int botan_spake2p_prover_shared_secret(botan_spake2p_prover_t prover, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Return the shared secret (K_shared). This may be called only after
+   ``botan_spake2p_prover_process_message`` has succeeded.
+
+.. cpp:type:: opaque* botan_spake2p_verifier_t
+
+   An opaque data type for a SPAKE2+ verifier.
+
+.. cpp:function:: int botan_spake2p_verifier_init(botan_spake2p_verifier_t* verifier, \
+                  botan_spake2p_params_t params, \
+                  const uint8_t record[], size_t record_len, \
+                  const uint8_t prover_id[], size_t prover_id_len, \
+                  const uint8_t verifier_id[], size_t verifier_id_len, \
+                  const uint8_t context[], size_t context_len)
+
+   Initialize a verifier from a serialized registration record. See
+   ``botan_spake2p_prover_init`` for the requirements on the identities
+   and context.
+
+.. cpp:function:: int botan_spake2p_verifier_destroy(botan_spake2p_verifier_t verifier)
+
+   Destroy an object.
+
+.. cpp:function:: int botan_spake2p_verifier_process_message(botan_spake2p_verifier_t verifier, \
+                  botan_rng_t rng, const uint8_t peer_message[], size_t peer_message_len, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Consume the prover's key share (shareP) and produce the verifier's
+   response (shareV followed by confirmV), which is sent to the prover.
+   This can be called only once per verifier object.
+
+.. cpp:function:: int botan_spake2p_verifier_verify_confirmation(botan_spake2p_verifier_t verifier, \
+                  const uint8_t confirmation[], size_t confirmation_len)
+
+   Check the prover's key confirmation (confirmP). Returns
+   ``BOTAN_FFI_ERROR_BAD_MAC`` if the confirmation is wrong, meaning the
+   prover does not know the password.
+
+.. cpp:function:: int botan_spake2p_verifier_skip_confirmation(botan_spake2p_verifier_t verifier)
+
+   Can be called after ``botan_spake2p_verifier_process_message``, in
+   place of ``botan_spake2p_verifier_verify_confirmation``, to allow
+   extracting the shared secret without having checked the prover's key
+   confirmation.
+
+   .. warning::
+
+      After calling this, nothing is known about the peer; only a prover
+      which knows the password can compute the same shared secret, but no
+      evidence of this has been received. It is intended solely for
+      protocols which embed SPAKE2+ and perform the prover's key
+      confirmation themselves, such as the proposed PAKE extension for
+      TLS 1.3, where the TLS handshake takes the place of confirmP.
+      Anywhere else, use ``botan_spake2p_verifier_verify_confirmation``.
+
+.. cpp:function:: int botan_spake2p_verifier_shared_secret(botan_spake2p_verifier_t verifier, \
+                  botan_view_ctx ctx, botan_view_bin_fn view)
+
+   Return the shared secret (K_shared). This may be called only after
+   ``botan_spake2p_verifier_verify_confirmation`` has succeeded, or after
+   ``botan_spake2p_verifier_skip_confirmation``.
 
 ZFEC (Forward Error Correction)
 ----------------------------------------

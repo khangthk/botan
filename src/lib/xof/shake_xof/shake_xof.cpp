@@ -9,9 +9,12 @@
 
 #include <botan/internal/shake_xof.h>
 
+#include <botan/assert.h>
+
 namespace Botan {
 
-SHAKE_XOF::SHAKE_XOF(size_t capacity) : m_keccak(capacity, 0b1111, 4), m_output_generated(false) {
+SHAKE_XOF::SHAKE_XOF(size_t capacity) :
+      m_keccak({.capacity_bits = capacity, .padding = KeccakPadding::shake()}), m_output_generated(false) {
    BOTAN_ASSERT_NOMSG(capacity == 256 || capacity == 512);
 }
 

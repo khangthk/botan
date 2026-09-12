@@ -11,6 +11,8 @@
 #include <botan/pk_keys.h>
 #include <memory>
 
+BOTAN_DEPRECATED_HEADER("dsa.h")
+
 namespace Botan {
 
 class BigInt;
@@ -41,9 +43,7 @@ class BOTAN_PUBLIC_API(2, 0) DSA_PublicKey : public virtual Public_Key {
 
       std::string algo_name() const override { return "DSA"; }
 
-      size_t message_parts() const override { return 2; }
-
-      size_t message_part_size() const override;
+      std::optional<size_t> _signature_element_size_for_DER_encoding() const override;
 
       AlgorithmIdentifier algorithm_identifier() const override;
 
@@ -59,8 +59,7 @@ class BOTAN_PUBLIC_API(2, 0) DSA_PublicKey : public virtual Public_Key {
 
       const BigInt& get_int_field(std::string_view field) const override;
 
-      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                   std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const override;
 
       std::unique_ptr<PK_Ops::Verification> create_x509_verification_op(const AlgorithmIdentifier& signature_algorithm,
                                                                         std::string_view provider) const override;
@@ -70,7 +69,7 @@ class BOTAN_PUBLIC_API(2, 0) DSA_PublicKey : public virtual Public_Key {
 
       DSA_PublicKey() = default;
 
-      DSA_PublicKey(std::shared_ptr<const DL_PublicKey> key) : m_public_key(std::move(key)) {}
+      explicit DSA_PublicKey(std::shared_ptr<const DL_PublicKey> key) : m_public_key(std::move(key)) {}
 
       std::shared_ptr<const DL_PublicKey> m_public_key;
 };
@@ -115,9 +114,8 @@ class BOTAN_PUBLIC_API(2, 0) DSA_PrivateKey final : public DSA_PublicKey,
       const BigInt& get_int_field(std::string_view field) const override;
       secure_vector<uint8_t> raw_private_key_bits() const override;
 
-      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
-                                                             std::string_view params,
-                                                             std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                              const PK_Signature_Options& options) const override;
 
    private:
       std::shared_ptr<const DL_PrivateKey> m_private_key;

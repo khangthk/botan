@@ -28,15 +28,22 @@ class BOTAN_PUBLIC_API(2, 15) Processor_RNG final : public Hardware_RNG {
       */
       static bool available();
 
+      /**
+      * Test whether this RNG accepts externally provided input
+      * @return false if this RNG is known to ignore provided inputs
+      */
       bool accepts_input() const override { return false; }
 
+      /**
+      * Test whether this RNG has been seeded
+      * @return true if this RNG is seeded and ready for use
+      */
       bool is_seeded() const override { return true; }
 
-      /*
-      * No way to reseed processor provided generator, so reseed is ignored
+      /**
+      * Return the name of this RNG type
+      * @return the name of this RNG type
       */
-      size_t reseed(Entropy_Sources&, size_t, std::chrono::milliseconds) override;
-
       std::string name() const override;
 
    private:

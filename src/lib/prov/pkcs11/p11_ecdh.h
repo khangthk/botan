@@ -30,8 +30,7 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_ECDH_PublicKey : public PKCS11_EC_PublicKey 
       * @param session the session to use
       * @param handle the handle of the ECDH public key
       */
-      PKCS11_ECDH_PublicKey(Session& session, ObjectHandle handle) :
-            EC_PublicKey(), PKCS11_EC_PublicKey(session, handle) {}
+      PKCS11_ECDH_PublicKey(Session& session, ObjectHandle handle) : PKCS11_EC_PublicKey(session, handle) {}
 
       /**
       * Imports a ECDH public key
@@ -39,14 +38,14 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_ECDH_PublicKey : public PKCS11_EC_PublicKey 
       * @param props the attributes of the public key
       */
       PKCS11_ECDH_PublicKey(Session& session, const EC_PublicKeyImportProperties& props) :
-            EC_PublicKey(), PKCS11_EC_PublicKey(session, props) {}
+            PKCS11_EC_PublicKey(session, props) {}
 
       inline std::string algo_name() const override { return "ECDH"; }
 
       /**
-       * @throws Not_Implemented
+       * @throws Not_Implemented as this operation is not possible in PKCS11
        */
-      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator&) const final {
+      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator& /*rng*/) const final {
          throw Not_Implemented("Cannot generate a new PKCS#11 ECDH keypair from this public key");
       }
 
@@ -95,9 +94,7 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_ECDH_PrivateKey final : public virtual PKCS1
 
       std::unique_ptr<Public_Key> public_key() const override;
 
-      inline std::vector<uint8_t> public_value() const override {
-         return public_point().encode(EC_Point_Format::Uncompressed);
-      }
+      inline std::vector<uint8_t> public_value() const override { return public_ec_point().serialize_uncompressed(); }
 
       /// @return the exported ECDH private key
       ECDH_PrivateKey export_key() const;
@@ -105,9 +102,9 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_ECDH_PrivateKey final : public virtual PKCS1
       secure_vector<uint8_t> private_key_bits() const override;
 
       /**
-       * @throws Not_Implemented
+       * @throws Not_Implemented as this operation is not possible in PKCS11
        */
-      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator&) const override {
+      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator& /*rng*/) const override {
          throw Not_Implemented("Cannot generate a new PKCS#11 ECDH keypair from this private key");
       }
 

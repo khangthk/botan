@@ -7,7 +7,9 @@
 #include "tests.h"
 
 #if defined(BOTAN_HAS_HASH)
+   #include <botan/exceptn.h>
    #include <botan/hash.h>
+   #include <botan/rng.h>
    #include <botan/internal/fmt.h>
 #endif
 
@@ -39,11 +41,11 @@ class Invalid_Hash_Name_Tests final : public Test {
          } catch(Botan::Invalid_Argument& e) {
             const std::string msg = e.what();
             const std::string full_msg = "" + expected_msg;
-            result.test_eq("expected error message", msg, full_msg);
+            result.test_str_eq("expected error message", msg, full_msg);
          } catch(Botan::Lookup_Error& e) {
             const std::string algo_not_found_msg = "Unavailable Hash " + name;
             const std::string msg = e.what();
-            result.test_eq("expected error message", msg, algo_not_found_msg);
+            result.test_str_eq("expected error message", msg, algo_not_found_msg);
          } catch(std::exception& e) {
             result.test_failure("some unknown exception", e.what());
          } catch(...) {
@@ -86,17 +88,22 @@ class Hash_Function_Tests final : public Text_Based_Test {
             auto clone = hash->new_object();
 
             const std::string provider(hash->provider());
-            result.test_is_nonempty("provider", provider);
-            result.test_eq(provider, hash->name(), algo);
-            result.test_eq(provider, hash->name(), clone->name());
+            result.test_str_not_empty("provider", provider);
+            result.test_str_eq(provider, hash->name(), algo);
+            result.test_str_eq(provider, hash->name(), clone->name());
+
+            // A security level beyond the generic birthday attack is nonsensical
+            result.test_sz_lte(provider + " security level is bounded by the birthday attack",
+                               hash->security_level(),
+                               4 * hash->output_length());
 
             for(size_t i = 0; i != 3; ++i) {
                hash->update(input);
-               result.test_eq(provider, "hashing", hash->final(), expected);
+               result.test_bin_eq(provider + " hashing", hash->final(), expected);
             }
 
             clone->update(input);
-            result.test_eq(provider, "hashing (clone)", clone->final(), expected);
+            result.test_bin_eq(provider + " hashing (clone)", clone->final(), expected);
 
             // Test to make sure clear() resets what we need it to
             hash->update("some discarded input");
@@ -104,7 +111,7 @@ class Hash_Function_Tests final : public Text_Based_Test {
             hash->update(nullptr, 0);  // this should be effectively ignored
             hash->update(input);
 
-            result.test_eq(provider, "hashing after clear", hash->final(), expected);
+            result.test_bin_eq(provider + " hashing after clear", hash->final(), expected);
 
             // Test that misaligned inputs work
 
@@ -119,7 +126,7 @@ class Hash_Function_Tests final : public Text_Based_Test {
                }
 
                hash->update(&misaligned[bytes_to_misalign], input.size());
-               result.test_eq(provider, "hashing misaligned data", hash->final(), expected);
+               result.test_bin_eq(provider + " hashing misaligned data", hash->final(), expected);
             }
 
             if(input.size() > 5) {
@@ -140,15 +147,15 @@ class Hash_Function_Tests final : public Text_Based_Test {
                   hash->update(&input[so_far], take);
                   so_far += take;
                }
-               result.test_eq(provider, "hashing split", hash->final(), expected);
+               result.test_bin_eq(provider + " hashing split", hash->final(), expected);
 
                fork->update(&input[input.size() - 1], 1);
-               result.test_eq(provider, "hashing split", fork->final(), expected);
+               result.test_bin_eq(provider + " hashing split", fork->final(), expected);
             }
 
             if(hash->hash_block_size() > 0) {
                // GOST-34.11 uses 32 byte block
-               result.test_gte("If hash_block_size is set, it is large", hash->hash_block_size(), 32);
+               result.test_sz_gte("If hash_block_size is set, it is large", hash->hash_block_size(), 32);
             }
          }
 
@@ -193,8 +200,6 @@ class Hash_NIST_MonteCarlo_Tests final : public Text_Based_Test {
             input.push_back(seed);
             input.push_back(seed);
 
-            std::vector<uint8_t> buf(hash->output_length());
-
             for(size_t j = 0; j <= count; ++j) {
                for(size_t i = 3; i != 1003; ++i) {
                   hash->update(input[0]);
@@ -212,7 +217,7 @@ class Hash_NIST_MonteCarlo_Tests final : public Text_Based_Test {
                }
             }
 
-            result.test_eq("Output is expected", input[2], expected);
+            result.test_bin_eq("Output is expected", input[2], expected);
          }
 
          return result;
@@ -280,7 +285,7 @@ class Hash_LongRepeat_Tests final : public Text_Based_Test {
 
             std::vector<uint8_t> output(hash->output_length());
             hash->final(output.data());
-            result.test_eq("Output is expected", output, expected);
+            result.test_bin_eq("Output is expected", output, expected);
          }
 
          return result;
@@ -288,6 +293,59 @@ class Hash_LongRepeat_Tests final : public Text_Based_Test {
 };
 
 BOTAN_REGISTER_TEST("hash", "hash_rep", Hash_LongRepeat_Tests);
+
+Test::Result hash_security_level_tests() {
+   Test::Result result("HashFunction security level");
+
+   const std::vector<std::pair<std::string, size_t>> expected_levels = {
+      {"Adler32", 0},
+      {"CRC24", 0},
+      {"CRC32", 0},
+      {"MD4", 0},
+      {"MD5", 0},
+      {"SHA-1", 61},
+      {"SHA-224", 112},
+      {"SHA-256", 128},
+      {"SHA-384", 192},
+      {"SHA-512", 256},
+      {"SHA-512-256", 128},
+      {"SHA-3(224)", 112},
+      {"SHA-3(256)", 128},
+      {"SHA-3(384)", 192},
+      {"SHA-3(512)", 256},
+      {"Keccak-1600(512)", 256},
+      {"SHAKE-128(128)", 64},
+      {"SHAKE-128(256)", 128},
+      {"SHAKE-128(1024)", 128},
+      {"SHAKE-256(256)", 128},
+      {"SHAKE-256(512)", 256},
+      {"SHAKE-256(2048)", 256},
+      {"Ascon-Hash256", 128},
+      {"Blake2b(512)", 256},
+      {"Blake2s(256)", 128},
+      {"GOST-R-34.11-94", 105},
+      {"RIPEMD-160", 80},
+      {"SM3", 128},
+      {"Skein-512(512)", 256},
+      {"Streebog-256", 128},
+      {"Streebog-512", 256},
+      {"Whirlpool", 256},
+      {"Truncated(SHA-256,64)", 32},
+      {"Truncated(SHA-512,300)", 150},
+      {"Parallel(MD5,SHA-256)", 128},
+      {"Comb4P(MD4,MD5)", 0},
+   };
+
+   for(const auto& [name, expected] : expected_levels) {
+      if(auto hash = Botan::HashFunction::create(name)) {
+         result.test_sz_eq(name + " security level", hash->security_level(), expected);
+      }
+   }
+
+   return result;
+}
+
+BOTAN_REGISTER_TEST_FN("hash", "hash_security_level", hash_security_level_tests);
 
    #if defined(BOTAN_HAS_TRUNCATED_HASH) && defined(BOTAN_HAS_SHA2_32)
 
@@ -299,7 +357,7 @@ Test::Result hash_truncation_negative_tests() {
    result.test_throws<Botan::Invalid_Argument>("cannot output more bits than the underlying hash",
                                                [] { Botan::HashFunction::create("Truncated(SHA-256,257)"); });
    auto unobtainable = Botan::HashFunction::create("Truncated(NonExistentHash-256,128)");
-   result.confirm("non-existent hashes are not created", unobtainable == nullptr);
+   result.test_is_true("non-existent hashes are not created", unobtainable == nullptr);
    return result;
 }
 

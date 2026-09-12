@@ -10,6 +10,7 @@
 #define BOTAN_AEAD_CCM_H_
 
 #include <botan/aead.h>
+
 #include <botan/block_cipher.h>
 
 namespace Botan {
@@ -34,7 +35,7 @@ class CCM_Mode : public AEAD_Mode {
 
       Key_Length_Specification key_spec() const final;
 
-      bool valid_nonce_length(size_t) const final;
+      bool valid_nonce_length(size_t length) const final;
 
       size_t default_nonce_length() const final;
 
@@ -89,10 +90,10 @@ class CCM_Encryption final : public CCM_Mode {
       * @param L length of L parameter. The total message length
       *           must be less than 2**L bytes, and the nonce is 15-L bytes.
       */
-      CCM_Encryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16, size_t L = 3) :
+      explicit CCM_Encryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16, size_t L = 3) :
             CCM_Mode(std::move(cipher), tag_size, L) {}
 
-      size_t output_length(size_t input_length) const override { return input_length + tag_size(); }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return 0; }
 
@@ -112,13 +113,10 @@ class CCM_Decryption final : public CCM_Mode {
       * @param L length of L parameter. The total message length
       *           must be less than 2**L bytes, and the nonce is 15-L bytes.
       */
-      CCM_Decryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16, size_t L = 3) :
+      explicit CCM_Decryption(std::unique_ptr<BlockCipher> cipher, size_t tag_size = 16, size_t L = 3) :
             CCM_Mode(std::move(cipher), tag_size, L) {}
 
-      size_t output_length(size_t input_length) const override {
-         BOTAN_ARG_CHECK(input_length >= tag_size(), "Sufficient input");
-         return input_length - tag_size();
-      }
+      size_t output_length(size_t input_length) const override;
 
       size_t minimum_final_size() const override { return tag_size(); }
 

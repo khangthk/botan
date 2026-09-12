@@ -1,0 +1,277 @@
+/*
+* (C) 2022,2025 Jack Lloyd
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#ifndef BOTAN_SIMD_4X64_H_
+#define BOTAN_SIMD_4X64_H_
+
+#include <botan/types.h>
+#include <botan/internal/isa_extn.h>
+#include <botan/internal/target_info.h>
+
+#if defined(BOTAN_TARGET_ARCH_SUPPORTS_AVX2)
+   #include <immintrin.h>
+#endif
+
+namespace Botan {
+
+// NOLINTBEGIN(portability-simd-intrinsics)
+
+class SIMD_4x64 final {
+   public:
+      SIMD_4x64& operator=(const SIMD_4x64& other) = default;
+      SIMD_4x64(const SIMD_4x64& other) = default;
+
+      SIMD_4x64& operator=(SIMD_4x64&& other) = default;
+      SIMD_4x64(SIMD_4x64&& other) = default;
+
+      ~SIMD_4x64() = default;
+
+      // zero initialized
+      BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64() : m_simd(_mm256_setzero_si256()) {}
+
+      // Load two halves at different addresses
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 load_le2(const void* lo, const void* hi) {
+         return SIMD_4x64(
+            _mm256_loadu2_m128i(reinterpret_cast<const __m128i*>(lo), reinterpret_cast<const __m128i*>(hi)));
+      }
+
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 load_be2(const void* lo, const void* hi) {
+         return SIMD_4x64::load_le2(lo, hi).bswap();
+      }
+
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 load_le(const void* in) {
+         return SIMD_4x64(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(in)));
+      }
+
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 load_be(const void* in) { return SIMD_4x64::load_le(in).bswap(); }
+
+      /**
+      * Load in big endian order from ptrs[i] + Stride * n + offset,
+      * gathering lane i's n'th block out of a set of per lane buffers
+      */
+      template <size_t Stride>
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64
+      load_be(const uint8_t* const* ptrs, size_t i, size_t n, size_t offset = 0) {
+         return load_be(ptrs[i] + Stride * n + offset);
+      }
+
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 broadcast_2x64(const uint64_t* in) {
+         return SIMD_4x64(_mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in))));
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 bswap() const {
+         const auto idx = _mm256_set_epi8(
+            8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
+
+         return SIMD_4x64(_mm256_shuffle_epi8(m_simd, idx));
+      }
+
+      void BOTAN_FN_ISA_SIMD_4X64 store_le(uint64_t out[4]) const { this->store_le(reinterpret_cast<uint8_t*>(out)); }
+
+      BOTAN_FN_ISA_SIMD_4X64 void store_le(uint8_t out[]) const {
+         _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), m_simd);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void store_le2(void* outh, void* outl) {
+         _mm256_storeu2_m128i(reinterpret_cast<__m128i*>(outh), reinterpret_cast<__m128i*>(outl), m_simd);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void store_be(uint8_t out[]) const { bswap().store_le(out); }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 operator+(const SIMD_4x64& other) const {
+         SIMD_4x64 retval(*this);
+         retval += other;
+         return retval;
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 operator^(const SIMD_4x64& other) const {
+         SIMD_4x64 retval(*this);
+         retval ^= other;
+         return retval;
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 operator&(const SIMD_4x64& other) const {
+         SIMD_4x64 retval(*this);
+         retval &= other;
+         return retval;
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 operator|(const SIMD_4x64& other) const {
+         SIMD_4x64 retval(*this);
+         retval |= other;
+         return retval;
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void operator+=(const SIMD_4x64& other) {
+         m_simd = _mm256_add_epi64(m_simd, other.m_simd);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void operator^=(const SIMD_4x64& other) {
+         m_simd = _mm256_xor_si256(m_simd, other.m_simd);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void operator&=(const SIMD_4x64& other) {
+         m_simd = _mm256_and_si256(m_simd, other.m_simd);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64 void operator|=(const SIMD_4x64& other) { m_simd = _mm256_or_si256(m_simd, other.m_simd); }
+
+      // (~reg) & other
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 andc(const SIMD_4x64& other) const {
+         return SIMD_4x64(_mm256_andnot_si256(m_simd, other.m_simd));
+      }
+
+      template <size_t ROT>
+      BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 rotr() const
+         requires(ROT > 0 && ROT < 64)
+      {
+#if defined(__AVX512VL__)
+         return SIMD_4x64(_mm256_ror_epi64(m_simd, ROT));
+#else
+         if constexpr(ROT == 8) {
+            auto shuf_rot_8 =
+               _mm256_set_epi64x(0x080f0e0d0c0b0a09, 0x0007060504030201, 0x080f0e0d0c0b0a09, 0x0007060504030201);
+
+            return SIMD_4x64(_mm256_shuffle_epi8(m_simd, shuf_rot_8));
+         } else if constexpr(ROT == 16) {
+            auto shuf_rot_16 =
+               _mm256_set_epi64x(0x09080f0e0d0c0b0a, 0x0100070605040302, 0x09080f0e0d0c0b0a, 0x0100070605040302);
+
+            return SIMD_4x64(_mm256_shuffle_epi8(m_simd, shuf_rot_16));
+         } else if constexpr(ROT == 24) {
+            auto shuf_rot_24 =
+               _mm256_set_epi64x(0x0a09080f0e0d0c0b, 0x0201000706050403, 0x0a09080f0e0d0c0b, 0x0201000706050403);
+
+            return SIMD_4x64(_mm256_shuffle_epi8(m_simd, shuf_rot_24));
+         } else if constexpr(ROT == 32) {
+            auto shuf_rot_32 =
+               _mm256_set_epi64x(0x0b0a09080f0e0d0c, 0x0302010007060504, 0x0b0a09080f0e0d0c, 0x0302010007060504);
+
+            return SIMD_4x64(_mm256_shuffle_epi8(m_simd, shuf_rot_32));
+         } else {
+            return SIMD_4x64(_mm256_or_si256(_mm256_srli_epi64(m_simd, static_cast<int>(ROT)),
+                                             _mm256_slli_epi64(m_simd, static_cast<int>(64 - ROT))));
+         }
+#endif
+      }
+
+      template <size_t ROT>
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 rotl() const {
+         return this->rotr<64 - ROT>();
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 sigma0() const {
+         const SIMD_4x64 r1 = this->rotr<28>();
+         const SIMD_4x64 r2 = this->rotr<34>();
+         const SIMD_4x64 r3 = this->rotr<39>();
+         return r1 ^ r2 ^ r3;
+      }
+
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 sigma1() const {
+         const SIMD_4x64 r1 = this->rotr<14>();
+         const SIMD_4x64 r2 = this->rotr<18>();
+         const SIMD_4x64 r3 = this->rotr<41>();
+         return r1 ^ r2 ^ r3;
+      }
+
+      /**
+      * The Keccak chi operation, x ^ (~y & z)
+      */
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 chi(const SIMD_4x64& x, const SIMD_4x64& y, const SIMD_4x64& z) {
+#if defined(__AVX512VL__)
+         constexpr uint8_t xor_not_and = 0b11010010;
+         return SIMD_4x64(_mm256_ternarylogic_epi64(x.raw(), y.raw(), z.raw(), xor_not_and));
+#else
+         return x ^ y.andc(z);
+#endif
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64
+      static SIMD_4x64 choose(const SIMD_4x64& mask, const SIMD_4x64& a, const SIMD_4x64& b) {
+#if defined(__AVX512VL__)
+         return SIMD_4x64(_mm256_ternarylogic_epi64(mask.raw(), a.raw(), b.raw(), 0xca));
+#else
+         return (mask & a) ^ mask.andc(b);
+#endif
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64
+      static SIMD_4x64 majority(const SIMD_4x64& x, const SIMD_4x64& y, const SIMD_4x64& z) {
+#if defined(__AVX512VL__)
+         return SIMD_4x64(_mm256_ternarylogic_epi64(x.raw(), y.raw(), z.raw(), 0xe8));
+#else
+         return SIMD_4x64::choose(x ^ y, z, y);
+#endif
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64
+      static void transpose(SIMD_4x64& B0, SIMD_4x64& B1, SIMD_4x64& B2, SIMD_4x64& B3) {
+         const __m256i T0 = _mm256_unpacklo_epi64(B0.m_simd, B1.m_simd);
+         const __m256i T1 = _mm256_unpackhi_epi64(B0.m_simd, B1.m_simd);
+         const __m256i T2 = _mm256_unpacklo_epi64(B2.m_simd, B3.m_simd);
+         const __m256i T3 = _mm256_unpackhi_epi64(B2.m_simd, B3.m_simd);
+
+         B0.m_simd = _mm256_permute2x128_si256(T0, T2, 0 + (2 << 4));
+         B1.m_simd = _mm256_permute2x128_si256(T1, T3, 0 + (2 << 4));
+         B2.m_simd = _mm256_permute2x128_si256(T0, T2, 1 + (3 << 4));
+         B3.m_simd = _mm256_permute2x128_si256(T1, T3, 1 + (3 << 4));
+      }
+
+      template <int SHIFT>
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 shr() const noexcept {
+         return SIMD_4x64(_mm256_srli_epi64(m_simd, SHIFT));
+      }
+
+      template <int SHIFT>
+      SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 shl() const noexcept {
+         return SIMD_4x64(_mm256_slli_epi64(m_simd, SHIFT));
+      }
+
+      static SIMD_4x64 BOTAN_FN_ISA_SIMD_4X64 alignr8(const SIMD_4x64& a, const SIMD_4x64& b) {
+         return SIMD_4x64(_mm256_alignr_epi8(a.m_simd, b.m_simd, 8));
+      }
+
+      // Argon2 specific operation
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 mul2_32(SIMD_4x64 x, SIMD_4x64 y) {
+         const __m256i m = _mm256_mul_epu32(x.m_simd, y.m_simd);
+         return SIMD_4x64(_mm256_add_epi64(m, m));
+      }
+
+      template <uint8_t CTRL>
+      static BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64 permute_4x64(SIMD_4x64 x) {
+         return SIMD_4x64(_mm256_permute4x64_epi64(x.m_simd, CTRL));
+      }
+
+      // Argon2 specific
+      static void BOTAN_FN_ISA_SIMD_4X64 twist(SIMD_4x64& B, SIMD_4x64& C, SIMD_4x64& D) {
+         B = SIMD_4x64::permute_4x64<0b00'11'10'01>(B);
+         C = SIMD_4x64::permute_4x64<0b01'00'11'10>(C);
+         D = SIMD_4x64::permute_4x64<0b10'01'00'11>(D);
+      }
+
+      // Argon2 specific
+      static void BOTAN_FN_ISA_SIMD_4X64 untwist(SIMD_4x64& B, SIMD_4x64& C, SIMD_4x64& D) {
+         B = SIMD_4x64::permute_4x64<0b10'01'00'11>(B);
+         C = SIMD_4x64::permute_4x64<0b01'00'11'10>(C);
+         D = SIMD_4x64::permute_4x64<0b00'11'10'01>(D);
+      }
+
+      BOTAN_FN_ISA_SIMD_4X64
+      static SIMD_4x64 splat(uint64_t v) { return SIMD_4x64(_mm256_set1_epi64x(v)); }
+
+      __m256i BOTAN_FN_ISA_SIMD_4X64 raw() const noexcept { return m_simd; }
+
+      explicit BOTAN_FN_ISA_SIMD_4X64 SIMD_4x64(__m256i x) : m_simd(x) {}
+
+   private:
+      __m256i m_simd;
+};
+
+// NOLINTEND(portability-simd-intrinsics)
+
+}  // namespace Botan
+
+#endif

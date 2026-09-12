@@ -9,9 +9,11 @@
 
 #include <botan/internal/cbc.h>
 
+#include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
+#include <botan/internal/int_utils.h>
 #include <botan/internal/mode_pad.h>
-#include <botan/internal/rounding.h>
 
 namespace Botan {
 
@@ -78,7 +80,7 @@ void CBC_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
    * as the new IV, as unfortunately some protocols require this. If
    * this is the first message then we use an IV of all zeros.
    */
-   if(nonce_len) {
+   if(nonce_len > 0) {
       m_state.assign(nonce, nonce + nonce_len);
    } else if(m_state.empty()) {
       m_state.resize(m_cipher->block_size());
@@ -91,11 +93,7 @@ size_t CBC_Encryption::minimum_final_size() const {
 }
 
 size_t CBC_Encryption::output_length(size_t input_length) const {
-   if(input_length == 0) {
-      return block_size();
-   } else {
-      return round_up(input_length, block_size());
-   }
+   return padding().output_length(input_length, block_size());
 }
 
 size_t CBC_Encryption::process_msg(uint8_t buf[], size_t sz) {
@@ -126,11 +124,15 @@ void CBC_Encryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
 
    const size_t BS = block_size();
 
+   const size_t output_bytes =
+      add_or_throw(offset, padding().output_length(buffer.size() - offset, BS), "CBC input too large");
    const size_t bytes_in_final_block = (buffer.size() - offset) % BS;
+   buffer.resize(output_bytes);
+   padding().add_padding(std::span(buffer).subspan(offset), bytes_in_final_block, BS);
 
-   padding().add_padding(buffer, bytes_in_final_block, BS);
-
-   BOTAN_ASSERT_EQUAL(buffer.size() % BS, offset % BS, "Padded to block boundary");
+   // With NoPadding a non-block-multiple input reaches here un-padded; reject it
+   // as an argument error rather than tripping the assertion.
+   BOTAN_ARG_CHECK(buffer.size() % BS == offset % BS, "CBC input is not full blocks (NoPadding)");
 
    update(buffer, offset);
 }
@@ -205,7 +207,7 @@ size_t CBC_Decryption::process_msg(uint8_t buf[], size_t sz) {
    BOTAN_ARG_CHECK(sz % BS == 0, "Input is not full blocks");
    size_t blocks = sz / BS;
 
-   while(blocks) {
+   while(blocks > 0) {
       const size_t to_proc = std::min(BS * blocks, m_tempbuf.size());
 
       cipher().decrypt_n(buf, m_tempbuf.data(), to_proc / BS);
@@ -230,15 +232,16 @@ void CBC_Decryption::finish_msg(secure_vector<uint8_t>& buffer, size_t offset) {
 
    const size_t BS = block_size();
 
-   if(sz == 0 || sz % BS) {
+   if(sz == 0 || sz % BS != 0) {
       throw Decoding_Error(name() + ": Ciphertext not a multiple of block size");
    }
 
    update(buffer, offset);
 
-   const size_t pad_bytes = BS - padding().unpad(&buffer[buffer.size() - BS], BS);
+   const size_t pad_bytes = BS - padding().unpad(std::span{buffer}.last(BS));
    buffer.resize(buffer.size() - pad_bytes);  // remove padding
    if(pad_bytes == 0 && padding().name() != "NoPadding") {
+      clear_mem(std::span{buffer}.subspan(offset));
       throw Decoding_Error("Invalid CBC padding");
    }
 }

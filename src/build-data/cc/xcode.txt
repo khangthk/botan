@@ -21,6 +21,10 @@ size_optimization_flags "-Os"
 add_system_include_dir_option "-isystem"
 add_sysroot_option "--sysroot="
 
+pch_suffix "pch"
+pch_compile "-Xclang -fno-pch-timestamp -x c++-header"
+pch_include "-Xclang -fno-pch-timestamp -include"
+
 <sanitizers>
 default   -> address,undefined
 
@@ -28,6 +32,8 @@ address   -> "-fsanitize=address"
 undefined -> "-fsanitize=undefined -fno-sanitize-recover=undefined"
 coverage  -> "-fsanitize=fuzzer-no-link"
 memory    -> "-fsanitize=memory"
+
+iterator  -> "-D_LIBCPP_DEBUG=1"
 </sanitizers>
 
 shared_flags "-fPIC"
@@ -58,6 +64,8 @@ sse41  -> "-msse4.1"
 avx2   -> "-mavx2"
 avx512  -> "-mavx512f -mavx512bw -mavx512dq -mavx512vbmi -mavx512vbmi2 -mavx512bitalg -mavx512vl -mavx512ifma"
 
+avx512_clmul -> "-mavx512f -mavx512bw -mavx512dq -mavx512vbmi -mavx512vbmi2 -mavx512bitalg -mavx512vl -mavx512ifma -mvpclmulqdq"
+
 bmi2   -> "-mbmi -mbmi2"
 aesni  -> "-maes -mpclmul"
 rdrand -> "-mrdrnd"
@@ -75,3 +83,7 @@ all -> "-pthread -stdlib=libc++"
 
 x86_64  -> "-m64"
 </mach_abi_linking>
+
+<ct_value_barrier>
+default -> asm
+</ct_value_barrier>

@@ -1,5 +1,5 @@
 /*
-* (C) 1999-2010,2015,2018 Jack Lloyd
+* (C) 1999-2010,2015,2018,2024 Jack Lloyd
 *
 * Botan is released under the Simplified BSD License (see license.txt)
 */
@@ -9,14 +9,14 @@
 #include <botan/ber_dec.h>
 #include <botan/bigint.h>
 #include <botan/der_enc.h>
-#include <botan/mem_ops.h>
 #include <botan/pk_ops.h>
+#include <botan/pk_options.h>
 #include <botan/rng.h>
+#include <botan/internal/buffer_slicer.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/parsing.h>
-#include <botan/internal/pss_params.h>
-#include <botan/internal/stl_util.h>
+#include <botan/internal/mem_utils.h>
+#include <botan/internal/pk_options_impl.h>
 
 namespace Botan {
 
@@ -39,32 +39,39 @@ secure_vector<uint8_t> PK_Decryptor::decrypt_or_random(const uint8_t in[],
                                                        const uint8_t required_content_bytes[],
                                                        const uint8_t required_content_offsets[],
                                                        size_t required_contents_length) const {
-   const secure_vector<uint8_t> fake_pms = rng.random_vec(expected_pt_len);
+   const secure_vector<uint8_t> fake_pms = [&]() {
+      auto pms = rng.random_vec(expected_pt_len);
+
+      for(size_t i = 0; i != required_contents_length; ++i) {
+         const uint8_t exp = required_content_bytes[i];
+
+         /*
+         If an offset repeats we don't detect this and just return a PMS that satisfies
+         the last requested index. If the requested (idx,value) tuple is the same, that's
+         fine and just redundant. If they disagree, decryption will always fail, since the
+         same byte cannot possibly have two distinct values.
+         */
+         const uint8_t off = required_content_offsets[i];
+         BOTAN_ASSERT(off < expected_pt_len, "Offset in range of plaintext");
+         pms[off] = exp;
+      }
+
+      return pms;
+   }();
 
    uint8_t decrypt_valid = 0;
    secure_vector<uint8_t> decoded = do_decrypt(decrypt_valid, in, length);
 
    auto valid_mask = CT::Mask<uint8_t>::is_equal(decrypt_valid, 0xFF);
-   valid_mask &= CT::Mask<uint8_t>(CT::Mask<size_t>::is_zero(decoded.size() ^ expected_pt_len));
+   valid_mask &= CT::Mask<uint8_t>(CT::Mask<size_t>::is_equal(decoded.size(), expected_pt_len));
 
    decoded.resize(expected_pt_len);
 
    for(size_t i = 0; i != required_contents_length; ++i) {
-      /*
-      These values are chosen by the application and for TLS are constants,
-      so this early failure via assert is fine since we know 0,1 < 48
-
-      If there is a protocol that has content checks on the key where
-      the expected offsets are controllable by the attacker this could
-      still leak.
-
-      Alternately could always reduce the offset modulo the length?
-      */
-
       const uint8_t exp = required_content_bytes[i];
-      const uint8_t off = required_content_offsets[i];
 
-      BOTAN_ASSERT(off < expected_pt_len, "Offset in range of plaintext");
+      // We know off is in range because we already checked it when creating the fake premaster above
+      const uint8_t off = required_content_offsets[i];
 
       auto eq = CT::Mask<uint8_t>::is_equal(decoded[off], exp);
 
@@ -103,8 +110,8 @@ size_t PK_Encryptor_EME::ciphertext_length(size_t ptext_len) const {
    return m_op->ciphertext_length(ptext_len);
 }
 
-std::vector<uint8_t> PK_Encryptor_EME::enc(const uint8_t in[], size_t length, RandomNumberGenerator& rng) const {
-   return m_op->encrypt(std::span{in, length}, rng);
+std::vector<uint8_t> PK_Encryptor_EME::enc(const uint8_t ptext[], size_t len, RandomNumberGenerator& rng) const {
+   return m_op->encrypt(std::span{ptext, len}, rng);
 }
 
 size_t PK_Encryptor_EME::maximum_input_size() const {
@@ -130,6 +137,10 @@ size_t PK_Decryptor_EME::plaintext_length(size_t ctext_len) const {
    return m_op->plaintext_length(ctext_len);
 }
 
+size_t PK_Decryptor_EME::ciphertext_length(size_t ptext_len) const {
+   return m_op->ciphertext_length(ptext_len);
+}
+
 secure_vector<uint8_t> PK_Decryptor_EME::do_decrypt(uint8_t& valid_mask, const uint8_t in[], size_t in_len) const {
    return m_op->decrypt(valid_mask, {in, in_len});
 }
@@ -139,6 +150,14 @@ PK_KEM_Encryptor::PK_KEM_Encryptor(const Public_Key& key, std::string_view param
    if(!m_op) {
       throw Invalid_Argument(fmt("Key type {} does not support KEM encryption", key.algo_name()));
    }
+}
+
+PK_KEM_Encryptor::PK_KEM_Encryptor(const Public_Key& key,
+                                   RandomNumberGenerator& rng,
+                                   std::string_view kem_param,
+                                   std::string_view provider) :
+      PK_KEM_Encryptor(key, kem_param, provider) {
+   BOTAN_UNUSED(rng);
 }
 
 PK_KEM_Encryptor::~PK_KEM_Encryptor() = default;
@@ -217,46 +236,53 @@ size_t PK_Key_Agreement::agreed_value_size() const {
 }
 
 SymmetricKey PK_Key_Agreement::derive_key(size_t key_len,
-                                          const uint8_t in[],
-                                          size_t in_len,
-                                          std::string_view params) const {
-   return this->derive_key(key_len, in, in_len, cast_char_ptr_to_uint8(params.data()), params.length());
+                                          const uint8_t peer_key[],
+                                          size_t peer_key_len,
+                                          std::string_view salt) const {
+   return this->derive_key(key_len, {peer_key, peer_key_len}, as_span_of_bytes(salt));
 }
 
 SymmetricKey PK_Key_Agreement::derive_key(size_t key_len,
-                                          const std::span<const uint8_t> in,
-                                          std::string_view params) const {
-   return this->derive_key(key_len, in.data(), in.size(), cast_char_ptr_to_uint8(params.data()), params.length());
+                                          const std::span<const uint8_t> peer_key,
+                                          std::string_view salt) const {
+   return this->derive_key(key_len, peer_key, as_span_of_bytes(salt));
 }
 
-SymmetricKey PK_Key_Agreement::derive_key(
-   size_t key_len, const uint8_t in[], size_t in_len, const uint8_t salt[], size_t salt_len) const {
-   return SymmetricKey(m_op->agree(key_len, {in, in_len}, {salt, salt_len}));
+SymmetricKey PK_Key_Agreement::derive_key(size_t key_len,
+                                          std::span<const uint8_t> peer_key,
+                                          std::span<const uint8_t> salt) const {
+   return SymmetricKey(m_op->agree(key_len, peer_key, salt));
 }
-
-namespace {
-
-void check_der_format_supported(Signature_Format format, size_t parts) {
-   if(format != Signature_Format::Standard && parts == 1) {
-      throw Invalid_Argument("This algorithm does not support DER encoding");
-   }
-}
-
-}  // namespace
 
 PK_Signer::PK_Signer(const Private_Key& key,
                      RandomNumberGenerator& rng,
-                     std::string_view emsa,
+                     std::string_view padding,
                      Signature_Format format,
-                     std::string_view provider) {
-   m_op = key.create_signature_op(rng, emsa, provider);
+                     std::string_view provider) :
+      PK_Signer(key,
+                rng,
+                parse_legacy_sig_options(key, padding)
+                   .with_der_encoded_signature(format == Signature_Format::DerSequence)
+                   .with_provider(provider)) {}
+
+PK_Signer::PK_Signer(const Private_Key& key, RandomNumberGenerator& rng, const PK_Signature_Options& user_options) {
+   // Track option usage on a private copy, so the caller's object is never modified
+   const PK_Signature_Options options(user_options);  // NOLINT(*-unnecessary-copy-initialization) clang-tidy bug
+   options.reset_examined();
+
+   m_op = key._create_signature_op(rng, options);
+
    if(!m_op) {
       throw Invalid_Argument(fmt("Key type {} does not support signature generation", key.algo_name()));
    }
-   m_sig_format = format;
-   m_parts = key.message_parts();
-   m_part_size = key.message_part_size();
-   check_der_format_supported(format, m_parts);
+   m_sig_format = options.using_der_encoded_signature() ? Signature_Format::DerSequence : Signature_Format::Standard;
+   m_sig_element_size = key._signature_element_size_for_DER_encoding();
+
+   if(m_sig_format == Signature_Format::DerSequence && !m_sig_element_size.has_value()) {
+      throw Invalid_Argument(fmt("Key type {} does not support DER encoded signatures", key.algo_name()));
+   }
+
+   options.throw_if_unexamined(key.algo_name());
 }
 
 AlgorithmIdentifier PK_Signer::algorithm_identifier() const {
@@ -273,7 +299,7 @@ PK_Signer::PK_Signer(PK_Signer&&) noexcept = default;
 PK_Signer& PK_Signer::operator=(PK_Signer&&) noexcept = default;
 
 void PK_Signer::update(std::string_view in) {
-   this->update(cast_char_ptr_to_uint8(in.data()), in.size());
+   this->update(as_span_of_bytes(in));
 }
 
 void PK_Signer::update(const uint8_t in[], size_t length) {
@@ -305,9 +331,41 @@ size_t PK_Signer::signature_length() const {
    if(m_sig_format == Signature_Format::Standard) {
       return m_op->signature_length();
    } else if(m_sig_format == Signature_Format::DerSequence) {
-      // This is a large over-estimate but its easier than computing
-      // the exact value
-      return m_op->signature_length() + (8 + 4 * m_parts);
+      const size_t sig_len = m_op->signature_length();
+
+      const size_t der_overhead = [sig_len]() {
+         /*
+         This was computed by DER encoding of some maximal value signatures
+         (since DER is variable length)
+
+         The first two cases covers all EC schemes since groups are at most 521
+         bits.
+
+         The other cases are only for finite field DSA which practically is only
+         used up to 3072 bit groups but the calculation is correct up to a
+         262096 (!) bit group so allow it. There are some intermediate sizes but
+         this function is allowed to (and indeed must) return an over-estimate
+         rather than an exact value since the actual length will change based on
+         the computed signature.
+         */
+
+         if(sig_len <= 120) {
+            // EC signatures <= 480 bits
+            return 8;
+         } else if(sig_len <= 248) {
+            // EC signatures > 480 bits (or very small DSA groups...)
+            return 9;
+         } else {
+            // Everything else. This is an over-estimate for groups under
+            // 2040 bits but exact otherwise
+
+            // This requires 15 bytes DER overhead and should never happen
+            BOTAN_ASSERT_NOMSG(sig_len < 65524);
+            return 14;
+         }
+      }();
+
+      return sig_len + der_overhead;
    } else {
       throw Internal_Error("PK_Signer: Invalid signature format enum");
    }
@@ -319,39 +377,58 @@ std::vector<uint8_t> PK_Signer::signature(RandomNumberGenerator& rng) {
    if(m_sig_format == Signature_Format::Standard) {
       return sig;
    } else if(m_sig_format == Signature_Format::DerSequence) {
-      return der_encode_signature(sig, m_parts, m_part_size);
+      BOTAN_ASSERT_NOMSG(m_sig_element_size.has_value());
+      return der_encode_signature(sig, 2, m_sig_element_size.value());
    } else {
       throw Internal_Error("PK_Signer: Invalid signature format enum");
    }
 }
 
-PK_Verifier::PK_Verifier(const Public_Key& key,
-                         std::string_view emsa,
+PK_Verifier::PK_Verifier(const Public_Key& pub_key,
+                         std::string_view padding,
                          Signature_Format format,
-                         std::string_view provider) {
-   m_op = key.create_verification_op(emsa, provider);
+                         std::string_view provider) :
+      PK_Verifier(pub_key,
+                  parse_legacy_sig_options(pub_key, padding)
+                     .with_der_encoded_signature(format == Signature_Format::DerSequence)
+                     .with_provider(provider)) {}
+
+PK_Verifier::PK_Verifier(const Public_Key& key, const PK_Signature_Options& user_options) {
+   // Track option usage on a private copy, so the caller's object is never modified
+   PK_Signature_Options options(user_options);
+
+   // The deterministic option only affects signature generation, so remove it
+   // here rather than have every verification operation know to ignore it
+   options.m_deterministic_sig = false;
+
+   options.reset_examined();
+
+   m_op = key._create_verification_op(options);
+
    if(!m_op) {
       throw Invalid_Argument(fmt("Key type {} does not support signature verification", key.algo_name()));
    }
-   m_sig_format = format;
-   m_parts = key.message_parts();
-   m_part_size = key.message_part_size();
-   check_der_format_supported(format, m_parts);
+
+   m_sig_element_size = key._signature_element_size_for_DER_encoding();
+   m_sig_format = options.using_der_encoded_signature() ? Signature_Format::DerSequence : Signature_Format::Standard;
+
+   if(m_sig_format == Signature_Format::DerSequence && !m_sig_element_size.has_value()) {
+      throw Invalid_Argument(fmt("Key type {} does not support DER encoded signatures", key.algo_name()));
+   }
+
+   options.throw_if_unexamined(key.algo_name());
 }
 
 PK_Verifier::PK_Verifier(const Public_Key& key,
                          const AlgorithmIdentifier& signature_algorithm,
                          std::string_view provider) {
    m_op = key.create_x509_verification_op(signature_algorithm, provider);
-
    if(!m_op) {
       throw Invalid_Argument(fmt("Key type {} does not support X.509 signature verification", key.algo_name()));
    }
 
-   m_sig_format = key.default_x509_signature_format();
-   m_parts = key.message_parts();
-   m_part_size = key.message_part_size();
-   check_der_format_supported(m_sig_format, m_parts);
+   m_sig_format = key._default_x509_signature_format();
+   m_sig_element_size = key._signature_element_size_for_DER_encoding();
 }
 
 PK_Verifier::~PK_Verifier() = default;
@@ -364,7 +441,9 @@ std::string PK_Verifier::hash_function() const {
 }
 
 void PK_Verifier::set_input_format(Signature_Format format) {
-   check_der_format_supported(format, m_parts);
+   if(format == Signature_Format::DerSequence) {
+      BOTAN_ARG_CHECK(m_sig_element_size.has_value(), "This key does not support DER signatures");
+   }
    m_sig_format = format;
 }
 
@@ -374,7 +453,7 @@ bool PK_Verifier::verify_message(const uint8_t msg[], size_t msg_length, const u
 }
 
 void PK_Verifier::update(std::string_view in) {
-   this->update(cast_char_ptr_to_uint8(in.data()), in.size());
+   this->update(as_span_of_bytes(in));
 }
 
 void PK_Verifier::update(const uint8_t in[], size_t length) {
@@ -383,32 +462,27 @@ void PK_Verifier::update(const uint8_t in[], size_t length) {
 
 namespace {
 
-std::vector<uint8_t> decode_der_signature(const uint8_t sig[], size_t length, size_t sig_parts, size_t sig_part_size) {
-   std::vector<uint8_t> real_sig;
-   BER_Decoder decoder(sig, length);
-   BER_Decoder ber_sig = decoder.start_sequence();
+std::vector<uint8_t> decode_der_signature_pair(std::span<const uint8_t> der_sig, size_t sig_part_size) {
+   BOTAN_ASSERT_NOMSG(sig_part_size > 0);
 
-   BOTAN_ASSERT_NOMSG(sig_parts != 0 && sig_part_size != 0);
+   BigInt r;
+   BigInt s;
 
-   size_t count = 0;
+   // TODO should be able to just get the integer bytes directly from
+   // BER_Decoder without using BigInt here
+   BER_Decoder(der_sig, BER_Decoder::Limits::DER()).start_sequence().decode(r).decode(s).end_cons().verify_end();
 
-   while(ber_sig.more_items()) {
-      BigInt sig_part;
-      ber_sig.decode(sig_part);
-      real_sig += sig_part.serialize(sig_part_size);
-      ++count;
+   const bool invalid_r = r.is_negative() || r.bytes() > sig_part_size;
+   const bool invalid_s = s.is_negative() || s.bytes() > sig_part_size;
+
+   if(invalid_r || invalid_s) {
+      throw Decoding_Error("Invalid DER encoding of signature");
    }
 
-   if(count != sig_parts) {
-      throw Decoding_Error("PK_Verifier: signature size invalid");
-   }
-
-   const std::vector<uint8_t> reencoded = der_encode_signature(real_sig, sig_parts, sig_part_size);
-
-   if(reencoded.size() != length || CT::is_equal(reencoded.data(), sig, reencoded.size()).as_bool() == false) {
-      throw Decoding_Error("PK_Verifier: signature is not the canonical DER encoding");
-   }
-   return real_sig;
+   std::vector<uint8_t> sig(2 * sig_part_size);
+   r.serialize_to(std::span{sig}.first(sig_part_size));
+   s.serialize_to(std::span{sig}.last(sig_part_size));
+   return sig;
 }
 
 }  // namespace
@@ -421,12 +495,16 @@ bool PK_Verifier::check_signature(const uint8_t sig[], size_t length) {
          bool decoding_success = false;
          std::vector<uint8_t> real_sig;
 
-         try {
-            real_sig = decode_der_signature(sig, length, m_parts, m_part_size);
-            decoding_success = true;
-         } catch(Decoding_Error&) {}
+         BOTAN_ASSERT_NOMSG(m_sig_element_size.has_value());
 
-         bool accept = m_op->is_valid_signature(real_sig);
+         try {
+            real_sig = decode_der_signature_pair({sig, length}, m_sig_element_size.value());
+            decoding_success = true;
+         } catch(...) {}
+
+         // It is critical that is_valid_signature is called even if DER decoding failed, since
+         // that is what resets the internal state (message hashes, etc)
+         const bool accept = m_op->is_valid_signature(real_sig);
 
          return accept && decoding_success;
       } else {

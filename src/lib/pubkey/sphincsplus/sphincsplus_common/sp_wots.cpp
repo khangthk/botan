@@ -1,5 +1,5 @@
 /*
-* WOTS+ - Winternitz One Time Signature+
+* WOTS+ - Winternitz One Time Signature Plus Scheme (FIPS 205, Section 5)
 * (C) 2023 Jack Lloyd
 *     2023 Fabian Albert, René Meusel, Amos Treiber - Rohde & Schwarz Cybersecurity
 *
@@ -8,39 +8,20 @@
 
 #include <botan/internal/sp_wots.h>
 
+#include <botan/mem_ops.h>
+#include <botan/internal/loadstor.h>
 #include <botan/internal/sp_hash.h>
-#include <botan/internal/stl_util.h>
 
 namespace Botan {
 namespace {
 
 /**
- * Computes a WOTS+ hash chain for @p steps steps beginning with value
- * @p wots_chain_key at index @p start.
+ * FIPS 205, Algorithm 4: base_2^b for WOTS+
+ *
+ * Interprets an array of bytes as integers in base w = 2^b.
+ * This only works when lg_w is a divisor of 8.
  */
-void gen_chain(StrongSpan<WotsPublicKeyNode> out,
-               StrongSpan<const WotsNode> wots_chain_key,
-               WotsHashIndex start,
-               uint8_t steps,
-               Sphincs_Address& addr,
-               Sphincs_Hash_Functions& hashes,
-               const Sphincs_Parameters& params) {
-   // Initialize out with the value at position 'start'.
-   std::copy(wots_chain_key.begin(), wots_chain_key.end(), out.begin());
-
-   // Iterate 'steps' calls to the hash function.
-   for(WotsHashIndex i = start; i < (start + steps) && i < params.w(); i++) {
-      addr.set_hash(i);
-      hashes.T(out, addr, out);
-   }
-}
-
-/**
- * base_w algorithm as described in draft.
- * Interprets an array of bytes as integers in base w.
- * This only works when log_w is a divisor of 8.
- */
-void base_w(std::span<WotsHashIndex> output, std::span<const uint8_t> input, const Sphincs_Parameters& params) {
+void base_2_b(std::span<WotsHashIndex> output, std::span<const uint8_t> input, const Sphincs_Parameters& params) {
    BOTAN_ASSERT_NOMSG(output.size() <= 8 * input.size() / params.log_w());
 
    size_t input_offset = 0;
@@ -58,7 +39,10 @@ void base_w(std::span<WotsHashIndex> output, std::span<const uint8_t> input, con
    }
 }
 
-/** Computes the WOTS+ checksum over a message (in base_w). */
+/**
+ * Computes the WOTS+ checksum over a message (in base_2^b).
+ * Corresponds to FIPS 205, Algorithm 7 or 8, Step 7.
+ */
 void wots_checksum(std::span<WotsHashIndex> output,
                    std::span<const WotsHashIndex> msg_base_w,
                    const Sphincs_Parameters& params) {
@@ -72,12 +56,12 @@ void wots_checksum(std::span<WotsHashIndex> output,
    // Convert checksum to base_w.
    csum = csum << ((8 - ((params.wots_len_2() * params.log_w()) % 8)) % 8);
 
-   std::array<uint8_t, 4> csum_bytes;
+   std::array<uint8_t, 4> csum_bytes{};
    store_be(csum, csum_bytes.data());
 
    const size_t csum_bytes_size = params.wots_checksum_bytes();
    BOTAN_ASSERT_NOMSG(csum_bytes.size() >= csum_bytes_size);
-   base_w(output, std::span(csum_bytes).last(csum_bytes_size), params);
+   base_2_b(output, std::span(csum_bytes).last(csum_bytes_size), params);
 }
 
 }  // namespace
@@ -88,7 +72,7 @@ std::vector<WotsHashIndex> chain_lengths(const SphincsTreeNode& msg, const Sphin
    auto msg_base_w = std::span(result).first(params.wots_len_1());
    auto checksum_base_w = std::span(result).last(params.wots_len_2());
 
-   base_w(msg_base_w, msg.get(), params);
+   base_2_b(msg_base_w, msg.get(), params);
    wots_checksum(checksum_base_w, msg_base_w, params);
 
    return result;
@@ -96,37 +80,58 @@ std::vector<WotsHashIndex> chain_lengths(const SphincsTreeNode& msg, const Sphin
 
 WotsPublicKey wots_public_key_from_signature(const SphincsTreeNode& hashed_message,
                                              StrongSpan<const WotsSignature> signature,
-                                             Sphincs_Address& address,
+                                             const Sphincs_Address& address,
                                              const Sphincs_Parameters& params,
                                              Sphincs_Hash_Functions& hashes) {
    const std::vector<WotsHashIndex> lengths = chain_lengths(hashed_message, params);
-   WotsPublicKey pk_buffer(params.wots_len() * params.n());
-   BufferSlicer sig(signature);
-   BufferStuffer pk(pk_buffer);
+   const size_t len = params.wots_len();
+   const size_t n = params.n();
 
-   for(WotsChainIndex i(0); i < params.wots_len(); i++) {
-      address.set_chain(i);
+   // The chains start with the nodes in the signature
+   WotsPublicKey pk_buffer(len * n);
+   std::copy(signature.begin(), signature.end(), pk_buffer.begin());
+   const std::span<uint8_t> pk_bytes(pk_buffer.get());
 
-      // params.w() can be one of {4, 8, 256}
-      const WotsHashIndex start_index = lengths[i.get()];
-      const uint8_t steps_to_take = static_cast<uint8_t>(params.w() - 1) - start_index.get();
+   std::vector<Sphincs_Address> chain_addrs(len, address);
+   for(size_t i = 0; i != len; ++i) {
+      chain_addrs[i].set_chain_address(WotsChainIndex(static_cast<uint32_t>(i)));
+   }
 
-      gen_chain(pk.next<WotsPublicKeyNode>(params.n()),
-                sig.take<WotsNode>(params.n()),
-                start_index,
-                steps_to_take,
-                address,
-                hashes,
-                params);
+   std::vector<Sphincs_Address> addrs;
+   std::vector<std::span<uint8_t>> outs;
+   std::vector<std::span<const uint8_t>> ins;
+   addrs.reserve(len);
+   outs.reserve(len);
+   ins.reserve(len);
+
+   // Walk the chains in lock-step; chain i joins in once the step counter
+   // reaches its position in the signature
+   for(WotsHashIndex k(0); k < params.w() - 1; k++) {
+      addrs.clear();
+      outs.clear();
+      ins.clear();
+
+      for(size_t i = 0; i != len; ++i) {
+         if(lengths[i] <= k) {
+            chain_addrs[i].set_hash_address(k);
+            addrs.push_back(chain_addrs[i]);
+            const auto node = pk_bytes.subspan(i * n, n);
+            outs.push_back(node);
+            ins.push_back(node);
+         }
+      }
+
+      hashes.T_batch(outs, addrs, ins);
    }
 
    return pk_buffer;
 }
 
 void wots_sign_and_pkgen(StrongSpan<WotsSignature> sig_out,
-                         StrongSpan<SphincsTreeNode> leaf_out,
+                         std::span<uint8_t> leaves_out,
                          const SphincsSecretSeed& secret_seed,
-                         TreeNodeIndex leaf_idx,
+                         TreeNodeIndex first_leaf_idx,
+                         size_t leaf_count,
                          std::optional<TreeNodeIndex> sign_leaf_idx,
                          const std::vector<WotsHashIndex>& wots_steps,
                          Sphincs_Address& leaf_addr,
@@ -136,59 +141,80 @@ void wots_sign_and_pkgen(StrongSpan<WotsSignature> sig_out,
    // `wots_steps` are needed only if `sign_leaf_idx` is set
    BOTAN_ASSERT_NOMSG(!sign_leaf_idx.has_value() || wots_steps.size() == params.wots_len());
    BOTAN_ASSERT_NOMSG(pk_addr.get_type() == Sphincs_Address_Type::WotsPublicKeyCompression);
+   BOTAN_ASSERT_NOMSG(leaves_out.size() == leaf_count * params.n());
 
-   secure_vector<uint8_t> wots_sig;
-   WotsPublicKey wots_pk_buffer(params.wots_bytes());
+   const size_t len = params.wots_len();
+   const size_t n = params.n();
+   const size_t lanes = leaf_count * len;
 
-   BufferStuffer wots_pk(wots_pk_buffer);
-   BufferStuffer sig(sig_out);
+   // WOTS public key buffers of all leaves, one lane per chain
+   secure_vector<uint8_t> pk_buffers(leaf_count * params.wots_bytes());
 
-   leaf_addr.set_keypair(leaf_idx);
-   pk_addr.set_keypair(leaf_idx);
+   // The chains share their leaf's address except for their chain field
+   leaf_addr.set_type(Sphincs_Address_Type::WotsKeyGeneration);
+   leaf_addr.set_hash_address(WotsHashIndex(0));
 
-   for(WotsChainIndex i(0); i < params.wots_len(); i++) {
-      // If the current leaf is part of the signature wots_k stores the chain index
-      //   of the value neccessary for the signature. Otherwise: nullopt (no signature)
-      const auto wots_k = [&]() -> std::optional<WotsHashIndex> {
-         if(sign_leaf_idx.has_value() && leaf_idx == sign_leaf_idx.value()) {
-            return wots_steps[i.get()];
-         } else {
-            return std::nullopt;
-         }
-      }();
-
-      // Start with the secret seed
-      leaf_addr.set_chain(i);
-      leaf_addr.set_hash(WotsHashIndex(0));
-      leaf_addr.set_type(Sphincs_Address_Type::WotsKeyGeneration);
-
-      auto buffer_s = wots_pk.next<WotsNode>(params.n());
-
-      hashes.PRF(buffer_s, secret_seed, leaf_addr);
-
-      leaf_addr.set_type(Sphincs_Address_Type::WotsHash);
-
-      // Iterates down the WOTS chain
-      for(WotsHashIndex k(0);; k++) {
-         // Check if this is the value that needs to be saved as a part of the WOTS signature
-         if(wots_k.has_value() && k == wots_k.value()) {
-            std::copy(buffer_s.begin(), buffer_s.end(), sig.next<WotsNode>(params.n()).begin());
-         }
-
-         // Check if the top of the chain was hit
-         if(k == params.w() - 1) {
-            break;
-         }
-
-         // Iterate one step on the chain
-         leaf_addr.set_hash(k);
-
-         hashes.T(buffer_s, leaf_addr, buffer_s);
+   std::vector<Sphincs_Address> addrs;
+   addrs.reserve(lanes);
+   std::vector<std::span<uint8_t>> nodes(lanes);
+   std::vector<std::span<const uint8_t>> cnodes(lanes);
+   for(size_t j = 0; j != leaf_count; ++j) {
+      leaf_addr.set_keypair_address(first_leaf_idx + static_cast<uint32_t>(j));
+      for(size_t i = 0; i != len; ++i) {
+         addrs.push_back(leaf_addr);
+         addrs.back().set_chain_address(WotsChainIndex(static_cast<uint32_t>(i)));
+         const auto node = std::span(pk_buffers).subspan((j * len + i) * n, n);
+         nodes[j * len + i] = node;
+         cnodes[j * len + i] = node;
       }
    }
 
-   // Do the final thash to generate the public keys
-   hashes.T(leaf_out, pk_addr, wots_pk_buffer);
+   // Start each chain with its secret seed
+   hashes.PRF_batch(nodes, secret_seed, addrs);
+
+   for(auto& addr : addrs) {
+      addr.set_type(Sphincs_Address_Type::WotsHash);
+   }
+
+   const bool signing_in_batch = sign_leaf_idx.has_value() && sign_leaf_idx.value() >= first_leaf_idx &&
+                                 sign_leaf_idx.value() < first_leaf_idx + static_cast<uint32_t>(leaf_count);
+   const size_t sign_j = signing_in_batch ? static_cast<size_t>(sign_leaf_idx.value().get() - first_leaf_idx.get()) : 0;
+
+   // Iterate down all chains of all leaves in lock-step
+   for(WotsHashIndex k(0);; k++) {
+      // Check for values that need to be saved as a part of the WOTS signature
+      if(signing_in_batch) {
+         for(size_t i = 0; i != len; ++i) {
+            if(wots_steps[i] == k) {
+               copy_mem(sig_out.get().subspan(i * n, n), nodes[sign_j * len + i]);
+            }
+         }
+      }
+
+      // Check if the top of the chains was hit
+      if(k == params.w() - 1) {
+         break;
+      }
+
+      for(auto& addr : addrs) {
+         addr.set_hash_address(k);
+      }
+
+      hashes.T_batch(nodes, addrs, cnodes);
+   }
+
+   // Do the final thashes compressing each leaf's WOTS public key
+   std::vector<Sphincs_Address> pk_addrs;
+   pk_addrs.reserve(leaf_count);
+   std::vector<std::span<uint8_t>> leaf_outs(leaf_count);
+   std::vector<std::span<const uint8_t>> pk_spans(leaf_count);
+   for(size_t j = 0; j != leaf_count; ++j) {
+      pk_addr.set_keypair_address(first_leaf_idx + static_cast<uint32_t>(j));
+      pk_addrs.push_back(pk_addr);
+      leaf_outs[j] = leaves_out.subspan(j * n, n);
+      pk_spans[j] = std::span(pk_buffers).subspan(j * params.wots_bytes(), params.wots_bytes());
+   }
+   hashes.T_batch(leaf_outs, pk_addrs, pk_spans);
 }
 
 }  // namespace Botan

@@ -9,12 +9,18 @@
 #include "tests.h"
 
 #if defined(BOTAN_HAS_TLS)
+   #include <botan/assert.h>
+   #include <botan/tls_ciphersuite.h>
    #include <botan/tls_exceptn.h>
    #include <botan/tls_policy.h>
 #endif
 
 #if defined(BOTAN_HAS_RSA)
    #include <botan/rsa.h>
+#endif
+
+#if defined(BOTAN_HAS_ECC_GROUP)
+   #include <botan/ec_group.h>
 #endif
 
 #if defined(BOTAN_HAS_ECDH)
@@ -45,16 +51,94 @@ class TLS_Policy_Unit_Tests final : public Test {
          results.push_back(test_peer_key_acceptable_ecdsa(this->rng()));
          results.push_back(test_peer_key_acceptable_dh());
          results.push_back(test_key_exchange_groups_to_offer());
+         results.push_back(test_require_extended_master_secret());
+         results.push_back(test_dtls_refuses_weak_ciphersuites());
 
          return results;
       }
 
+      // RFC 9147 4.5.3 forbids _CCM_8 in DTLS absent forgery safeguards Botan does
+      // not implement, and CBC+HMAC keeps a residual timing channel that DTLS
+      // makes observable many times per association. Both are refused for DTLS
+      // while remaining available to stream TLS.
+      static Test::Result test_dtls_refuses_weak_ciphersuites() {
+         Test::Result result("TLS Policy DTLS ciphersuite refusals");
+
+         class Permissive_Policy final : public Botan::TLS::Policy {
+            public:
+               std::vector<std::string> allowed_ciphers() const override {
+                  return {"AES-256/CCM(8)", "AES-128/CCM(8)", "AES-256/CCM", "AES-128/CCM", "AES-128/GCM", "AES-128"};
+               }
+
+               std::vector<std::string> allowed_macs() const override { return {"AEAD", "SHA-256", "SHA-1"}; }
+
+               bool allow_tls12() const override { return true; }
+
+               bool allow_dtls12() const override { return true; }
+         };
+
+         const Permissive_Policy policy;
+
+         auto classify = [&](Botan::TLS::Protocol_Version version) {
+            size_t ccm_8 = 0;
+            size_t cbc = 0;
+            for(const auto id : policy.ciphersuite_list(version)) {
+               const auto suite = Botan::TLS::Ciphersuite::by_id(id);
+               if(!suite.has_value()) {
+                  continue;
+               }
+               if(suite->uses_short_authentication_tag()) {
+                  ccm_8 += 1;
+               }
+               if(suite->cbc_ciphersuite()) {
+                  cbc += 1;
+               }
+            }
+            return std::make_pair(ccm_8, cbc);
+         };
+
+         const auto [tls_ccm_8, tls_cbc] = classify(Botan::TLS::Protocol_Version::TLS_V12);
+         const auto [dtls_ccm_8, dtls_cbc] = classify(Botan::TLS::Protocol_Version::DTLS_V12);
+
+         // Guard against the test passing because the policy offered none at all.
+   #if defined(BOTAN_HAS_AEAD_CCM)
+         result.test_is_true("TLS 1.2 still offers CCM_8 suites", tls_ccm_8 > 0);
+   #endif
+   #if defined(BOTAN_HAS_TLS_CBC)
+         result.test_is_true("TLS 1.2 still offers CBC suites", tls_cbc > 0);
+   #endif
+         BOTAN_UNUSED(tls_ccm_8, tls_cbc);
+
+         result.test_sz_eq("DTLS 1.2 offers no CCM_8 suite", dtls_ccm_8, 0);
+         result.test_sz_eq("DTLS 1.2 offers no CBC suite", dtls_cbc, 0);
+         result.test_sz_gte("DTLS 1.2 still has usable suites",
+                            policy.ciphersuite_list(Botan::TLS::Protocol_Version::DTLS_V12).size(),
+                            1);
+
+         return result;
+      }
+
+      static Test::Result test_require_extended_master_secret() {
+         Test::Result result("TLS Policy require_extended_master_secret");
+
+         const Botan::TLS::Policy default_policy;
+         result.test_is_true("default Policy requires EMS", default_policy.require_extended_master_secret());
+
+         using TP = Botan::TLS::Text_Policy;
+         result.test_is_true("default text policy requires EMS", TP("").require_extended_master_secret());
+         result.test_is_true("text policy override disables EMS requirement",
+                             !TP("require_extended_master_secret = false").require_extended_master_secret());
+         result.test_is_true("text policy override re-enables EMS requirement",
+                             TP("require_extended_master_secret = true").require_extended_master_secret());
+         return result;
+      }
+
    private:
-      static Test::Result test_peer_key_acceptable_rsa(Botan::RandomNumberGenerator& rng) {
+      static Test::Result test_peer_key_acceptable_rsa([[maybe_unused]] Botan::RandomNumberGenerator& rng) {
          Test::Result result("TLS Policy RSA key verification");
    #if defined(BOTAN_HAS_RSA)
          auto rsa_key_1024 = std::make_unique<Botan::RSA_PrivateKey>(rng, 1024);
-         Botan::TLS::Policy policy;
+         const Botan::TLS::Policy policy;
 
          try {
             policy.check_peer_key_acceptable(*rsa_key_1024);
@@ -70,46 +154,57 @@ class TLS_Policy_Unit_Tests final : public Test {
          return result;
       }
 
-      static Test::Result test_peer_key_acceptable_ecdh(Botan::RandomNumberGenerator& rng) {
+      static Test::Result test_peer_key_acceptable_ecdh([[maybe_unused]] Botan::RandomNumberGenerator& rng) {
          Test::Result result("TLS Policy ECDH key verification");
    #if defined(BOTAN_HAS_ECDH)
-         const auto group_192 = Botan::EC_Group::from_name("secp192r1");
-         auto ecdh_192 = std::make_unique<Botan::ECDH_PrivateKey>(rng, group_192);
 
-         Botan::TLS::Policy policy;
-         try {
-            policy.check_peer_key_acceptable(*ecdh_192);
-            result.test_failure("Incorrectly accepting 192 bit EC keys");
-         } catch(Botan::TLS::TLS_Exception&) {
-            result.test_success("Correctly rejecting 192 bit EC keys");
+         const Botan::TLS::Policy policy;
+
+         if(Botan::EC_Group::supports_named_group("secp192r1")) {
+            const auto group_192 = Botan::EC_Group::from_name("secp192r1");
+            auto ecdh_192 = std::make_unique<Botan::ECDH_PrivateKey>(rng, group_192);
+
+            try {
+               policy.check_peer_key_acceptable(*ecdh_192);
+               result.test_failure("Incorrectly accepting 192 bit EC keys");
+            } catch(Botan::TLS::TLS_Exception&) {
+               result.test_success("Correctly rejecting 192 bit EC keys");
+            }
          }
 
-         const auto group_256 = Botan::EC_Group::from_name("secp256r1");
-         auto ecdh_256 = std::make_unique<Botan::ECDH_PrivateKey>(rng, group_256);
-         policy.check_peer_key_acceptable(*ecdh_256);
-         result.test_success("Correctly accepting 256 bit EC keys");
+         if(Botan::EC_Group::supports_named_group("secp256r1")) {
+            const auto group_256 = Botan::EC_Group::from_name("secp256r1");
+            auto ecdh_256 = std::make_unique<Botan::ECDH_PrivateKey>(rng, group_256);
+            policy.check_peer_key_acceptable(*ecdh_256);
+            result.test_success("Correctly accepting 256 bit EC keys");
+         }
    #endif
          return result;
       }
 
-      static Test::Result test_peer_key_acceptable_ecdsa(Botan::RandomNumberGenerator& rng) {
+      static Test::Result test_peer_key_acceptable_ecdsa([[maybe_unused]] Botan::RandomNumberGenerator& rng) {
          Test::Result result("TLS Policy ECDSA key verification");
    #if defined(BOTAN_HAS_ECDSA)
-         const auto group_192 = Botan::EC_Group::from_name("secp192r1");
-         auto ecdsa_192 = std::make_unique<Botan::ECDSA_PrivateKey>(rng, group_192);
+         const Botan::TLS::Policy policy;
 
-         Botan::TLS::Policy policy;
-         try {
-            policy.check_peer_key_acceptable(*ecdsa_192);
-            result.test_failure("Incorrectly accepting 192 bit EC keys");
-         } catch(Botan::TLS::TLS_Exception&) {
-            result.test_success("Correctly rejecting 192 bit EC keys");
+         if(Botan::EC_Group::supports_named_group("secp192r1")) {
+            const auto group_192 = Botan::EC_Group::from_name("secp192r1");
+            auto ecdsa_192 = std::make_unique<Botan::ECDSA_PrivateKey>(rng, group_192);
+
+            try {
+               policy.check_peer_key_acceptable(*ecdsa_192);
+               result.test_failure("Incorrectly accepting 192 bit EC keys");
+            } catch(Botan::TLS::TLS_Exception&) {
+               result.test_success("Correctly rejecting 192 bit EC keys");
+            }
          }
 
-         const auto group_256 = Botan::EC_Group::from_name("secp256r1");
-         auto ecdsa_256 = std::make_unique<Botan::ECDSA_PrivateKey>(rng, group_256);
-         policy.check_peer_key_acceptable(*ecdsa_256);
-         result.test_success("Correctly accepting 256 bit EC keys");
+         if(Botan::EC_Group::supports_named_group("secp256r1")) {
+            const auto group_256 = Botan::EC_Group::from_name("secp256r1");
+            auto ecdsa_256 = std::make_unique<Botan::ECDSA_PrivateKey>(rng, group_256);
+            policy.check_peer_key_acceptable(*ecdsa_256);
+            result.test_success("Correctly accepting 256 bit EC keys");
+         }
    #endif
          return result;
       }
@@ -123,7 +218,7 @@ class TLS_Policy_Unit_Tests final : public Test {
          const Botan::BigInt x("46205663093589612668746163860870963912226379131190812163519349848291472898748");
          auto dhkey = std::make_unique<Botan::DH_PrivateKey>(grp, x);
 
-         Botan::TLS::Policy policy;
+         const Botan::TLS::Policy policy;
          try {
             policy.check_peer_key_acceptable(*dhkey);
             result.test_failure("Incorrectly accepting short bit DH keys");
@@ -137,28 +232,29 @@ class TLS_Policy_Unit_Tests final : public Test {
       static Test::Result test_key_exchange_groups_to_offer() {
          Test::Result result("TLS Policy key share offering");
 
-         Botan::TLS::Policy default_policy;
-         result.test_eq(
+         const Botan::TLS::Policy default_policy;
+         result.test_sz_eq(
             "default TLS Policy offers exactly one", default_policy.key_exchange_groups_to_offer().size(), 1);
-         result.confirm(
+         result.test_is_true(
             "default TLS Policy offers preferred group",
             default_policy.key_exchange_groups().front() == default_policy.key_exchange_groups_to_offer().front());
 
          using TP = Botan::TLS::Text_Policy;
 
-         result.test_eq("default behaviour from text policy (size)", TP("").key_exchange_groups_to_offer().size(), 1);
-         result.confirm("default behaviour from text policy (preferred)",
-                        TP("").key_exchange_groups().front() == TP("").key_exchange_groups_to_offer().front());
+         result.test_sz_eq(
+            "default behaviour from text policy (size)", TP("").key_exchange_groups_to_offer().size(), 1);
+         result.test_is_true("default behaviour from text policy (preferred)",
+                             TP("").key_exchange_groups().front() == TP("").key_exchange_groups_to_offer().front());
 
-         result.confirm("no offerings",
-                        TP("key_exchange_groups_to_offer = none").key_exchange_groups_to_offer().empty());
+         result.test_is_true("no offerings",
+                             TP("key_exchange_groups_to_offer = none").key_exchange_groups_to_offer().empty());
 
          const std::string two_groups = "key_exchange_groups_to_offer = secp256r1 ffdhe/ietf/4096";
-         result.test_eq("list of offerings (size)", TP(two_groups).key_exchange_groups_to_offer().size(), 2);
-         result.confirm("list of offerings (0)",
-                        TP(two_groups).key_exchange_groups_to_offer()[0] == Botan::TLS::Group_Params::SECP256R1);
-         result.confirm("list of offerings (1)",
-                        TP(two_groups).key_exchange_groups_to_offer()[1] == Botan::TLS::Group_Params::FFDHE_4096);
+         result.test_sz_eq("list of offerings (size)", TP(two_groups).key_exchange_groups_to_offer().size(), 2);
+         result.test_is_true("list of offerings (0)",
+                             TP(two_groups).key_exchange_groups_to_offer()[0] == Botan::TLS::Group_Params::SECP256R1);
+         result.test_is_true("list of offerings (1)",
+                             TP(two_groups).key_exchange_groups_to_offer()[1] == Botan::TLS::Group_Params::FFDHE_4096);
 
          return result;
       }

@@ -11,6 +11,8 @@
 #include <botan/data_src.h>
 #include <botan/exceptn.h>
 #include <botan/internal/fmt.h>
+#include <algorithm>
+#include <array>
 
 namespace Botan::PEM_Code {
 
@@ -69,11 +71,12 @@ secure_vector<uint8_t> decode(DataSource& source, std::string& label) {
    size_t position = 0;
 
    while(position != PEM_HEADER1.length()) {
-      uint8_t b;
-      if(!source.read_byte(b)) {
+      auto b = source.read_byte();
+
+      if(!b) {
          throw Decoding_Error("PEM: No PEM header found");
       }
-      if(static_cast<char>(b) == PEM_HEADER1[position]) {
+      if(static_cast<char>(*b) == PEM_HEADER1[position]) {
          ++position;
       } else if(position >= RANDOM_CHAR_LIMIT) {
          throw Decoding_Error("PEM: Malformed PEM header");
@@ -83,18 +86,22 @@ secure_vector<uint8_t> decode(DataSource& source, std::string& label) {
    }
    position = 0;
    while(position != PEM_HEADER2.length()) {
-      uint8_t b;
-      if(!source.read_byte(b)) {
+      auto b = source.read_byte();
+
+      if(!b) {
          throw Decoding_Error("PEM: No PEM header found");
       }
-      if(static_cast<char>(b) == PEM_HEADER2[position]) {
+      if(static_cast<char>(*b) == PEM_HEADER2[position]) {
          ++position;
-      } else if(position) {
+      } else if(position > 0) {
          throw Decoding_Error("PEM: Malformed PEM header");
       }
 
       if(position == 0) {
-         label += static_cast<char>(b);
+         if(label.size() >= 128) {
+            throw Decoding_Error("PEM: Label too long");
+         }
+         label += static_cast<char>(*b);
       }
    }
 
@@ -103,18 +110,19 @@ secure_vector<uint8_t> decode(DataSource& source, std::string& label) {
    const std::string PEM_TRAILER = fmt("-----END {}-----", label);
    position = 0;
    while(position != PEM_TRAILER.length()) {
-      uint8_t b;
-      if(!source.read_byte(b)) {
+      auto b = source.read_byte();
+
+      if(!b) {
          throw Decoding_Error("PEM: No PEM trailer found");
       }
-      if(static_cast<char>(b) == PEM_TRAILER[position]) {
+      if(static_cast<char>(*b) == PEM_TRAILER[position]) {
          ++position;
-      } else if(position) {
+      } else if(position > 0) {
          throw Decoding_Error("PEM: Malformed PEM trailer");
       }
 
       if(position == 0) {
-         b64.push_back(b);
+         b64.push_back(*b);
       }
    }
 
@@ -137,28 +145,21 @@ secure_vector<uint8_t> decode(std::string_view pem, std::string& label) {
 bool matches(DataSource& source, std::string_view extra, size_t search_range) {
    const std::string PEM_HEADER = fmt("-----BEGIN {}", extra);
 
-   secure_vector<uint8_t> search_buf(search_range);
-   const size_t got = source.peek(search_buf.data(), search_buf.size(), 0);
+   std::array<uint8_t, 4096> stack_buf{};
+   std::vector<uint8_t> heap_buf;
+   uint8_t* search_buf = stack_buf.data();
+   if(search_range > stack_buf.size()) {
+      heap_buf.resize(search_range);
+      search_buf = heap_buf.data();
+   }
+
+   const size_t got = source.peek(search_buf, search_range, 0);
 
    if(got < PEM_HEADER.length()) {
       return false;
    }
 
-   size_t index = 0;
-
-   for(size_t j = 0; j != got; ++j) {
-      if(static_cast<char>(search_buf[j]) == PEM_HEADER[index]) {
-         ++index;
-      } else {
-         index = 0;
-      }
-
-      if(index == PEM_HEADER.size()) {
-         return true;
-      }
-   }
-
-   return false;
+   return std::search(search_buf, search_buf + got, PEM_HEADER.begin(), PEM_HEADER.end()) != search_buf + got;
 }
 
 }  // namespace Botan::PEM_Code

@@ -9,6 +9,7 @@
 #define BOTAN_SM4_H_
 
 #include <botan/block_cipher.h>
+#include <botan/secmem.h>
 
 namespace Botan {
 
@@ -38,10 +39,28 @@ class SM4 final : public Block_Cipher_Fixed_Params<16, 16> {
       void sm4_armv8_decrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
 #endif
 
+#if defined(BOTAN_HAS_SM4_X86)
+      void sm4_x86_encrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+      void sm4_x86_decrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+#endif
+
+#if defined(BOTAN_HAS_SM4_AVX512_GFNI)
+      void sm4_avx512_gfni_encrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+      void sm4_avx512_gfni_decrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+#endif
+
 #if defined(BOTAN_HAS_SM4_GFNI)
       void sm4_gfni_encrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
       void sm4_gfni_decrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
 #endif
+
+#if defined(BOTAN_HAS_SM4_HWAES)
+      void sm4_hwaes_encrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+      void sm4_hwaes_decrypt(const uint8_t in[], uint8_t out[], size_t blocks) const;
+      static uint32_t sm4_hwaes_sbox(uint32_t x);
+#endif
+
+      static uint32_t SM4_Tp(uint32_t x);
 
       secure_vector<uint32_t> m_RK;
 };

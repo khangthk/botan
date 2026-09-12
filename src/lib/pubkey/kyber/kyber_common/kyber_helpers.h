@@ -14,7 +14,6 @@
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/kyber_constants.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/pqcrystals_helpers.h>
 
 namespace Botan::Kyber_Algos {
 
@@ -26,7 +25,7 @@ inline uint32_t load_le3(std::span<const uint8_t, 3> in) {
 }
 
 /**
- * NIST FIPS 203 IPD, Formula 4.5 (Compress)
+ * NIST FIPS 203, Formula 4.7 (Compress)
  */
 template <size_t d>
    requires(d > 0 && d < 12)
@@ -54,10 +53,10 @@ constexpr std::make_unsigned_t<KyberConstants::T> compress(KyberConstants::T x) 
    constexpr size_t p = 33;
    constexpr unsigned_T mask = (1 << d) - 1;
    return static_cast<unsigned_T>((n * m) >> p) & mask;
-};
+}
 
 /**
- * NIST FIPS 203 IPD, Formula 4.6 (Decompress)
+ * NIST FIPS 203, Formula 4.8 (Decompress)
  */
 template <size_t d>
    requires(d > 0 && d < 12)
@@ -66,7 +65,9 @@ constexpr KyberConstants::T decompress(std::make_unsigned_t<KyberConstants::T> x
 
    constexpr uint32_t offset = 1 << (d - 1);
    constexpr uint32_t mask = (1 << d) - 1;
-   return static_cast<KyberConstants::T>(((static_cast<uint32_t>(x) & mask) * KyberConstants::Q + offset) >> d);
+
+   const uint32_t xq = CT::value_barrier(static_cast<uint32_t>(x) & mask) * KyberConstants::Q;
+   return static_cast<KyberConstants::T>((xq + offset) >> d);
 }
 
 }  // namespace Botan::Kyber_Algos

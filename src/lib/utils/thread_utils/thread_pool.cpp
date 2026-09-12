@@ -8,11 +8,17 @@
 
 #include <botan/exceptn.h>
 #include <botan/internal/os_utils.h>
+#include <botan/internal/parsing.h>
+#include <botan/internal/target_info.h>
+#include <algorithm>
 #include <thread>
 
 namespace Botan {
 
 namespace {
+
+/// The pool whose worker this thread is, if any
+thread_local Thread_Pool* g_pool_of_this_worker = nullptr;  // NOLINT(*-avoid-non-const-global-variables)
 
 std::optional<size_t> global_thread_pool_size() {
    std::string var;
@@ -22,9 +28,9 @@ std::optional<size_t> global_thread_pool_size() {
       }
 
       // Try to convert to an integer if possible:
-      try {
-         return std::optional<size_t>(std::stoul(var, nullptr));
-      } catch(std::exception&) {}
+      if(const auto sz = parse_sz(var)) {
+         return sz;
+      }
 
       // If it was neither a number nor a special value, then ignore the env
    }
@@ -56,8 +62,7 @@ Thread_Pool& Thread_Pool::global_instance() {
    return g_thread_pool;
 }
 
-Thread_Pool::Thread_Pool(std::optional<size_t> opt_pool_size) {
-   m_shutdown = false;
+Thread_Pool::Thread_Pool(std::optional<size_t> opt_pool_size) : m_shutdown(false) {
    // On Linux, it is 16 length max, including terminator
    const std::string tname = "Botan thread";
 
@@ -68,20 +73,12 @@ Thread_Pool::Thread_Pool(std::optional<size_t> opt_pool_size) {
    size_t pool_size = opt_pool_size.value();
 
    if(pool_size == 0) {
-      pool_size = OS::get_cpu_available();
-
-      // Unclear if this can happen, but be defensive
-      if(pool_size == 0) {
-         pool_size = 2;
-      }
-
       /*
       * For large machines don't create too many threads, unless
       * explicitly asked to by the caller.
       */
-      if(pool_size > 16) {
-         pool_size = 16;
-      }
+      const size_t cores = OS::get_cpu_available();
+      pool_size = std::clamp<size_t>(cores, 2, 16);
    }
 
    m_workers.resize(pool_size);
@@ -94,9 +91,9 @@ Thread_Pool::Thread_Pool(std::optional<size_t> opt_pool_size) {
 
 void Thread_Pool::shutdown() {
    {
-      std::unique_lock<std::mutex> lock(m_mutex);
+      const std::unique_lock<std::mutex> lock(m_mutex);
 
-      if(m_shutdown == true) {
+      if(m_shutdown) {
          return;
       }
 
@@ -111,22 +108,33 @@ void Thread_Pool::shutdown() {
    m_workers.clear();
 }
 
-void Thread_Pool::queue_thunk(const std::function<void()>& fn) {
+void Thread_Pool::queue_thunk(const std::function<void()>& work) {
    std::unique_lock<std::mutex> lock(m_mutex);
 
    if(m_shutdown) {
       throw Invalid_State("Cannot add work after thread pool has shut down");
    }
 
-   if(m_workers.empty()) {
-      return fn();
+   /*
+   * Immediately execute tasks which are queued from within one of the pool's
+   * own worker threads. Otherwise there is risk of deadlock.
+   *
+   * This could be improved, with a bit more complexity, by a "helping join";
+   * instead of just blocking, the thread runs any queued tasks until the one it
+   * is waiting on has completed.
+   */
+   if(m_workers.empty() || g_pool_of_this_worker == this) {
+      lock.unlock();
+      return work();
    }
 
-   m_tasks.push_back(fn);
+   m_tasks.push_back(work);
    m_more_tasks.notify_one();
 }
 
 void Thread_Pool::worker_thread() {
+   g_pool_of_this_worker = this;
+
    for(;;) {
       std::function<void()> task;
 

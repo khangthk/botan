@@ -9,9 +9,13 @@
 #include <botan/pgp_s2k.h>
 
 #include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/timer.h>
+#include <botan/internal/int_utils.h>
+#include <botan/internal/mem_utils.h>
+#include <botan/internal/time_utils.h>
 #include <algorithm>
+#include <array>
 
 namespace Botan {
 
@@ -29,12 +33,13 @@ void pgp_s2k(HashFunction& hash,
       throw Invalid_Argument("OpenPGP S2K requires a salt in iterated mode");
    }
 
-   secure_vector<uint8_t> input_buf(salt_len + password_size);
+   const size_t input_len = add_or_throw(salt_len, password_size, "OpenPGP S2K salt and password are too large");
+   secure_vector<uint8_t> input_buf(input_len);
    if(salt_len > 0) {
-      copy_mem(&input_buf[0], salt, salt_len);
+      copy_mem(input_buf.data(), salt, salt_len);
    }
    if(password_size > 0) {
-      copy_mem(&input_buf[salt_len], cast_char_ptr_to_uint8(password), password_size);
+      copy_mem(std::span(input_buf).subspan(salt_len), as_span_of_bytes(password, password_size));
    }
 
    secure_vector<uint8_t> hash_buf(hash.output_length());
@@ -50,7 +55,7 @@ void pgp_s2k(HashFunction& hash,
       hash.update(zero_padding);
 
       // The input is always fully processed even if iterations is very small
-      if(input_buf.empty() == false) {
+      if(!input_buf.empty()) {
          size_t left = std::max(iterations, input_buf.size());
          while(left > 0) {
             const size_t input_to_take = std::min(left, input_buf.size());
@@ -74,12 +79,10 @@ size_t OpenPGP_S2K::pbkdf(uint8_t output_buf[],
                           const uint8_t salt[],
                           size_t salt_len,
                           size_t iterations,
-                          std::chrono::milliseconds msec) const {
-   std::unique_ptr<PasswordHash> pwdhash;
-
+                          std::chrono::milliseconds desired_msec) const {
    if(iterations == 0) {
-      RFC4880_S2K_Family s2k_params(m_hash->new_object());
-      iterations = s2k_params.tune(output_len, msec, 0, std::chrono::milliseconds(10))->iterations();
+      const RFC4880_S2K_Family s2k_params(m_hash->new_object());
+      iterations = s2k_params.tune_params(output_len, desired_msec.count(), {}, 10)->iterations();
    }
 
    pgp_s2k(*m_hash, output_buf, output_len, password.data(), password.size(), salt, salt_len, iterations);
@@ -91,21 +94,35 @@ std::string RFC4880_S2K_Family::name() const {
    return fmt("OpenPGP-S2K({})", m_hash->name());
 }
 
-std::unique_ptr<PasswordHash> RFC4880_S2K_Family::tune(size_t output_len,
-                                                       std::chrono::milliseconds msec,
-                                                       size_t /*max_memory_usage_mb*/,
-                                                       std::chrono::milliseconds tune_time) const {
-   const size_t buf_size = 1024;
-   std::vector<uint8_t> buffer(buf_size);
+std::unique_ptr<PasswordHash> RFC4880_S2K_Family::tune_params(size_t output_len,
+                                                              uint64_t desired_msec,
+                                                              std::optional<size_t> /*max_memory*/,
+                                                              uint64_t tuning_msec) const {
+   // Benchmark the real S2K, since hashing the salt and password in small
+   // pieces has a large per-call cost that bulk hashing would not reflect
+   constexpr size_t tuning_iterations = 1024 * 1024;
+   constexpr std::string_view tuning_password = "password";
+   const std::array<uint8_t, 8> tuning_salt{};
 
-   Timer timer("RFC4880_S2K", buf_size);
-   timer.run_until_elapsed(tune_time, [&]() { m_hash->update(buffer); });
+   auto tuning_hash = m_hash->new_object();
+   std::vector<uint8_t> tuning_out(tuning_hash->output_length());
 
-   const double hash_bytes_per_second = timer.bytes_per_second();
-   const uint64_t desired_nsec = msec.count() * 1000000;
+   const uint64_t measured_nsec = measure_cost(tuning_msec, [&]() {
+      pgp_s2k(*tuning_hash,
+              tuning_out.data(),
+              tuning_out.size(),
+              tuning_password.data(),
+              tuning_password.size(),
+              tuning_salt.data(),
+              tuning_salt.size(),
+              tuning_iterations);
+   });
+
+   const double hash_bytes_per_second = (tuning_iterations * 1000000000.0) / measured_nsec;
+   const uint64_t desired_nsec = desired_msec * 1000000;
 
    const size_t hash_size = m_hash->output_length();
-   const size_t blocks_required = (output_len <= hash_size ? 1 : (output_len + hash_size - 1) / hash_size);
+   const size_t blocks_required = std::max<size_t>(1, (output_len / hash_size) + (output_len % hash_size != 0 ? 1 : 0));
 
    const double bytes_to_be_hashed = (hash_bytes_per_second * (desired_nsec / 1000000000.0)) / blocks_required;
    const size_t iterations = RFC4880_round_iterations(static_cast<size_t>(bytes_to_be_hashed));
@@ -113,16 +130,18 @@ std::unique_ptr<PasswordHash> RFC4880_S2K_Family::tune(size_t output_len,
    return std::make_unique<RFC4880_S2K>(m_hash->new_object(), iterations);
 }
 
-std::unique_ptr<PasswordHash> RFC4880_S2K_Family::from_params(size_t iter, size_t /*i2*/, size_t /*i3*/) const {
-   return std::make_unique<RFC4880_S2K>(m_hash->new_object(), iter);
+std::unique_ptr<PasswordHash> RFC4880_S2K_Family::from_params(size_t iterations,
+                                                              size_t /*unused*/,
+                                                              size_t /*unused*/) const {
+   return std::make_unique<RFC4880_S2K>(m_hash->new_object(), iterations);
 }
 
 std::unique_ptr<PasswordHash> RFC4880_S2K_Family::default_params() const {
    return std::make_unique<RFC4880_S2K>(m_hash->new_object(), 50331648);
 }
 
-std::unique_ptr<PasswordHash> RFC4880_S2K_Family::from_iterations(size_t iter) const {
-   return std::make_unique<RFC4880_S2K>(m_hash->new_object(), iter);
+std::unique_ptr<PasswordHash> RFC4880_S2K_Family::from_iterations(size_t iterations) const {
+   return std::make_unique<RFC4880_S2K>(m_hash->new_object(), iterations);
 }
 
 RFC4880_S2K::RFC4880_S2K(std::unique_ptr<HashFunction> hash, size_t iterations) :

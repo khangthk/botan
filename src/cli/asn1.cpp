@@ -17,6 +17,8 @@
 
 namespace Botan_CLI {
 
+namespace {
+
 class ASN1_Printer final : public Command {
    public:
       ASN1_Printer() :
@@ -45,7 +47,7 @@ class ASN1_Printer final : public Command {
          const std::string input = get_arg("file");
          const size_t print_limit = get_arg_sz("print-limit");
          const size_t bin_limit = get_arg_sz("bin-limit");
-         const bool print_context_specific = flag_set("skip-context-specific") == false;
+         const bool print_context_specific = !flag_set("skip-context-specific");
          const size_t max_depth = get_arg_sz("max-depth");
 
          const size_t value_column = 60;
@@ -67,7 +69,7 @@ class ASN1_Printer final : public Command {
             data.swap(file_contents);
          }
 
-         Botan::ASN1_Pretty_Printer printer(
+         const Botan::ASN1_Pretty_Printer printer(
             print_limit, bin_limit, print_context_specific, initial_level, value_column, max_depth);
 
          printer.print_to_stream(output(), data.data(), data.size());
@@ -92,25 +94,26 @@ class OID_Info final : public Command {
          }
 
          try {
-            Botan::OID oid(oid_str);
+            const Botan::OID oid(oid_str);
 
-            std::string name = oid.human_name_or_empty();
-            if(name.empty()) {
-               output() << "OID " << oid_str << " is not recognized\n";
+            if(const auto name = oid.registered_name()) {
+               output() << "OID " << oid_str << " is associated with " << *name << "\n";
             } else {
-               output() << "OID " << oid_str << " is associated with " << name << "\n";
+               output() << "OID " << oid_str << " is not recognized\n";
             }
 
             return;
          } catch(Botan::Exception&) {}
 
          // This throws if the string is not known
-         Botan::OID oid = Botan::OID::from_string(oid_str);
+         const Botan::OID oid = Botan::OID::from_string(oid_str);
          output() << "The string '" << oid_str << "' is associated with OID " << oid.to_string() << "\n";
       }
 };
 
 BOTAN_REGISTER_COMMAND("oid_info", OID_Info);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

@@ -11,7 +11,6 @@
 
 #include <botan/credentials_manager.h>
 #include <botan/tls_channel.h>
-#include <botan/tls_policy.h>
 #include <botan/internal/tls_channel_impl_12.h>
 #include <memory>
 #include <vector>
@@ -21,7 +20,7 @@ namespace Botan::TLS {
 /**
 * SSL/TLS Client 1.2 implementation
 */
-class Client_Impl_12 : public Channel_Impl_12 {
+class Client_Impl_12 final : public Channel_Impl_12 {
    public:
       /**
       * Set up a new TLS client session
@@ -47,17 +46,45 @@ class Client_Impl_12 : public Channel_Impl_12 {
       *        be preallocated for the read and write buffers. Smaller
       *        values just mean reallocations and copies are more likely.
       */
-      explicit Client_Impl_12(const std::shared_ptr<Callbacks>& callbacks,
-                              const std::shared_ptr<Session_Manager>& session_manager,
-                              const std::shared_ptr<Credentials_Manager>& creds,
-                              const std::shared_ptr<const Policy>& policy,
-                              const std::shared_ptr<RandomNumberGenerator>& rng,
-                              Server_Information server_info = Server_Information(),
-                              bool datagram = false,
-                              const std::vector<std::string>& next_protocols = {},
-                              size_t reserved_io_buffer_size = TLS::Channel::IO_BUF_DEFAULT_SIZE);
+      static std::shared_ptr<Client_Impl_12> create(const std::shared_ptr<Callbacks>& callbacks,
+                                                    const std::shared_ptr<Session_Manager>& session_manager,
+                                                    const std::shared_ptr<Credentials_Manager>& creds,
+                                                    const std::shared_ptr<const Policy>& policy,
+                                                    const std::shared_ptr<RandomNumberGenerator>& rng,
+                                                    Server_Information server_info = Server_Information(),
+                                                    bool datagram = false,
+                                                    const std::vector<std::string>& next_protocols = {},
+                                                    size_t reserved_io_buffer_size = TLS::Channel::IO_BUF_DEFAULT_SIZE);
 
-      explicit Client_Impl_12(const Channel_Impl::Downgrade_Information& downgrade_info);
+      Client_Impl_12([[maybe_unused]] Private dont_call_me,
+                     const std::shared_ptr<Callbacks>& callbacks,
+                     const std::shared_ptr<Session_Manager>& session_manager,
+                     const std::shared_ptr<Credentials_Manager>& creds,
+                     const std::shared_ptr<const Policy>& policy,
+                     const std::shared_ptr<RandomNumberGenerator>& rng,
+                     Server_Information server_info,
+                     bool datagram,
+                     size_t reserved_io_buffer_size) :
+            Channel_Impl_12(callbacks, session_manager, rng, policy, false, datagram, reserved_io_buffer_size),
+            m_creds(creds),
+            m_info(std::move(server_info)) {}
+
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+
+      static std::shared_ptr<Client_Impl_12> create_for_downgrade(Channel_Impl::Downgrade_Information& downgrade_info);
+
+      Client_Impl_12([[maybe_unused]] Private dont_call_me, Channel_Impl::Downgrade_Information& downgrade_info) :
+            Channel_Impl_12(downgrade_info.callbacks,
+                            downgrade_info.session_manager,
+                            downgrade_info.rng,
+                            downgrade_info.policy,
+                            false /* is_server */,
+                            false /* datagram -- not supported by Botan in TLS 1.3 */,
+                            downgrade_info.io_buffer_size),
+            m_creds(downgrade_info.creds),
+            m_info(downgrade_info.server_info) {}
+
+#endif
 
       /**
       * @return network protocol as advertised by the TLS server, if server sent the ALPN extension
@@ -65,8 +92,6 @@ class Client_Impl_12 : public Channel_Impl_12 {
       std::string application_protocol() const override { return m_application_protocol; }
 
    private:
-      std::vector<X509_Certificate> get_peer_cert_chain(const Handshake_State& state) const override;
-
       void initiate_handshake(Handshake_State& state, bool force_full_renegotiation) override;
 
       void send_client_hello(Handshake_State& state,
@@ -75,8 +100,7 @@ class Client_Impl_12 : public Channel_Impl_12 {
                              std::optional<Session_with_Handle> session_and_handle = std::nullopt,
                              const std::vector<std::string>& next_protocols = {});
 
-      void process_handshake_msg(const Handshake_State* active_state,
-                                 Handshake_State& pending_state,
+      void process_handshake_msg(Handshake_State& pending_state,
                                  Handshake_Type type,
                                  const std::vector<uint8_t>& contents,
                                  bool epoch0_restart) override;

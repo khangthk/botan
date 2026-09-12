@@ -3,7 +3,7 @@ algo_strength_02$Hash function used is considered too weak for security
 algo_strength_03$Signature error
 common_01$Verified
 common_02$Cannot establish trust
-common_03$CERTIFICATE decoding failed with X.509 Certificate had differing algorithm identifers in inner and outer ID fields
+common_03$CERTIFICATE decoding failed with X.509 Certificate had differing algorithm identifiers in inner and outer ID fields
 common_04$Certificate signed with unknown/unavailable algorithm
 common_05$CERTIFICATE decoding failed with BER: Value truncated
 common_06$Warning: Certificate serial number is negative
@@ -20,16 +20,16 @@ CRL_02$Certificate is revoked
 CRL_03$Certificate is revoked
 CRL_04$CRL bad signature
 CRL_05$Certificate is revoked
-CRL_06$Certificate is revoked
+CRL_06$CRL contains a critical extension that could not be processed
 CRL_07$Certificate is revoked
 CRL_08$CRL response is not yet valid
 CRL_09$CRL has expired
 CRL_10$Certificate is revoked
-CRL_11$Certificate is revoked
+CRL_11$CRL contains a critical extension that could not be processed
 CRL_12$No revocation data
-CRL_13$No CRL with matching distribution point for certificate
+CRL_13$No revocation data
 CRL_14$X509 CRL decoding failed with BER: Tag mismatch when decoding object got EOF expected BIT STRING/UNIVERSAL
-CRL_15$No CRL with matching distribution point for certificate
+CRL_15$No revocation data
 CRL_16$Certificate is revoked
 crypt_01$Signature error
 crypt_02$Signature error
@@ -37,12 +37,12 @@ ext_01$Encountered extension in certificate with version that does not allow it
 ext_02$Encountered extension in certificate with version that does not allow it
 ext_03$Verified
 ext_04$Unknown critical extension encountered
-ext_05$Duplicate certificate extension encountered
+ext_05$CERTIFICATE decoding failed with Duplicate certificate extension encountered
 ext_06$CA certificate not allowed to issue certs
 ext_07$CA certificate not allowed to issue certs
 ext_08$Certificate chain too long
 ext_09$Verified
-ext_10$Unknown critical extension encountered
+ext_10$Certificate extension encoding error
 ext_11$CA certificate not allowed to issue certs
 ext_12$Certificate contains duplicate policy
 ext_13$Unknown critical extension encountered

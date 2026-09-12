@@ -12,6 +12,7 @@
 #include <botan/pk_ops_fwd.h>
 #include <botan/secmem.h>
 
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -21,6 +22,7 @@ namespace Botan {
 
 class BigInt;
 class RandomNumberGenerator;
+class PK_Signature_Options;
 
 /**
 * Enumeration specifying the signature format.
@@ -28,9 +30,9 @@ class RandomNumberGenerator;
 * This is mostly used for requesting DER encoding of ECDSA signatures;
 * most other algorithms only support "standard".
 */
-enum class Signature_Format {
-   Standard,
-   DerSequence,
+enum class Signature_Format : uint8_t {
+   Standard = 0,
+   DerSequence = 1,
 
    IEEE_1363 BOTAN_DEPRECATED("Use Standard") = Standard,
    DER_SEQUENCE BOTAN_DEPRECATED("Use DerSequence") = DerSequence,
@@ -42,7 +44,7 @@ enum class Signature_Format {
 * It is possible to query if a key supports a particular operation
 * type using Asymmetric_Key::supports_operation()
 */
-enum class PublicKeyOperation {
+enum class PublicKeyOperation : uint8_t {
    Encryption,
    Signature,
    KeyEncapsulation,
@@ -56,7 +58,7 @@ class Private_Key;
 *
 * This is derived for both public and private keys
 */
-class BOTAN_PUBLIC_API(3, 0) Asymmetric_Key {
+class BOTAN_PUBLIC_API(3, 0) Asymmetric_Key /* NOLINT(*special-member-functions) */ {
    public:
       virtual ~Asymmetric_Key() = default;
 
@@ -95,6 +97,8 @@ class BOTAN_PUBLIC_API(3, 0) Asymmetric_Key {
       *
       * This is primarily used to implement the FFI botan_pubkey_get_field
       * and botan_privkey_get_field functions.
+      *
+      * TODO(Botan4) Change this to return by value
       */
       virtual const BigInt& get_int_field(std::string_view field) const;
 
@@ -108,9 +112,42 @@ class BOTAN_PUBLIC_API(3, 0) Asymmetric_Key {
        * Generate another (cryptographically independent) key pair using the
        * same algorithm parameters as this key. This is most useful for algorithms
        * that support PublicKeyOperation::KeyAgreement to generate a fitting ephemeral
-       * key pair. For other key types it might throw Not_Implemented.
+       * key pair. For other key types it might throw `Not_Implemented`.
        */
       virtual std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator& rng) const = 0;
+
+      /**
+      * Test the key values for consistency.
+      *
+      * Note this function is always "best effort"; for many algorithms it is
+      * not computationally possible to ensure the key is correctly formed in
+      * all respects. There is always the possibility a malformed key will be
+      * accepted; this is especially the case for public keys.
+      *
+      * @param rng rng to use for randomized testing (may be ignored)
+      * @param strong whether to perform strong and lengthy version of the test,
+      *        however for many algorithms this has no effect
+      * @return true if the tests passed
+      */
+      virtual bool check_key(RandomNumberGenerator& rng, bool strong) const = 0;
+
+      // Declarations for internal library functions not covered by SemVer follow
+
+      /**
+      * Certain signatures schemes such as ECDSA have more than
+      * one element, and certain unfortunate protocols decided the
+      * thing to do was not concatenate them as normally done, but
+      * instead DER encode each of the elements as independent values.
+      *
+      * If this returns a value x then the signature is checked to
+      * be exactly 2*x bytes and split in half for DER encoding.
+      */
+      virtual std::optional<size_t> _signature_element_size_for_DER_encoding() const { return {}; }
+
+      /*
+      * Return the format normally used by this algorithm for X.509 signatures
+      */
+      virtual Signature_Format _default_x509_signature_format() const;
 };
 
 /*
@@ -131,38 +168,33 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
       */
       BOTAN_DEPRECATED("Use object_identifier") OID get_oid() const { return this->object_identifier(); }
 
-      /*
-      * Test the key values for consistency.
-      * @param rng rng to use
-      * @param strong whether to perform strong and lengthy version
-      * of the test
-      * @return true if the test is passed
-      */
-      virtual bool check_key(RandomNumberGenerator& rng, bool strong) const = 0;
-
       /**
-      * @return X.509 AlgorithmIdentifier for this key
+      * Return the X.509 AlgorithmIdentifier for this key
       */
       virtual AlgorithmIdentifier algorithm_identifier() const = 0;
 
       /**
-      * @return binary public key bits, with no additional encoding
+      * Return the raw public key bits (algorithm specific) with no extra encoding
       *
       * For key agreements this is an alias for PK_Key_Agreement_Key::public_value.
       *
-      * Note: some algorithms (for example RSA) do not have an obvious encoding
+      * @note some algorithms (for example RSA) do not have an obvious encoding
       * for this value due to having many different values, and thus throw
-      * Not_Implemented when invoking this method.
+      * `Not_Implemented` when invoking this method.
       */
       virtual std::vector<uint8_t> raw_public_key_bits() const = 0;
 
       /**
-      * @return BER encoded public key bits
+      * Return the subject public key encoding of this public key
+      *
+      * @note this excludes the parameters field and may not be reliably decodable
       */
       virtual std::vector<uint8_t> public_key_bits() const = 0;
 
       /**
-      * @return X.509 subject key encoding for this key object
+      * Return the SubjectPublicKeyInfo encoding of this public key
+      *
+      * This is the subjectPublicKey field plus the algorithm-specific parameters
       */
       std::vector<uint8_t> subject_public_key() const;
 
@@ -171,7 +203,7 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
        */
       std::string fingerprint_public(std::string_view alg = "SHA-256") const;
 
-      // Internal or non-public declarations follow
+      // Declarations for internal library functions not covered by SemVer follow
 
       /**
       * Returns more than 1 if the output of this algorithm
@@ -185,10 +217,12 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
       *
       * @return number of message parts
       */
-      virtual size_t message_parts() const { return 1; }
+      BOTAN_DEPRECATED("Deprecated no replacement") size_t message_parts() const {
+         return _signature_element_size_for_DER_encoding() ? 2 : 1;
+      }
 
       /**
-      * Returns how large each of the message parts refered to
+      * Returns how large each of the message parts referred to
       * by message_parts() is
       *
       * This function is public but applications should have few
@@ -196,11 +230,20 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
       *
       * @return size of the message parts in bits
       */
-      virtual size_t message_part_size() const { return 0; }
-
-      virtual Signature_Format default_x509_signature_format() const {
-         return (this->message_parts() >= 2) ? Signature_Format::DerSequence : Signature_Format::Standard;
+      BOTAN_DEPRECATED("Deprecated no replacement") size_t message_part_size() const {
+         return _signature_element_size_for_DER_encoding().value_or(0);
       }
+
+      // NOLINTBEGIN(bugprone-virtual-near-miss)
+
+      /*
+      * Return the format normally used by this algorithm for X.509 signatures
+      */
+      BOTAN_DEPRECATED("Deprecated no replacement") Signature_Format default_x509_signature_format() const {
+         return _default_x509_signature_format();
+      }
+
+      // NOLINTEND(bugprone-virtual-near-miss)
 
       /**
       * This is an internal library function exposed on key types.
@@ -235,11 +278,24 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
       * In all cases applications should use wrappers in pubkey.h
       *
       * Return a verification operation for this key/params or throw
+      *
+      * @param options which specify parameters of the signature beyond those
+      * implicit to the public key itself
+      */
+      virtual std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const;
+
+      /**
+      * This is an internal library function exposed on key types.
+      * In all cases applications should use wrappers in pubkey.h
+      *
+      * Return a verification operation for this key/params or throw
+      *
       * @param params additional parameters
       * @param provider the provider to use
       */
-      virtual std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                           std::string_view provider) const;
+      BOTAN_DEPRECATED("Use PK_Verifier")
+      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
+                                                                   std::string_view provider) const;
 
       /**
       * This is an internal library function exposed on key types.
@@ -263,16 +319,19 @@ class BOTAN_PUBLIC_API(2, 0) Public_Key : public virtual Asymmetric_Key {
 class BOTAN_PUBLIC_API(2, 0) Private_Key : public virtual Public_Key {
    public:
       /**
-      * @return BER encoded private key bits
+      * Return the PKCS8 private key encoding
+      *
+      * @note this encoding omits the outer PKCS8 algorithm identifiers and will
+      * not be portably decodable on its own. Prefer `private_key_info`.
       */
       virtual secure_vector<uint8_t> private_key_bits() const = 0;
 
       /**
-      * @return binary private key bits, with no additional encoding
+      * Return the binary private key bits, with no additional encoding
       *
-      * Note: some algorithms (for example RSA) do not have an obvious encoding
+      * @note some algorithms (for example RSA) do not have an obvious encoding
       * for this value due to having many different values, and thus not implement
-      * this function. The default implementation throws Not_Implemented
+      * this function. The default implementation throws `Not_Implemented`
       */
       virtual secure_vector<uint8_t> raw_private_key_bits() const;
 
@@ -285,13 +344,15 @@ class BOTAN_PUBLIC_API(2, 0) Private_Key : public virtual Public_Key {
       virtual std::unique_ptr<Public_Key> public_key() const = 0;
 
       /**
-      * @return PKCS #8 private key encoding for this key object
+      * Return PKCS #8 private key encoding for this key object
       */
       secure_vector<uint8_t> private_key_info() const;
 
       /**
-      * @return PKCS #8 AlgorithmIdentifier for this key
-      * Might be different from the X.509 identifier, but normally is not
+      * Return the PKCS #8 AlgorithmIdentifier for this key
+      *
+      * @note normally this is the same as the public key identifier, but a few
+      * oddball algorithms use a different value
       */
       virtual AlgorithmIdentifier pkcs8_algorithm_identifier() const { return algorithm_identifier(); }
 
@@ -308,7 +369,7 @@ class BOTAN_PUBLIC_API(2, 0) Private_Key : public virtual Public_Key {
        */
       virtual std::optional<uint64_t> remaining_operations() const { return std::nullopt; }
 
-      // Internal or non-public declarations follow
+      // Declarations for internal library functions not covered by SemVer follow
 
       /**
        * @return Hash of the PKCS #8 encoding for this key object
@@ -357,12 +418,29 @@ class BOTAN_PUBLIC_API(2, 0) Private_Key : public virtual Public_Key {
       * @param rng a random number generator. The PK_Op may maintain a
       * reference to the RNG and use it many times. The rng must outlive
       * any operations which reference it.
+      *
+      * @param options allow controlling behavior
+      */
+      virtual std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                                      const PK_Signature_Options& options) const;
+
+      /**
+      * This is an internal library function exposed on key types.
+      * In all cases applications should use wrappers in pubkey.h
+      *
+      * Return a signature operation for this key/params or throw
+      *
+      * @param rng a random number generator. The PK_Op may maintain a
+      * reference to the RNG and use it many times. The rng must outlive
+      * any operations which reference it.
+      *
       * @param params additional parameters
       * @param provider the provider to use
       */
-      virtual std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
-                                                                     std::string_view params,
-                                                                     std::string_view provider) const;
+      BOTAN_DEPRECATED("Use PK_Signer")
+      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
+                                                             std::string_view params,
+                                                             std::string_view provider) const;
 
       /**
       * This is an internal library function exposed on key types.
@@ -386,16 +464,27 @@ class BOTAN_PUBLIC_API(2, 0) Private_Key : public virtual Public_Key {
 */
 class BOTAN_PUBLIC_API(2, 0) PK_Key_Agreement_Key : public virtual Private_Key {
    public:
-      /*
-      * @return public component of this key
+      /**
+      * Return the public value used to effect key exchange
       */
       virtual std::vector<uint8_t> public_value() const = 0;
 };
 
-std::string BOTAN_PUBLIC_API(2, 4) create_hex_fingerprint(const uint8_t bits[], size_t len, std::string_view hash_name);
+/**
+* Hex encode the data and separate them in blocks with `:` characters
+*/
+std::string BOTAN_PUBLIC_API(3, 12) format_hex_fingerprint(std::span<const uint8_t> bits);
 
-inline std::string create_hex_fingerprint(std::span<const uint8_t> vec, std::string_view hash_name) {
-   return create_hex_fingerprint(vec.data(), vec.size(), hash_name);
+/**
+* Hash the input then format that hash using format_hex_fingerprint
+*/
+std::string BOTAN_PUBLIC_API(3, 0) create_hex_fingerprint(std::span<const uint8_t> bits, std::string_view hash_name);
+
+/**
+* Old interface for create_hex_fingerprint added in 2.4 pre-span
+*/
+inline std::string create_hex_fingerprint(const uint8_t bits[], size_t len, std::string_view hash_name) {
+   return create_hex_fingerprint({bits, len}, hash_name);
 }
 
 }  // namespace Botan

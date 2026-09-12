@@ -30,8 +30,6 @@ class BOTAN_PUBLIC_API(2, 0) RSA_PublicKeyGenerationProperties final : public Pu
       inline void set_pub_exponent(const BigInt& pub_exponent = BigInt::from_word(0x10001)) {
          add_binary(AttributeType::PublicExponent, pub_exponent.serialize());
       }
-
-      ~RSA_PublicKeyGenerationProperties() override = default;
 };
 
 /// Properties for importing a PKCS#11 RSA public key
@@ -46,8 +44,6 @@ class BOTAN_PUBLIC_API(2, 0) RSA_PublicKeyImportProperties final : public Public
 
       /// @return the public exponent
       inline const BigInt& pub_exponent() const { return m_pub_exponent; }
-
-      ~RSA_PublicKeyImportProperties() override = default;
 
    private:
       const BigInt m_modulus;
@@ -75,9 +71,9 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_RSA_PublicKey : public Object,
       PKCS11_RSA_PublicKey(Session& session, const RSA_PublicKeyImportProperties& pubkey_props);
 
       /**
-       * @throws Not_Implemented
+       * @throws Not_Implemented as this operation is not possible in PKCS11
        */
-      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator&) const final {
+      std::unique_ptr<Private_Key> generate_another(RandomNumberGenerator& /*rng*/) const final {
          throw Not_Implemented("Cannot generate a new PKCS#11 RSA keypair from this public key");
       }
 
@@ -85,8 +81,7 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_RSA_PublicKey : public Object,
                                                                std::string_view params,
                                                                std::string_view provider) const override;
 
-      std::unique_ptr<PK_Ops::Verification> create_verification_op(std::string_view params,
-                                                                   std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Verification> _create_verification_op(const PK_Signature_Options& options) const override;
 };
 
 /// Properties for importing a PKCS#11 RSA private key
@@ -124,8 +119,6 @@ class BOTAN_PUBLIC_API(2, 0) RSA_PrivateKeyImportProperties final : public Priva
       /// @return the private exponent
       inline const BigInt& priv_exponent() const { return m_priv_exponent; }
 
-      ~RSA_PrivateKeyImportProperties() override = default;
-
    private:
       const BigInt m_modulus;
       const BigInt m_priv_exponent;
@@ -135,8 +128,6 @@ class BOTAN_PUBLIC_API(2, 0) RSA_PrivateKeyImportProperties final : public Priva
 class BOTAN_PUBLIC_API(2, 0) RSA_PrivateKeyGenerationProperties final : public PrivateKeyProperties {
    public:
       RSA_PrivateKeyGenerationProperties() : PrivateKeyProperties(KeyType::Rsa) {}
-
-      ~RSA_PrivateKeyGenerationProperties() override = default;
 };
 
 /// Represents a PKCS#11 RSA private key
@@ -191,9 +182,8 @@ class BOTAN_PUBLIC_API(2, 0) PKCS11_RSA_PrivateKey final : public Object,
                                                                std::string_view params,
                                                                std::string_view provider) const override;
 
-      std::unique_ptr<PK_Ops::Signature> create_signature_op(RandomNumberGenerator& rng,
-                                                             std::string_view params,
-                                                             std::string_view provider) const override;
+      std::unique_ptr<PK_Ops::Signature> _create_signature_op(RandomNumberGenerator& rng,
+                                                              const PK_Signature_Options& options) const override;
 
    private:
       bool m_use_software_padding = false;

@@ -6,12 +6,17 @@
 
 #include <botan/rng.h>
 
-#include <botan/entropy_src.h>
+#include <botan/exceptn.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/os_utils.h>
+
+#if defined(BOTAN_HAS_ENTROPY_SOURCE)
+   #include <botan/entropy_src.h>
+#endif
 
 #if defined(BOTAN_HAS_SYSTEM_RNG)
    #include <botan/system_rng.h>
+#elif defined(BOTAN_HAS_OS_UTILS)
+   #include <botan/internal/os_utils.h>
 #endif
 
 #include <array>
@@ -20,38 +25,45 @@ namespace Botan {
 
 void RandomNumberGenerator::randomize_with_ts_input(std::span<uint8_t> output) {
    if(this->accepts_input()) {
-      constexpr auto s_hd_clk = sizeof(decltype(OS::get_high_resolution_clock()));
-      constexpr auto s_sys_ts = sizeof(decltype(OS::get_system_timestamp_ns()));
-      constexpr auto s_pid = sizeof(decltype(OS::get_process_id()));
-
-      std::array<uint8_t, s_hd_clk + s_sys_ts + s_pid> additional_input = {0};
-      auto s_additional_input = std::span(additional_input.begin(), additional_input.end());
-
-      store_le(OS::get_high_resolution_clock(), s_additional_input.data());
-      s_additional_input = s_additional_input.subspan(s_hd_clk);
+      std::array<uint8_t, 16> additional_input = {0};
 
 #if defined(BOTAN_HAS_SYSTEM_RNG)
-      System_RNG system_rng;
-      system_rng.randomize(s_additional_input);
-#else
-      store_le(OS::get_system_timestamp_ns(), s_additional_input.data());
-      s_additional_input = s_additional_input.subspan(s_sys_ts);
+      // If we have a system RNG just read 128 bits from that
+      system_rng().randomize(additional_input);
+      constexpr size_t written = additional_input.size();
+#elif defined(BOTAN_HAS_OS_UTILS)
+      // Otherwise take clock + pid
+      const uint64_t clock = OS::get_high_resolution_clock();
+      const uint32_t pid = OS::get_process_id();  // 0 if no PIDs on this system
 
-      store_le(OS::get_process_id(), s_additional_input.data());
+      store_le(std::span{additional_input}.first<8>(), clock);
+      size_t written = 8;
+
+      if(pid != 0) {
+         store_le(std::span{additional_input}.subspan<8, 4>(), pid);
+         written += 4;
+      }
+#else
+      // Nothing to use in this case
+      constexpr size_t written = 0;
 #endif
 
-      this->fill_bytes_with_input(output, additional_input);
+      this->fill_bytes_with_input(output, std::span{additional_input}.first(written));
    } else {
       this->fill_bytes_with_input(output, {});
    }
 }
 
-size_t RandomNumberGenerator::reseed(Entropy_Sources& srcs, size_t poll_bits, std::chrono::milliseconds poll_timeout) {
+size_t RandomNumberGenerator::reseed_from_sources(Entropy_Sources& srcs, size_t poll_bits) {
    if(this->accepts_input()) {
-      return srcs.poll(*this, poll_bits, poll_timeout);
-   } else {
-      return 0;
+#if defined(BOTAN_HAS_ENTROPY_SOURCE)
+      return srcs.poll(*this, poll_bits);
+#else
+      BOTAN_UNUSED(srcs, poll_bits);
+#endif
    }
+
+   return 0;
 }
 
 void RandomNumberGenerator::reseed_from_rng(RandomNumberGenerator& rng, size_t poll_bits) {

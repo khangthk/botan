@@ -6,6 +6,7 @@
 
 #include <botan/ffi.h>
 
+#include <botan/assert.h>
 #include <botan/internal/ffi_util.h>
 
 #if defined(BOTAN_HAS_TOTP)
@@ -24,7 +25,7 @@ BOTAN_FFI_DECLARE_STRUCT(botan_totp_struct, Botan::TOTP, 0x3D9D2CD1);
 
 int botan_totp_init(
    botan_totp_t* totp, const uint8_t key[], size_t key_len, const char* hash_algo, size_t digits, size_t time_step) {
-   if(totp == nullptr || key == nullptr || hash_algo == nullptr) {
+   if(any_null_pointers(totp, key, hash_algo)) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
 
@@ -33,9 +34,7 @@ int botan_totp_init(
 #if defined(BOTAN_HAS_TOTP)
    return ffi_guard_thunk(__func__, [=]() -> int {
       auto otp = std::make_unique<Botan::TOTP>(key, key_len, hash_algo, digits, time_step);
-      *totp = new botan_totp_struct(std::move(otp));
-
-      return BOTAN_FFI_SUCCESS;
+      return ffi_new_object(totp, std::move(otp));
    });
 #else
    BOTAN_UNUSED(totp, key, key_len, hash_algo, digits, time_step);
@@ -54,7 +53,7 @@ int botan_totp_destroy(botan_totp_t totp) {
 
 int botan_totp_generate(botan_totp_t totp, uint32_t* totp_code, uint64_t timestamp) {
 #if defined(BOTAN_HAS_TOTP)
-   if(totp == nullptr || totp_code == nullptr) {
+   if(any_null_pointers(totp, totp_code)) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
 

@@ -32,6 +32,7 @@ confidence=
 # --disable=W"
 
 disable=
+  unknown-option-value,
   # too-many-* is just like, your opinion man
   too-many-lines,
   too-many-locals,
@@ -41,6 +42,7 @@ disable=
   too-many-instance-attributes,
   too-many-public-methods,
   too-many-return-statements,
+  too-many-positional-arguments,
 
   missing-docstring,       # nice to have, but not necessary in every script
   fixme,                   # is it better to omit the note that something is worth improving???
@@ -277,13 +279,15 @@ valid-metaclass-classmethod-first-arg=mcs
 
 # List of member names, which should be excluded from the protected access
 # warning.
-exclude-protected=_asdict,_fields,_replace,_source,_make
+exclude-protected=_asdict,_fields,_replace,_source,_make,_handle
 
 
 [DESIGN]
 
 # Maximum number of arguments for function / method
-max-args=8
+max-args = 10
+
+#max-positional-arguments = 10
 
 # Argument names that match this expression will be ignored. Default to name
 # with leading underscore

@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 PCURVES -> 20240404
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "Prime Order Curves"
@@ -10,6 +10,7 @@ type -> "Internal"
 
 <header:internal>
 pcurves.h
-pcurves_id.h
+pcurves_algos.h
 pcurves_instance.h
+pcurves_mul.h
 </header:internal>

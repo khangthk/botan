@@ -8,11 +8,12 @@
 #ifndef BOTAN_HMAC_DRBG_H_
 #define BOTAN_HMAC_DRBG_H_
 
-#include <botan/mac.h>
 #include <botan/stateful_rng.h>
+#include <memory>
 
 namespace Botan {
 
+class MessageAuthenticationCode;
 class Entropy_Sources;
 
 /**
@@ -62,7 +63,7 @@ class BOTAN_PUBLIC_API(2, 0) HMAC_DRBG final : public Stateful_RNG {
       */
       HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                 RandomNumberGenerator& underlying_rng,
-                size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL,
+                size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval,
                 size_t max_number_of_bytes_per_request = 64 * 1024);
 
       /**
@@ -89,7 +90,7 @@ class BOTAN_PUBLIC_API(2, 0) HMAC_DRBG final : public Stateful_RNG {
       */
       HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                 Entropy_Sources& entropy_sources,
-                size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL,
+                size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval,
                 size_t max_number_of_bytes_per_request = 64 * 1024);
 
       /**
@@ -120,13 +121,33 @@ class BOTAN_PUBLIC_API(2, 0) HMAC_DRBG final : public Stateful_RNG {
       HMAC_DRBG(std::unique_ptr<MessageAuthenticationCode> prf,
                 RandomNumberGenerator& underlying_rng,
                 Entropy_Sources& entropy_sources,
-                size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL,
+                size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval,
                 size_t max_number_of_bytes_per_request = 64 * 1024);
 
+      ~HMAC_DRBG() override;
+
+      HMAC_DRBG(const HMAC_DRBG& rng) = delete;
+      HMAC_DRBG& operator=(const HMAC_DRBG& rng) = delete;
+
+      HMAC_DRBG(HMAC_DRBG&& rng) = delete;
+      HMAC_DRBG& operator=(HMAC_DRBG&& rng) = delete;
+
+      /**
+      * Return the name of this RNG type
+      * @return the name of this RNG type
+      */
       std::string name() const override;
 
+      /**
+      * Return the security level of this DRBG
+      * @return the estimated security level in bits
+      */
       size_t security_level() const override;
 
+      /**
+      * Return the largest number of bytes this DRBG will produce per request
+      * @return the maximum request size in bytes
+      */
       size_t max_number_of_bytes_per_request() const override { return m_max_number_of_bytes_per_request; }
 
    private:

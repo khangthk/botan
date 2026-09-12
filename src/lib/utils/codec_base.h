@@ -11,8 +11,9 @@
 
 #include <botan/exceptn.h>
 #include <botan/mem_ops.h>
+#include <array>
 #include <string>
-#include <vector>
+#include <type_traits>
 
 namespace Botan {
 
@@ -31,12 +32,17 @@ namespace Botan {
 * @return number of bytes written to output
 */
 template <class Base>
-size_t base_encode(
-   Base&& base, char output[], const uint8_t input[], size_t input_length, size_t& input_consumed, bool final_inputs) {
+size_t base_encode(const Base& base,
+                   char output[],
+                   const uint8_t input[],
+                   size_t input_length,
+                   size_t& input_consumed,
+                   bool final_inputs) {
    input_consumed = 0;
 
-   const size_t encoding_bytes_in = base.encoding_bytes_in();
-   const size_t encoding_bytes_out = base.encoding_bytes_out();
+   // TODO(Botan4) Check if we can use just base. or Base:: here instead
+   constexpr size_t encoding_bytes_in = std::remove_reference_t<Base>::encoding_bytes_in();
+   constexpr size_t encoding_bytes_out = std::remove_reference_t<Base>::encoding_bytes_out();
 
    size_t input_remaining = input_length;
    size_t output_produced = 0;
@@ -50,7 +56,7 @@ size_t base_encode(
    }
 
    if(final_inputs && input_remaining) {
-      std::vector<uint8_t> remainder(encoding_bytes_in, 0);
+      std::array<uint8_t, encoding_bytes_in> remainder{};
       for(size_t i = 0; i != input_remaining; ++i) {
          remainder[i] = input[input_consumed + i];
       }
@@ -75,7 +81,7 @@ size_t base_encode(
 }
 
 template <typename Base>
-std::string base_encode_to_string(Base&& base, const uint8_t input[], size_t input_length) {
+std::string base_encode_to_string(const Base& base, const uint8_t input[], size_t input_length) {
    const size_t output_length = base.encode_max_output(input_length);
    std::string output(output_length, 0);
 
@@ -109,20 +115,24 @@ std::string base_encode_to_string(Base&& base, const uint8_t input[], size_t inp
 * @return number of bytes written to output
 */
 template <typename Base>
-size_t base_decode(Base&& base,
+size_t base_decode(const Base& base,
                    uint8_t output[],
                    const char input[],
                    size_t input_length,
                    size_t& input_consumed,
                    bool final_inputs,
                    bool ignore_ws = true) {
-   const size_t decoding_bytes_in = base.decoding_bytes_in();
-   const size_t decoding_bytes_out = base.decoding_bytes_out();
+   // TODO(Botan4) Check if we can use just base. or Base:: here instead
+   constexpr size_t decoding_bytes_in = std::remove_reference_t<Base>::decoding_bytes_in();
+   constexpr size_t decoding_bytes_out = std::remove_reference_t<Base>::decoding_bytes_out();
+
+   input_consumed = 0;
 
    uint8_t* out_ptr = output;
-   std::vector<uint8_t> decode_buf(decoding_bytes_in, 0);
+   std::array<uint8_t, decoding_bytes_in> decode_buf{};
    size_t decode_buf_pos = 0;
    size_t final_truncate = 0;
+   bool seen_padding = false;
 
    clear_mem(output, base.decode_max_output(input_length));
 
@@ -131,8 +141,15 @@ size_t base_decode(Base&& base,
 
       // This call might throw Invalid_Argument
       if(base.check_bad_char(bin, input[i], ignore_ws)) {
+         // Padding may only appear at the end, so a data symbol must never
+         // follow one (0x81 marks a padding character)
+         if(seen_padding) {
+            throw Invalid_Argument(base.name() + " decoding failed, data follows padding");
+         }
          decode_buf[decode_buf_pos] = bin;
          ++decode_buf_pos;
+      } else if(bin == 0x81) {
+         seen_padding = true;
       }
 
       /*
@@ -140,6 +157,22 @@ size_t base_decode(Base&& base,
       */
       if(final_inputs && (i == input_length - 1)) {
          if(decode_buf_pos) {
+            const size_t bits_per_symbol = base.bits_consumed();
+            const size_t pad_bits = (decode_buf_pos * bits_per_symbol) % 8;
+
+            // A trailing symbol contributing only pad bits cannot occur in a
+            // valid encoding; RFC 4648 4 and 6 enumerate the reachable cases
+            if(pad_bits >= bits_per_symbol) {
+               throw Invalid_Argument(base.name() + " decoding failed, invalid length");
+            }
+
+            // RFC 4648 3.5: "decoders MAY chose to reject an encoding if the
+            // pad bits have not been set to zero"
+            const uint8_t pad_mask = static_cast<uint8_t>((1U << pad_bits) - 1);
+            if(decode_buf[decode_buf_pos - 1] & pad_mask) {
+               throw Invalid_Argument(base.name() + " decoding failed, nonzero padding bits");
+            }
+
             for(size_t j = decode_buf_pos; j < decoding_bytes_in; ++j) {
                decode_buf[j] = 0;
             }
@@ -162,13 +195,13 @@ size_t base_decode(Base&& base,
       ++input_consumed;
    }
 
-   size_t written = (out_ptr - output) - base.bytes_to_remove(final_truncate);
+   const size_t written = (out_ptr - output) - base.bytes_to_remove(final_truncate);
 
    return written;
 }
 
 template <typename Base>
-size_t base_decode_full(Base&& base, uint8_t output[], const char input[], size_t input_length, bool ignore_ws) {
+size_t base_decode_full(const Base& base, uint8_t output[], const char input[], size_t input_length, bool ignore_ws) {
    size_t consumed = 0;
    const size_t written = base_decode(base, output, input, input_length, consumed, true, ignore_ws);
 
@@ -180,7 +213,7 @@ size_t base_decode_full(Base&& base, uint8_t output[], const char input[], size_
 }
 
 template <typename Vector, typename Base>
-Vector base_decode_to_vec(Base&& base, const char input[], size_t input_length, bool ignore_ws) {
+Vector base_decode_to_vec(const Base& base, const char input[], size_t input_length, bool ignore_ws) {
    const size_t output_length = base.decode_max_output(input_length);
    Vector bin(output_length);
 

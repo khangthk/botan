@@ -13,13 +13,15 @@
 
 namespace Botan_CLI {
 
+namespace {
+
 #if defined(BOTAN_HAS_COMPRESSION)
 
 class Compress final : public Command {
    public:
       Compress() : Command("compress --type=gzip --level=6 --buf-size=8192 file") {}
 
-      std::string output_filename(const std::string& input_fsname, const std::string& comp_type) {
+      static std::string output_filename(const std::string& input_fsname, const std::string& comp_type) {
          const std::map<std::string, std::string> suffixes = {
             {"zlib", "zlib"},
             {"gzip", "gz"},
@@ -89,7 +91,7 @@ class Decompress final : public Command {
    public:
       Decompress() : Command("decompress --buf-size=8192 file") {}
 
-      void parse_extension(const std::string& in_file, std::string& out_file, std::string& suffix) {
+      static void parse_extension(const std::string& in_file, std::string& out_file, std::string& suffix) {
          auto last_dot = in_file.find_last_of('.');
          if(last_dot == std::string::npos || last_dot == 0) {
             throw CLI_Error("No extension detected in filename '" + in_file + "'");
@@ -106,7 +108,8 @@ class Decompress final : public Command {
       void go() override {
          const size_t buf_size = get_arg_sz("buf-size");
          const std::string in_file = get_arg("file");
-         std::string out_file, suffix;
+         std::string out_file;
+         std::string suffix;
          parse_extension(in_file, out_file, suffix);
 
          std::ifstream in(in_file, std::ios::binary);
@@ -150,5 +153,7 @@ class Decompress final : public Command {
 BOTAN_REGISTER_COMMAND("decompress", Decompress);
 
 #endif
+
+}  // namespace
 
 }  // namespace Botan_CLI

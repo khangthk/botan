@@ -8,13 +8,16 @@
 
 #include <botan/certstor_flatfile.h>
 
+#include <botan/assert.h>
 #include <botan/data_src.h>
 #include <botan/pem.h>
 #include <botan/pkix_types.h>
-#include <stdexcept>
+#include <algorithm>
 
 namespace Botan {
+
 namespace {
+
 std::vector<std::vector<uint8_t>> decode_all_certificates(DataSource& source) {
    std::vector<std::vector<uint8_t>> pems;
 
@@ -32,6 +35,7 @@ std::vector<std::vector<uint8_t>> decode_all_certificates(DataSource& source) {
 
    return pems;
 }
+
 }  // namespace
 
 Flatfile_Certificate_Store::Flatfile_Certificate_Store(std::string_view file, bool ignore_non_ca) {
@@ -51,10 +55,17 @@ Flatfile_Certificate_Store::Flatfile_Certificate_Store(std::string_view file, bo
       * but we cannot fix the trust store. So instead just ignore any such certificate.
       */
       if(cert.is_self_signed() && cert.is_CA_cert()) {
-         m_all_subjects.push_back(cert.subject_dn());
-         m_dn_to_cert[cert.subject_dn()].push_back(cert);
-         m_pubkey_sha1_to_cert.emplace(cert.subject_public_key_bitstring_sha1(), cert);
-         m_subject_dn_sha256_to_cert.emplace(cert.raw_subject_dn_sha256(), cert);
+         const auto tag = cert.tag();
+
+         // dedup
+         if(!m_cert_tags.contains(tag)) {
+            m_cert_tags.insert(tag);
+            m_all_subjects.push_back(cert.subject_dn());
+            m_dn_to_cert[cert.subject_dn()].push_back(cert);
+            m_pubkey_sha1_to_cert.emplace(cert.subject_public_key_bitstring_sha1(), cert);
+            m_subject_dn_sha256_to_cert.emplace(cert.raw_subject_dn_sha256(), cert);
+            m_issuer_dn_to_cert[cert.issuer_dn()].push_back(cert);
+         }
       } else if(!ignore_non_ca) {
          throw Invalid_Argument("Flatfile_Certificate_Store received non CA cert " + cert.subject_dn().to_string());
       }
@@ -69,19 +80,28 @@ std::vector<X509_DN> Flatfile_Certificate_Store::all_subjects() const {
    return m_all_subjects;
 }
 
+bool Flatfile_Certificate_Store::contains(const X509_Certificate& cert) const {
+   return m_cert_tags.contains(cert.tag());
+}
+
 std::vector<X509_Certificate> Flatfile_Certificate_Store::find_all_certs(const X509_DN& subject_dn,
                                                                          const std::vector<uint8_t>& key_id) const {
-   std::vector<X509_Certificate> found_certs;
-   try {
-      const auto certs = m_dn_to_cert.at(subject_dn);
+   const auto certs_for_dn = m_dn_to_cert.find(subject_dn);
+   if(certs_for_dn == m_dn_to_cert.end()) {
+      return {};
+   }
 
-      for(const auto& cert : certs) {
-         if(key_id.empty() || key_id == cert.subject_key_id()) {
-            found_certs.push_back(cert);
+   const auto& certs = certs_for_dn->second;
+
+   std::vector<X509_Certificate> found_certs;
+   for(const auto& cert : certs) {
+      if(!key_id.empty()) {
+         const std::vector<uint8_t>& skid = cert.subject_key_id();
+         if(!skid.empty() && skid != key_id) {
+            continue;
          }
       }
-   } catch(const std::out_of_range&) {
-      return {};
+      found_certs.push_back(cert);
    }
 
    return found_certs;
@@ -117,8 +137,27 @@ std::optional<X509_Certificate> Flatfile_Certificate_Store::find_cert_by_raw_sub
    return std::nullopt;
 }
 
+std::optional<X509_Certificate> Flatfile_Certificate_Store::find_cert_by_issuer_dn_and_serial_number(
+   const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const {
+   const auto certs_for_issuer = m_issuer_dn_to_cert.find(issuer_dn);
+   if(certs_for_issuer == m_issuer_dn_to_cert.end()) {
+      return std::nullopt;
+   }
+
+   const auto& certs = certs_for_issuer->second;
+
+   for(const auto& cert : certs) {
+      if(std::ranges::equal(cert.serial_number(), serial_number)) {
+         return cert;
+      }
+   }
+
+   return std::nullopt;
+}
+
 std::optional<X509_CRL> Flatfile_Certificate_Store::find_crl_for(const X509_Certificate& subject) const {
    BOTAN_UNUSED(subject);
    return {};
 }
+
 }  // namespace Botan

@@ -8,6 +8,7 @@
 
 #include <botan/pkix_types.h>
 #include <botan/x509cert.h>
+#include <botan/internal/target_info.h>
 
 #if defined(BOTAN_HAS_CERTSTOR_MACOS)
    #include <botan/certstor_macos.h>
@@ -51,8 +52,17 @@ std::optional<X509_Certificate> System_Certificate_Store::find_cert_by_raw_subje
    return m_system_store->find_cert_by_raw_subject_dn_sha256(subject_hash);
 }
 
+std::optional<X509_Certificate> System_Certificate_Store::find_cert_by_issuer_dn_and_serial_number(
+   const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const {
+   return m_system_store->find_cert_by_issuer_dn_and_serial_number(issuer_dn, serial_number);
+}
+
 std::optional<X509_CRL> System_Certificate_Store::find_crl_for(const X509_Certificate& subject) const {
    return m_system_store->find_crl_for(subject);
+}
+
+bool System_Certificate_Store::contains(const X509_Certificate& cert) const {
+   return m_system_store->contains(cert);
 }
 
 std::vector<X509_DN> System_Certificate_Store::all_subjects() const {

@@ -35,6 +35,9 @@ class SHA_1 final : public HashFunction {
 
       size_t hash_block_size() const override { return block_bytes; }
 
+      // Collision attacks with cost ~2^61 are known (Leurent and Peyrin, 2020)
+      size_t security_level() const override { return 61; }
+
       std::unique_ptr<HashFunction> new_object() const override;
 
       std::unique_ptr<HashFunction> copy_state() const override;
@@ -47,8 +50,12 @@ class SHA_1 final : public HashFunction {
       static void sha1_armv8_compress_n(digest_type& digest, std::span<const uint8_t> blocks, size_t block_count);
 #endif
 
-#if defined(BOTAN_HAS_SHA1_SSE2)
-      static void sse2_compress_n(digest_type& digest, std::span<const uint8_t> blocks, size_t block_count);
+#if defined(BOTAN_HAS_SHA1_SIMD_4X32)
+      static void simd_compress_n(digest_type& digest, std::span<const uint8_t> blocks, size_t block_count);
+#endif
+
+#if defined(BOTAN_HAS_SHA1_AVX2)
+      static void avx2_compress_n(digest_type& digest, std::span<const uint8_t> blocks, size_t block_count);
 #endif
 
 #if defined(BOTAN_HAS_SHA1_X86_SHA_NI)

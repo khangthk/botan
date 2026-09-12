@@ -49,11 +49,41 @@ constexpr inline std::optional<T> checked_mul(T a, T b) {
    // https://stackoverflow.com/questions/24795651
    const T r = (1U * a) * b;
    // If a == 0 then the multiply certainly did not overflow
-   // Otherwise r / a == b unless overflow occured
+   // Otherwise r / a == b unless overflow occurred
    if(a != 0 && r / a != b) {
       return {};
    }
    return r;
+}
+
+/**
+* Add @p a and @p b, throwing Invalid_Argument with message @p msg if the
+* addition would overflow.
+*
+* TODO(Botan4) add std::source_location argument
+*/
+template <std::unsigned_integral T>
+constexpr T add_or_throw(T a, T b, std::string_view msg) {
+   if(auto r = checked_add(a, b)) {
+      return r.value();
+   } else {
+      throw Invalid_Argument(msg);
+   }
+}
+
+/**
+* Multiply @p a and @p b, throwing Invalid_Argument with message @p msg if the
+* multiplication would overflow.
+*
+* TODO(Botan4) add std::source_location argument
+*/
+template <std::unsigned_integral T>
+constexpr T mul_or_throw(T a, T b, std::string_view msg) {
+   if(auto r = checked_mul(a, b)) {
+      return r.value();
+   } else {
+      throw Invalid_Argument(msg);
+   }
 }
 
 template <typename RT, typename ExceptionType, typename AT>

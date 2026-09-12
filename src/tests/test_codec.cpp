@@ -6,6 +6,9 @@
 
 #include "tests.h"
 
+#include <botan/exceptn.h>
+#include <botan/hex.h>
+
 #if defined(BOTAN_HAS_BASE64_CODEC)
    #include <botan/base64.h>
 #endif
@@ -19,6 +22,8 @@
 #endif
 
 namespace Botan_Tests {
+
+namespace {
 
 #if defined(BOTAN_HAS_BASE32_CODEC)
 
@@ -35,8 +40,8 @@ class Base32_Tests final : public Text_Based_Test {
          try {
             if(is_valid) {
                const std::vector<uint8_t> binary = vars.get_req_bin("Binary");
-               result.test_eq("base32 decoding", Botan::base32_decode(base32), binary);
-               result.test_eq("base32 encoding", Botan::base32_encode(binary), base32);
+               result.test_bin_eq("base32 decoding", Botan::base32_decode(base32), binary);
+               result.test_str_eq("base32 encoding", Botan::base32_encode(binary), base32);
             } else {
                auto res = Botan::base32_decode(base32);
                result.test_failure("decoded invalid base32 to " + Botan::hex_encode(res));
@@ -56,7 +61,7 @@ class Base32_Tests final : public Text_Based_Test {
          Test::Result result("Base32");
          const std::string valid_b32 = "MY======";
 
-         for(char ws_char : {' ', '\t', '\r', '\n'}) {
+         for(const char ws_char : {' ', '\t', '\r', '\n'}) {
             for(size_t i = 0; i <= valid_b32.size(); ++i) {
                std::string b32_ws = valid_b32;
                b32_ws.insert(i, 1, ws_char);
@@ -66,7 +71,7 @@ class Base32_Tests final : public Text_Based_Test {
                } catch(std::exception&) {}
 
                try {
-                  result.test_eq("base32 decoding with whitespace", Botan::base32_decode(b32_ws, true), "66");
+                  result.test_bin_eq("base32 decoding with whitespace", Botan::base32_decode(b32_ws, true), "66");
                } catch(std::exception& e) {
                   result.test_failure(b32_ws, e.what());
                }
@@ -96,8 +101,8 @@ class Base58_Tests final : public Text_Based_Test {
          try {
             if(is_valid) {
                const std::vector<uint8_t> binary = vars.get_req_bin("Binary");
-               result.test_eq("base58 decoding", Botan::base58_decode(base58), binary);
-               result.test_eq("base58 encoding", Botan::base58_encode(binary), base58);
+               result.test_bin_eq("base58 decoding", Botan::base58_decode(base58), binary);
+               result.test_str_eq("base58 encoding", Botan::base58_encode(binary), base58);
             } else {
                auto res = Botan::base58_decode(base58);
                result.test_failure("decoded invalid base58 to " + Botan::hex_encode(res));
@@ -111,6 +116,34 @@ class Base58_Tests final : public Text_Based_Test {
          }
 
          return result;
+      }
+
+      std::vector<Test::Result> run_final_tests() override {
+         Test::Result result("Base58");
+
+         // Whitespace is ignored wherever it appears, including inside a block of 8 characters
+         const std::vector<uint8_t> expected =
+            Botan::hex_decode("6162636465666768696a6b6c6d6e6f707172737475767778797a");
+
+         const std::vector<std::string> with_ws = {
+            "3yxU3u1igY8WkgtjK92fbJQCd4BZiiT1v25f\n",
+            " 3yxU3u1igY8WkgtjK92fbJQCd4BZiiT1v25f",
+            "3yxU 3u1igY8WkgtjK92fbJQCd4BZiiT1v25f",
+            "3yxU3u1i\ngY8Wkgtj\nK92fbJQC\nd4BZiiT1\nv25f",
+            "3yxU3u1igY8Wkgtj K92fbJQCd4BZiiT1v25f",
+            "3yxU3u1igY8WkgtjK92fbJ  QCd4BZiiT1v25f",
+            "3 y x U 3 u 1 i g Y 8 W k g t j K 9 2 f b J Q C d 4 B Z i i T 1 v 2 5 f",
+         };
+
+         for(const auto& b58 : with_ws) {
+            try {
+               result.test_bin_eq("base58 decoding with whitespace", Botan::base58_decode(b58), expected);
+            } catch(std::exception& e) {
+               result.test_failure("rejected valid base58 with whitespace", e.what());
+            }
+         }
+
+         return {result};
       }
 };
 
@@ -129,8 +162,8 @@ class Base58_Check_Tests final : public Text_Based_Test {
          try {
             if(is_valid) {
                const std::vector<uint8_t> binary = vars.get_req_bin("Binary");
-               result.test_eq("base58 decoding", Botan::base58_check_decode(base58), binary);
-               result.test_eq("base58 encoding", Botan::base58_check_encode(binary), base58);
+               result.test_bin_eq("base58 decoding", Botan::base58_check_decode(base58), binary);
+               result.test_str_eq("base58 encoding", Botan::base58_check_encode(binary), base58);
             } else {
                auto res = Botan::base58_check_decode(base58);
                result.test_failure("decoded invalid base58c to " + Botan::hex_encode(res));
@@ -166,8 +199,8 @@ class Base64_Tests final : public Text_Based_Test {
          try {
             if(is_valid) {
                const std::vector<uint8_t> binary = vars.get_req_bin("Binary");
-               result.test_eq("base64 decoding", Botan::base64_decode(base64), binary);
-               result.test_eq("base64 encoding", Botan::base64_encode(binary), base64);
+               result.test_bin_eq("base64 decoding", Botan::base64_decode(base64), binary);
+               result.test_str_eq("base64 encoding", Botan::base64_encode(binary), base64);
             } else {
                auto res = Botan::base64_decode(base64);
                result.test_failure("decoded invalid base64 to " + Botan::hex_encode(res));
@@ -187,7 +220,7 @@ class Base64_Tests final : public Text_Based_Test {
          Test::Result result("Base64");
          const std::string valid_b64 = "Zg==";
 
-         for(char ws_char : {' ', '\t', '\r', '\n'}) {
+         for(const char ws_char : {' ', '\t', '\r', '\n'}) {
             for(size_t i = 0; i <= valid_b64.size(); ++i) {
                std::string b64_ws = valid_b64;
                b64_ws.insert(i, 1, ws_char);
@@ -197,7 +230,7 @@ class Base64_Tests final : public Text_Based_Test {
                } catch(std::exception&) {}
 
                try {
-                  result.test_eq("base64 decoding with whitespace", Botan::base64_decode(b64_ws, true), "66");
+                  result.test_bin_eq("base64 decoding with whitespace", Botan::base64_decode(b64_ws, true), "66");
                } catch(std::exception& e) {
                   result.test_failure(b64_ws, e.what());
                }
@@ -211,5 +244,38 @@ class Base64_Tests final : public Text_Based_Test {
 BOTAN_REGISTER_TEST("codec", "base64", Base64_Tests);
 
 #endif
+
+class Codec_Error_Char_Display_Tests final : public Test {
+   public:
+      std::vector<Test::Result> run() override {
+         Test::Result result("Codec error message character display");
+
+         const std::vector<std::pair<char, std::string>> cases = {
+            {'\x1b', "\\x1B"},
+            {'\x00', "\\x00"},
+            {'\n', "\\n"},
+            {'\r', "\\r"},
+            {'\t', "\\t"},
+            {'\x7f', "\\x7F"},
+            {static_cast<char>(0xFF), "\\xFF"},
+         };
+
+         for(const auto& [bad, expect] : cases) {
+            try {
+               Botan::hex_decode(std::string(1, bad), false);
+               result.test_failure("hex_decode accepted invalid byte");
+            } catch(const Botan::Invalid_Argument& e) {
+               const std::string msg = e.what();
+               result.test_is_true("message uses escaped string", msg.find(expect) != std::string::npos);
+            }
+         }
+
+         return {result};
+      }
+};
+
+BOTAN_REGISTER_TEST("codec", "codec_error_char_display", Codec_Error_Char_Display_Tests);
+
+}  // namespace
 
 }  // namespace Botan_Tests

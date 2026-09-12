@@ -10,17 +10,17 @@
 
 #include <botan/tls_client.h>
 
-#include <botan/tls_messages.h>
-#include <botan/internal/stl_util.h>
-#include <botan/internal/tls_handshake_state.h>
+#include <botan/tls_policy.h>
+#include <botan/x509cert.h>
+#include <botan/internal/tls_channel_impl.h>
 
-#include <botan/internal/tls_client_impl_12.h>
+#if defined(BOTAN_HAS_TLS_12)
+   #include <botan/internal/tls_client_impl_12.h>
+#endif
+
 #if defined(BOTAN_HAS_TLS_13)
    #include <botan/internal/tls_client_impl_13.h>
 #endif
-
-#include <iterator>
-#include <sstream>
 
 namespace Botan::TLS {
 
@@ -41,9 +41,9 @@ Client::Client(const std::shared_ptr<Callbacks>& callbacks,
 
 #if defined(BOTAN_HAS_TLS_13)
    if(offer_version == Protocol_Version::TLS_V13) {
-      m_impl = std::make_unique<Client_Impl_13>(
-         callbacks, session_manager, creds, policy, rng, std::move(info), next_protocols);
+      m_impl = Client_Impl_13::create(callbacks, session_manager, creds, policy, rng, std::move(info), next_protocols);
 
+   #if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
       if(m_impl->expects_downgrade()) {
          m_impl->set_io_buffer_size(io_buf_sz);
       }
@@ -53,29 +53,40 @@ Client::Client(const std::shared_ptr<Callbacks>& callbacks,
          // requested a downgrade right away.
          downgrade();
       }
+   #endif
 
       return;
    }
 #endif
 
-   m_impl = std::make_unique<Client_Impl_12>(callbacks,
-                                             session_manager,
-                                             creds,
-                                             policy,
-                                             rng,
-                                             std::move(info),
-                                             offer_version.is_datagram_protocol(),
-                                             next_protocols,
-                                             io_buf_sz);
+#if defined(BOTAN_HAS_TLS_12)
+   if(offer_version.is_pre_tls_13()) {
+      m_impl = Client_Impl_12::create(callbacks,
+                                      session_manager,
+                                      creds,
+                                      policy,
+                                      rng,
+                                      std::move(info),
+                                      offer_version.is_datagram_protocol(),
+                                      next_protocols,
+                                      io_buf_sz);
+      return;
+   }
+#endif
+
+   BOTAN_UNUSED(callbacks, session_manager, creds, policy, rng, info, offer_version, next_protocols, io_buf_sz);
+   throw Not_Implemented("Requested TLS version to be offered is not available in this build");
 }
 
 Client::~Client() = default;
+
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
 
 size_t Client::downgrade() {
    BOTAN_ASSERT_NOMSG(m_impl->is_downgrading());
 
    auto info = m_impl->extract_downgrade_info();
-   m_impl = std::make_unique<Client_Impl_12>(*info);
+   m_impl = Client_Impl_12::create_for_downgrade(*info);
 
    if(!info->peer_transcript.empty()) {
       // replay peer data received so far
@@ -87,12 +98,16 @@ size_t Client::downgrade() {
    }
 }
 
+#endif
+
 size_t Client::from_peer(std::span<const uint8_t> data) {
    auto read = m_impl->from_peer(data);
 
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
    if(m_impl->is_downgrading()) {
       read = downgrade();
    }
+#endif
 
    return read;
 }
@@ -103,6 +118,10 @@ bool Client::is_handshake_complete() const {
 
 bool Client::is_active() const {
    return m_impl->is_active();
+}
+
+std::optional<std::chrono::milliseconds> Client::next_retransmission_timeout() const {
+   return m_impl->next_retransmission_timeout();
 }
 
 bool Client::is_closed() const {

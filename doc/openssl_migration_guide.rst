@@ -22,8 +22,8 @@ General Remarks
   whereas Botan's API is more consistent
 * OpenSSL's API is mostly underdocumented, whereas Botan targets 100% Doxygen
   coverage for all public API
-* It is often hard to find example code for OpenSSL, whereas Botan provides
-  many :ref:`examples <index:examples>` and lots of
+* It is often hard to find example code for OpenSSL, whereas Botan provides extensive
+  `examples <https://github.com/randombit/botan/tree/master/src/examples>`_ and
   `test code <https://github.com/randombit/botan/tree/master/src/tests>`_.
 
 X.509
@@ -457,7 +457,7 @@ Here is the equivalent C++ code using Botan:
    :language: cpp
 
 This example uses the ``PK_Signer`` and ``PK_Verifier`` classes to sign and verify
-a message using :ref:`api_ref/pubkey:ecdsa`. The private key is similary
+a message using :ref:`api_ref/pubkey:ecdsa`. The private key is similarly
 :ref:`loaded from a file <api_ref/pubkey:serializing private keys using pkcs #8>`.
 The :doc:`hash function <api_ref/hash>` is passed as a string parameter.
 ``PK_Verifier::check_signature()`` is used to

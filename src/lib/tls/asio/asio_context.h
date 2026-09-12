@@ -15,7 +15,6 @@
    #include <functional>
 
    #include <botan/credentials_manager.h>
-   #include <botan/ocsp.h>
    #include <botan/rng.h>
    #include <botan/tls_callbacks.h>
    #include <botan/tls_policy.h>
@@ -23,6 +22,9 @@
    #include <botan/tls_session_manager.h>
 
    #if defined(BOTAN_HAS_AUTO_SEEDING_RNG) && defined(BOTAN_HAS_CERTSTOR_SYSTEM)
+      #define BOTAN_HAS_DEFAULT_TLS_CONTEXT
+
+      // TODO(Botan4) remove this
       #define BOTAN_HAS_HAS_DEFAULT_TLS_CONTEXT
    #endif
 
@@ -51,13 +53,13 @@ class BOTAN_PUBLIC_API(2, 11) Context {
        */
       using Verify_Callback = detail::fn_signature_helper<decltype(&Callbacks::tls_verify_cert_chain)>::type;
 
-   #if defined(BOTAN_HAS_HAS_DEFAULT_TLS_CONTEXT)
+   #if defined(BOTAN_HAS_DEFAULT_TLS_CONTEXT)
       /**
        * @brief Construct a TLS stream context with typical defaults
        *
        * @param server_info  Basic information about the host to connect to (SNI)
        */
-      Context(Server_Information server_info = Server_Information());
+      BOTAN_FUTURE_EXPLICIT Context(Server_Information server_info = Server_Information());
    #endif
 
       Context(std::shared_ptr<Credentials_Manager> credentials_manager,
@@ -65,10 +67,10 @@ class BOTAN_PUBLIC_API(2, 11) Context {
               std::shared_ptr<Session_Manager> session_manager,
               std::shared_ptr<const Policy> policy,
               Server_Information server_info = Server_Information()) :
-            m_credentials_manager(credentials_manager),
-            m_rng(rng),
-            m_session_manager(session_manager),
-            m_policy(policy),
+            m_credentials_manager(std::move(credentials_manager)),
+            m_rng(std::move(rng)),
+            m_session_manager(std::move(session_manager)),
+            m_policy(std::move(policy)),
             m_server_info(std::move(server_info)) {}
 
       virtual ~Context() = default;
@@ -95,10 +97,16 @@ class BOTAN_PUBLIC_API(2, 11) Context {
 
       void set_server_info(Server_Information server_info) { m_server_info = std::move(server_info); }
 
+      void set_app_protocols(std::vector<std::string> app_protocols = {}) {
+         m_app_protocols = std::move(app_protocols);
+      }
+
    protected:
       template <class S, class C>
       friend class Stream;
+      friend class StreamCallbacks;
 
+      // NOLINTBEGIN(*-non-private-member-variable*)
       std::shared_ptr<Credentials_Manager> m_credentials_manager;
       std::shared_ptr<RandomNumberGenerator> m_rng;
       std::shared_ptr<Session_Manager> m_session_manager;
@@ -106,6 +114,8 @@ class BOTAN_PUBLIC_API(2, 11) Context {
 
       Server_Information m_server_info;
       Verify_Callback m_verify_callback;
+      std::vector<std::string> m_app_protocols;
+      // NOLINTEND(*-non-private-member-variable*)
 };
 
 }  // namespace Botan::TLS

@@ -16,11 +16,11 @@ arc4random
 elf_aux_info
 getentropy
 explicit_bzero
-pledge
 alloc_conceal
 
 atomics
 sockets
+system_clock
 threads
 thread_local
 filesystem

@@ -8,10 +8,16 @@
 
 #if defined(BOTAN_HAS_PASSWORD_HASHING)
    #include <botan/pwdhash.h>
+   #include <botan/internal/parsing.h>
+#endif
+
+#if defined(BOTAN_HAS_OS_UTILS)
    #include <botan/internal/os_utils.h>
 #endif
 
 namespace Botan_CLI {
+
+namespace {
 
 #if defined(BOTAN_HAS_PASSWORD_HASHING)
 
@@ -26,7 +32,7 @@ class PBKDF_Tune final : public Command {
       void go() override {
          const size_t output_len = get_arg_sz("output-len");
          const size_t max_mem = get_arg_sz("max-mem");
-         const auto tune_msec = std::chrono::milliseconds(get_arg_sz("tune-msec"));
+         const size_t tune_msec = get_arg_sz("tune-msec");
          const std::string algo = get_arg("algo");
          const bool check_time = flag_set("check");
 
@@ -42,14 +48,11 @@ class PBKDF_Tune final : public Command {
             if(time == "default") {
                pwhash = pwdhash_fam->default_params();
             } else {
-               size_t msec = 0;
-               try {
-                  msec = std::stoul(time);
-               } catch(std::exception&) {
+               if(const auto desired_runtime_msec = Botan::parse_sz(time)) {
+                  pwhash = pwdhash_fam->tune_params(output_len, *desired_runtime_msec, max_mem, tune_msec);
+               } else {
                   throw CLI_Usage_Error("Unknown time value '" + time + "' for pbkdf_tune");
                }
-
-               pwhash = pwdhash_fam->tune(output_len, std::chrono::milliseconds(msec), max_mem, tune_msec);
             }
 
             output() << "For " << time << " ms selected " << pwhash->to_string();
@@ -59,6 +62,7 @@ class PBKDF_Tune final : public Command {
             }
 
             if(check_time) {
+   #if defined(BOTAN_HAS_OS_UTILS)
                std::vector<uint8_t> outbuf(output_len);
                const uint8_t salt[8] = {0};
 
@@ -67,7 +71,10 @@ class PBKDF_Tune final : public Command {
                const uint64_t end_ns = Botan::OS::get_system_timestamp_ns();
                const uint64_t dur_ns = end_ns - start_ns;
 
-               output() << " took " << (dur_ns / 1000000.0) << " msec to compute";
+               output() << " took " << (static_cast<double>(dur_ns) / 1000000.0) << " msec to compute";
+   #else
+               output() << "No system clock";
+   #endif
             }
 
             output() << "\n";
@@ -78,5 +85,7 @@ class PBKDF_Tune final : public Command {
 BOTAN_REGISTER_COMMAND("pbkdf_tune", PBKDF_Tune);
 
 #endif
+
+}  // namespace
 
 }  // namespace Botan_CLI

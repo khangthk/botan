@@ -1,7 +1,7 @@
 /*
-* Streebog
+* Streebog (GOST R 34.11-2012)
 * (C) 2017 Ribose Inc.
-* (C) 2018 Jack Lloyd
+* (C) 2018,2026 Jack Lloyd
 *
 * Botan is released under the Simplified BSD License (see license.txt)
 */
@@ -9,15 +9,62 @@
 #include <botan/internal/streebog.h>
 
 #include <botan/exceptn.h>
+#include <botan/internal/bit_ops.h>
 #include <botan/internal/bswap.h>
+#include <botan/internal/buffer_slicer.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
-#include <botan/internal/stl_util.h>
+#include <botan/internal/streebog_const.h>
+#include <array>
+#include <bit>
+
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
 
 namespace Botan {
 
-extern const uint64_t STREEBOG_Ax[8][256];
-extern const uint64_t STREEBOG_C[12][8];
+namespace {
+
+// Build the combined T-tables at compile time
+consteval std::array<std::array<uint64_t, 256>, 8> streebog_Ax_table() noexcept {
+   std::array<std::array<uint64_t, 256>, 8> Ax = {};
+
+   for(size_t j = 0; j != 8; ++j) {
+      for(size_t x = 0; x != 256; ++x) {
+         Ax[j][x] = poly_mul<0x1D>(STREEBOG_L[j], STREEBOG_S[x]);
+      }
+   }
+
+   return Ax;
+}
+
+const constinit auto STREEBOG_Ax = streebog_Ax_table();
+
+inline uint64_t force_le(uint64_t x) {
+   if constexpr(std::endian::native == std::endian::little) {
+      return x;
+   } else if constexpr(std::endian::native == std::endian::big) {
+      return reverse_bytes(x);
+   } else {
+      store_le(x, reinterpret_cast<uint8_t*>(&x));
+      return x;
+   }
+}
+
+inline void lps(uint64_t block[8]) {
+   const uint64_t block2[8] = {block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7]};
+   const std::span<const uint8_t> r{reinterpret_cast<const uint8_t*>(block2), 64};
+
+   for(int i = 0; i < 8; ++i) {
+      block[i] = force_le(STREEBOG_Ax[0][r[i + 0 * 8]]) ^ force_le(STREEBOG_Ax[1][r[i + 1 * 8]]) ^
+                 force_le(STREEBOG_Ax[2][r[i + 2 * 8]]) ^ force_le(STREEBOG_Ax[3][r[i + 3 * 8]]) ^
+                 force_le(STREEBOG_Ax[4][r[i + 4 * 8]]) ^ force_le(STREEBOG_Ax[5][r[i + 5 * 8]]) ^
+                 force_le(STREEBOG_Ax[6][r[i + 6 * 8]]) ^ force_le(STREEBOG_Ax[7][r[i + 7 * 8]]);
+   }
+}
+
+}  //namespace
 
 std::unique_ptr<HashFunction> Streebog::copy_state() const {
    return std::make_unique<Streebog>(*this);
@@ -33,6 +80,16 @@ Streebog::Streebog(size_t output_bits) : m_output_bits(output_bits), m_count(0),
 
 std::string Streebog::name() const {
    return fmt("Streebog-{}", m_output_bits);
+}
+
+std::string Streebog::provider() const {
+#if defined(BOTAN_HAS_STREEBOG_AVX512_GFNI)
+   if(auto feat = CPUID::check(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      return *feat;
+   }
+#endif
+
+   return "base";
 }
 
 /*
@@ -86,48 +143,49 @@ void Streebog::final_result(std::span<uint8_t> output) {
    compress(m_buffer.consume().data(), true);
 
    compress_64(m_S.data(), true);
-   // FIXME
-   std::memcpy(output.data(), &m_h[8 - output_length() / 8], output_length());
+
+   const size_t offset = 8 - output_length() / 8;
+   const size_t count = output_length() / sizeof(uint64_t);
+   typecast_copy(output, std::span<const uint64_t>(&m_h[offset], count));
    clear();
+}
+
+void Streebog::compress(const uint8_t input[], bool last_block) {
+   uint64_t M[8];
+   typecast_copy(M, std::span<const uint8_t>(input, 64));
+   compress_64(M, last_block);
 }
 
 namespace {
 
-inline uint64_t force_le(uint64_t x) {
-#if defined(BOTAN_TARGET_CPU_IS_LITTLE_ENDIAN)
-   return x;
-#elif defined(BOTAN_TARGET_CPU_IS_BIG_ENDIAN)
-   return reverse_bytes(x);
-#else
-   store_le(x, reinterpret_cast<uint8_t*>(&x));
-   return x;
-#endif
-}
+void increment_s(bool last_block, const uint64_t M[8], uint64_t S[8]) {
+   if(!last_block) {
+      uint64_t carry = 0;
+      for(int i = 0; i < 8; i++) {
+         const uint64_t m = force_le(M[i]);
+         const uint64_t hi = force_le(S[i]);
+         const uint64_t t = hi + m + carry;
 
-inline void lps(uint64_t block[8]) {
-   uint8_t r[64];
-   // FIXME
-   std::memcpy(r, block, 64);
-
-   for(int i = 0; i < 8; ++i) {
-      block[i] = force_le(STREEBOG_Ax[0][r[i + 0 * 8]]) ^ force_le(STREEBOG_Ax[1][r[i + 1 * 8]]) ^
-                 force_le(STREEBOG_Ax[2][r[i + 2 * 8]]) ^ force_le(STREEBOG_Ax[3][r[i + 3 * 8]]) ^
-                 force_le(STREEBOG_Ax[4][r[i + 4 * 8]]) ^ force_le(STREEBOG_Ax[5][r[i + 5 * 8]]) ^
-                 force_le(STREEBOG_Ax[6][r[i + 6 * 8]]) ^ force_le(STREEBOG_Ax[7][r[i + 7 * 8]]);
+         S[i] = force_le(t);
+         if(t != m) {
+            carry = (t < m) ? 1 : 0;
+         }
+      }
    }
 }
 
-}  //namespace
-
-void Streebog::compress(const uint8_t input[], bool last_block) {
-   uint64_t M[8];
-   std::memcpy(M, input, 64);
-
-   compress_64(M, last_block);
-}
+}  // namespace
 
 void Streebog::compress_64(const uint64_t M[], bool last_block) {
    const uint64_t N = last_block ? 0 : force_le(m_count);
+
+#if defined(BOTAN_HAS_STREEBOG_AVX512_GFNI)
+   if(CPUID::has(CPUID::Feature::AVX512, CPUID::Feature::GFNI)) {
+      compress_64_avx512_gfni(m_h.data(), M, N);
+      increment_s(last_block, M, m_S.data());
+      return;
+   }
+#endif
 
    uint64_t hN[8];
    uint64_t A[8];
@@ -142,9 +200,9 @@ void Streebog::compress_64(const uint64_t M[], bool last_block) {
       hN[i] ^= M[i];
    }
 
-   for(size_t i = 0; i < 12; ++i) {
+   for(size_t i = 0; i < 12; ++i) {  // NOLINT(modernize-loop-convert)
       for(size_t j = 0; j != 8; ++j) {
-         A[j] ^= force_le(STREEBOG_C[i][j]);
+         A[j] ^= force_le(STREEBOG_C[i][7 - j]);
       }
       lps(A);
 
@@ -158,19 +216,7 @@ void Streebog::compress_64(const uint64_t M[], bool last_block) {
       m_h[i] ^= hN[i] ^ M[i];
    }
 
-   if(!last_block) {
-      uint64_t carry = 0;
-      for(int i = 0; i < 8; i++) {
-         const uint64_t m = force_le(M[i]);
-         const uint64_t hi = force_le(m_S[i]);
-         const uint64_t t = hi + m + carry;
-
-         m_S[i] = force_le(t);
-         if(t != m) {
-            carry = (t < m);
-         }
-      }
-   }
+   increment_s(last_block, M, m_S.data());
 }
 
 }  // namespace Botan

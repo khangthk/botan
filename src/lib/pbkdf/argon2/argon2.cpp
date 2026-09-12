@@ -6,11 +6,12 @@
 
 #include <botan/argon2.h>
 
-#include <botan/exceptn.h>
 #include <botan/hash.h>
 #include <botan/mem_ops.h>
+#include <botan/internal/bit_ops.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
+#include <botan/internal/mem_utils.h>
 #include <botan/internal/rotate.h>
 #include <limits>
 
@@ -18,7 +19,7 @@
    #include <botan/internal/thread_pool.h>
 #endif
 
-#if defined(BOTAN_HAS_ARGON2_AVX2) || defined(BOTAN_HAS_ARGON2_SSSE3)
+#if defined(BOTAN_HAS_CPUID)
    #include <botan/internal/cpuid.h>
 #endif
 
@@ -53,7 +54,7 @@ void argon2_H0(uint8_t H0[64],
    blake2b.update_le(static_cast<uint32_t>(y));
 
    blake2b.update_le(static_cast<uint32_t>(password_len));
-   blake2b.update(cast_char_ptr_to_uint8(password), password_len);
+   blake2b.update(as_span_of_bytes(password, password_len));
 
    blake2b.update_le(static_cast<uint32_t>(salt_len));
    blake2b.update(salt, salt_len);
@@ -84,7 +85,7 @@ void extract_key(uint8_t output[], size_t output_len, const secure_vector<uint64
    if(output_len <= 64) {
       auto blake2b = HashFunction::create_or_throw(fmt("BLAKE2b({})", output_len * 8));
       blake2b->update_le(static_cast<uint32_t>(output_len));
-      for(size_t i = 0; i != 128; ++i) {
+      for(size_t i = 0; i != 128; ++i) {  // NOLINT(modernize-loop-convert)
          blake2b->update_le(sum[i]);
       }
       blake2b->final(output);
@@ -93,19 +94,19 @@ void extract_key(uint8_t output[], size_t output_len, const secure_vector<uint64
 
       auto blake2b = HashFunction::create_or_throw("BLAKE2b(512)");
       blake2b->update_le(static_cast<uint32_t>(output_len));
-      for(size_t i = 0; i != 128; ++i) {
+      for(size_t i = 0; i != 128; ++i) {  // NOLINT(modernize-loop-convert)
          blake2b->update_le(sum[i]);
       }
-      blake2b->final(&T[0]);
+      blake2b->final(std::span{T});
 
       while(output_len > 64) {
-         copy_mem(output, &T[0], 32);
+         copy_mem(output, T.data(), 32);
          output_len -= 32;
          output += 32;
 
          if(output_len > 64) {
             blake2b->update(T);
-            blake2b->final(&T[0]);
+            blake2b->final(std::span{T});
          }
       }
 
@@ -166,15 +167,21 @@ BOTAN_FORCE_INLINE void blamka_G(uint64_t& A, uint64_t& B, uint64_t& C, uint64_t
 }  // namespace
 
 void Argon2::blamka(uint64_t N[128], uint64_t T[128]) {
-#if defined(BOTAN_HAS_ARGON2_AVX2)
-   if(CPUID::has_avx2()) {
-      return Argon2::blamka_avx2(N, T);
+#if defined(BOTAN_HAS_ARGON2_AVX512)
+   if(CPUID::has(CPUID::Feature::AVX512)) {
+      return Argon2::blamka_avx512(N, T);
    }
 #endif
 
-#if defined(BOTAN_HAS_ARGON2_SSSE3)
-   if(CPUID::has_ssse3()) {
-      return Argon2::blamka_ssse3(N, T);
+#if defined(BOTAN_HAS_ARGON2_SIMD4X64)
+   if(CPUID::has(CPUID::Feature::SIMD_4X64)) {
+      return Argon2::blamka_simd4x64(N, T);
+   }
+#endif
+
+#if defined(BOTAN_HAS_ARGON2_SIMD64)
+   if(CPUID::has(CPUID::Feature::SIMD_2X64)) {
+      return Argon2::blamka_simd64(N, T);
    }
 #endif
 
@@ -235,9 +242,27 @@ void gen_2i_addresses(uint64_t T[128],
    }
 }
 
+// Reduce random modulo Argon2 thread count (normally a power of 2)
+inline size_t mod_threads(uint32_t random, size_t threads) {
+   if(is_power_of_2(threads)) {
+      return random & static_cast<uint32_t>(threads - 1);
+   } else {
+      return random % threads;
+   }
+}
+
+// Reduce alpha modulo the lane length; always a multiple of 4 and commonly a power of 2
+inline size_t mod_lanes(uint64_t alpha, size_t lanes) {
+   if(is_power_of_2(lanes)) {
+      return static_cast<size_t>(alpha & static_cast<uint64_t>(lanes - 1));
+   } else {
+      return alpha % lanes;
+   }
+}
+
 uint32_t index_alpha(
    uint64_t random, size_t lanes, size_t segments, size_t threads, size_t n, size_t slice, size_t lane, size_t index) {
-   size_t ref_lane = static_cast<uint32_t>(random >> 32) % threads;
+   size_t ref_lane = mod_threads(static_cast<uint32_t>(random >> 32), threads);
 
    if(n == 0 && slice == 0) {
       ref_lane = lane;
@@ -266,7 +291,7 @@ uint32_t index_alpha(
    p = (p * p) >> 32;
    p = (p * m) >> 32;
 
-   return static_cast<uint32_t>(ref_lane * lanes + (s + m - (p + 1)) % lanes);
+   return static_cast<uint32_t>(ref_lane * lanes + mod_lanes(s + m - (p + 1), lanes));
 }
 
 void process_block(secure_vector<uint64_t>& B,
@@ -402,7 +427,8 @@ void Argon2::argon2(uint8_t output[],
 
    const size_t memory = (m_M / (SYNC_POINTS * m_p)) * (SYNC_POINTS * m_p);
 
-   secure_vector<uint64_t> B(memory * 1024 / 8);
+   constexpr size_t M_scale = 1024 / 8;
+   secure_vector<uint64_t> B(memory * M_scale);
 
    init_blocks(B, *blake2, H0, memory, m_p);
    process_blocks(B, m_t, memory, m_p, m_family);

@@ -7,7 +7,9 @@
 
 #include <botan/internal/x919_mac.h>
 
-#include <botan/internal/stl_util.h>
+#include <botan/exceptn.h>
+#include <botan/mem_ops.h>
+#include <botan/internal/buffer_slicer.h>
 
 namespace Botan {
 
@@ -42,7 +44,7 @@ void ANSI_X919_MAC::add_data(std::span<const uint8_t> input) {
 * Finalize an ANSI X9.19 MAC Calculation
 */
 void ANSI_X919_MAC::final_result(std::span<uint8_t> mac) {
-   if(m_position) {
+   if(m_position > 0) {
       m_des1->encrypt(m_state);
    }
    m_des2->decrypt(m_state.data(), mac.data());
@@ -55,11 +57,23 @@ bool ANSI_X919_MAC::has_keying_material() const {
    return m_des1->has_keying_material() && m_des2->has_keying_material();
 }
 
+void ANSI_X919_MAC::start_msg(std::span<const uint8_t> nonce) {
+   if(!nonce.empty()) {
+      throw Invalid_IV_Length(name(), nonce.size());
+   }
+   assert_key_material_set();
+
+   zeroise(m_state);
+   m_position = 0;
+}
+
 /*
 * ANSI X9.19 MAC Key Schedule
 */
 void ANSI_X919_MAC::key_schedule(std::span<const uint8_t> key) {
    m_state.resize(8);
+   zeroise(m_state);
+   m_position = 0;
 
    m_des1->set_key(key.first(8));
 
@@ -91,6 +105,6 @@ std::unique_ptr<MessageAuthenticationCode> ANSI_X919_MAC::new_object() const {
 /*
 * ANSI X9.19 MAC Constructor
 */
-ANSI_X919_MAC::ANSI_X919_MAC() : m_des1(BlockCipher::create("DES")), m_des2(m_des1->new_object()), m_position(0) {}
+ANSI_X919_MAC::ANSI_X919_MAC() : m_des1(BlockCipher::create_or_throw("DES")), m_des2(m_des1->new_object()) {}
 
 }  // namespace Botan

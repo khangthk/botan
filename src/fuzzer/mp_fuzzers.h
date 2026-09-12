@@ -10,24 +10,28 @@
 #include "fuzzers.h"
 
 #include <botan/internal/mp_core.h>
-
-#if BOTAN_MP_WORD_BITS == 64
-   #define WORD_FORMAT_STRING "%016lX"
-#else
-   #define WORD_FORMAT_STRING "%08X"
-#endif
+#include <iomanip>
+#include <sstream>
+#include <string_view>
 
 using Botan::word;
 
-namespace {
+inline std::string format_word_vec(std::string_view name, const word x[], size_t x_len) {
+   std::ostringstream oss;
+   oss << name << " = ";
 
-inline void dump_word_vec(const char* name, const word x[], size_t x_len) {
-   fprintf(stderr, "%s = ", name);
+   constexpr size_t width = 2 * sizeof(word);
+
    for(size_t i = 0; i != x_len; ++i) {
-      fprintf(stderr, WORD_FORMAT_STRING, x[i]);
-      fprintf(stderr, " ");
+      oss << std::uppercase << std::setw(width) << std::setfill('0') << std::hex << x[i] << " ";
    }
-   fprintf(stderr, "\n");
+
+   oss << "\n";
+   return oss.str();
+}
+
+inline void dump_word_vec(std::string_view name, const word x[], size_t x_len) {
+   std::cerr << format_word_vec(name, x, x_len);
 }
 
 inline void compare_word_vec(const word x[], size_t x_len, const word y[], size_t y_len, const char* comparing) {
@@ -57,7 +61,5 @@ inline void compare_word_vec(const word x[], size_t x_len, const word y[], size_
       }
    }
 }
-
-}  // namespace
 
 #endif

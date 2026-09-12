@@ -11,28 +11,47 @@
 */
 
 #include <botan/base64.h>
+#include <botan/certstor.h>
 #include <botan/chacha_rng.h>
+#include <botan/credentials_manager.h>
 #include <botan/data_src.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/mem_ops.h>
 #include <botan/ocsp.h>
 #include <botan/pkcs8.h>
+#include <botan/system_rng.h>
 #include <botan/tls_algos.h>
+#include <botan/tls_callbacks.h>
 #include <botan/tls_client.h>
 #include <botan/tls_exceptn.h>
+#include <botan/tls_extensions.h>
+#include <botan/tls_external_psk.h>
 #include <botan/tls_messages.h>
+#include <botan/tls_policy.h>
 #include <botan/tls_server.h>
 #include <botan/tls_session_manager_hybrid.h>
 #include <botan/tls_session_manager_memory.h>
+#include <botan/internal/concat_util.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/parsing.h>
 #include <botan/internal/stl_util.h>
+#include <botan/internal/target_info.h>
 
+#if defined(BOTAN_HAS_TLS_13)
+   #include <botan/tls_psk_13.h>
+#endif
+
+#include <algorithm>
+#include <cstring>
 #include <ctime>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -56,41 +75,46 @@ int shim_output(const std::string& s, int rc = 0) {
    return rc;
 }
 
-void shim_log(const std::string& s) {
-   if(::getenv("BOTAN_BOGO_SHIM_LOG")) {
-      /*
-      FIXMEs:
-       - Rewrite this to use a std::ostream instead
-       - Allow using the env variable to point to where the log is written
-       - Avoid rechecking the env variable with each call (!)
-      */
+void shim_log(std::string_view s) {
+   static const auto log_path = []() -> std::string {
+      const char* env = ::getenv("BOTAN_BOGO_SHIM_LOG");
+      if(env == nullptr) {
+         return {};
+      }
 
-      // NOLINTNEXTLINE(*-avoid-non-const-global-variables)
-      static FILE* g_log = std::fopen("/tmp/bogo_shim.log", "w");
-      struct timeval tv;
-      ::gettimeofday(&tv, nullptr);
-      static_cast<void>(std::fprintf(g_log,
-                                     "%lld.%lu: %s\n",
-                                     static_cast<unsigned long long>(tv.tv_sec),
-                                     static_cast<unsigned long>(tv.tv_usec),
-                                     s.c_str()));
-      static_cast<void>(std::fflush(g_log));
+      auto log_file_path = std::string(env);
+      if(log_file_path.empty() || log_file_path == "1") {
+         return "/tmp/bogo_shim.log";
+      }
+      return env;
+   }();
+
+   if(!log_path.empty()) {
+      static std::ofstream g_log(log_path, std::ios::out | std::ios::trunc);
+      if(g_log.is_open() && g_log.good()) {
+         const auto duration = std::chrono::system_clock::now().time_since_epoch();
+         const auto seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration);
+
+         g_log << std::fixed << std::setprecision(6) << seconds.count() << ": " << s << std::endl;
+      }
    }
 }
 
-[[noreturn]] void shim_exit_with_error(const std::string& s, int rc = 1) {
+[[noreturn]] void shim_exit_with_error(const std::string& s, int rc = 1) noexcept {
    shim_log("Exiting with " + s);
    std::cerr << s << "\n";
    std::exit(rc);
 }
 
-std::string map_to_bogo_error(const std::string& e) {
+std::string map_to_bogo_error(const std::string& e) noexcept {
    shim_log("Original error " + e);
 
    static const std::unordered_map<std::string, std::string> err_map{
       {"Application data before handshake done", ":APPLICATION_DATA_INSTEAD_OF_HANDSHAKE:"},
       {"Bad Hello_Request, has non-zero size", ":BAD_HELLO_REQUEST:"},
       {"Bad code for TLS alert level", ":UNKNOWN_ALERT_TYPE:"},
+      {"Bad encoding of SNI extension", ":DECODE_ERROR:"},
+      {"Server sent non-empty SNI extension", ":DECODE_ERROR:"},
       {"Bad encoding on signature algorithms extension", ":DECODE_ERROR:"},
       {"Bad extension size", ":DECODE_ERROR:"},
       {"Bad length in hello verify request", ":DECODE_ERROR:"},
@@ -99,12 +123,15 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Server certificate verification failed", ":BAD_SIGNATURE:"},
       {"compression is not supported in TLS 1.3", ":DECODE_ERROR:"},
       {"Cookie length must be at least 1 byte", ":DECODE_ERROR:"},
+      {"Empty certificate_authorities list is illegal", ":DECODE_ERROR:"},
+      {"Empty cookie extension is illegal", ":DECODE_ERROR:"},
       {"Bad size (1) for TLS alert message", ":BAD_ALERT:"},
       {"Bad size (4) for TLS alert message", ":BAD_ALERT:"},
       {"CERTIFICATE decoding failed with PEM: No PEM header found", ":CANNOT_PARSE_LEAF_CERT:"},
       {"Certificate usage constraints do not allow signing", ":KEY_USAGE_BIT_INCORRECT:"},
       {"Can't agree on a ciphersuite with client", ":NO_SHARED_CIPHER:"},
       {"Can't interleave application and handshake data", ":UNEXPECTED_RECORD:"},
+      {"Unexpected new DTLS handshake message", ":UNEXPECTED_RECORD:"},
       {"Certificate chain exceeds policy specified maximum size", ":EXCESSIVE_MESSAGE_SIZE:"},
       {"Certificate key type did not match ciphersuite", ":WRONG_CERTIFICATE_TYPE:"},
       {"Certificate usage constraints do not allow this ciphersuite", ":KEY_USAGE_BIT_INCORRECT:"},
@@ -120,6 +147,7 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Client did not comply with the requested key exchange group", ":WRONG_CURVE:"},
       {"Client Hello must either contain both key_share and supported_groups extensions or neither",
        ":MISSING_KEY_SHARE:"},
+      {"Server Hello did not contain a key share extension", ":MISSING_KEY_SHARE:"},
       {"Client Hello offered a PSK without a psk_key_exchange_modes extension", ":MISSING_EXTENSION:"},
       {"Client offered DTLS version with major version 0xFF", ":UNSUPPORTED_PROTOCOL:"},
       {"Client offered SSLv3 which is not supported", ":UNSUPPORTED_PROTOCOL:"},
@@ -133,8 +161,10 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Client sent plaintext HTTP request instead of TLS handshake", ":HTTP_REQUEST:"},
       {"Client signalled fallback SCSV, possible attack", ":INAPPROPRIATE_FALLBACK:"},
       {"Client version TLS v1.1 is unacceptable by policy", ":UNSUPPORTED_PROTOCOL:"},
+      {"Concatenated public values have an unexpected length", ":BAD_ECPOINT:"},
       {"No shared TLS version based on supported versions extension", ":UNSUPPORTED_PROTOCOL:"},
       {"Client: No certificates sent by server", ":DECODE_ERROR:"},
+      {"Decoded polynomial coefficients out of range", ":BAD_ECPOINT:"},
       {"Non-PSK Client Hello did not contain supported_groups and signature_algorithms extensions",
        ":NO_SHARED_GROUP:"},
       {"No certificates sent by server", ":PEER_DID_NOT_RETURN_A_CERTIFICATE:"},
@@ -142,10 +172,12 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Not enough PSK binders", ":PSK_IDENTITY_BINDER_COUNT_MISMATCH:"},
       {"Counterparty sent inconsistent key and sig types", ":WRONG_SIGNATURE_TYPE:"},
       {"Downgrade attack detected", ":TLS13_DOWNGRADE:"},
+      {"DTLS handshake timed out: maximum retransmissions exceeded", ":READ_TIMEOUT_EXPIRED:"},
       {"Empty ALPN protocol not allowed", ":PARSE_TLSEXT:"},
       {"Empty PSK binders list", ":DECODE_ERROR: "},
       {"Encoding error: Cannot encode PSS string, output length too small", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
       {"Expected TLS but got a record with DTLS version", ":WRONG_VERSION_NUMBER:"},
+      {"Expected ChangeCipherSpec but got a handshake message", ":UNEXPECTED_RECORD:"},
       {"Extension removed in updated Client Hello", ":INCONSISTENT_CLIENT_HELLO:"},
       {"Failed to agree on a signature algorithm", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
       {"Failed to agree on any signature algorithm", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
@@ -154,17 +186,20 @@ std::string map_to_bogo_error(const std::string& e) {
        ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
       {"PSK extension was not at the very end of the Client Hello", ":PRE_SHARED_KEY_MUST_BE_LAST:"},
       {"Finished message didn't verify", ":DIGEST_CHECK_FAILED:"},
+      {"Handshake message is 2293760 bytes, policy maximum is 65536", ":BAD_HANDSHAKE_RECORD:"},
       {"Have data remaining in buffer after ClientHello", ":EXCESS_HANDSHAKE_DATA:"},
       {"Have data remaining in buffer after Finished", ":EXCESS_HANDSHAKE_DATA:"},
       {"Have data remaining in buffer after ServerHelloDone", ":EXCESS_HANDSHAKE_DATA:"},
       {"Hello Retry Request does not request any changes to Client Hello", ":EMPTY_HELLO_RETRY_REQUEST:"},
       {"Unexpected additional handshake message data found in record", ":EXCESS_HANDSHAKE_DATA:"},
       {"Inconsistent length in certificate request", ":DECODE_ERROR:"},
+      {"Inconsistent length in certificate_authorities extension", ":DECODE_ERROR:"},
       {"unexpected key_update parameter", ":DECODE_ERROR:"},
       {"Inconsistent values in fragmented DTLS handshake header", ":FRAGMENT_MISMATCH:"},
       {"Invalid CertificateRequest: Length field outside parameters", ":DECODE_ERROR:"},
       {"Invalid ServerHello: Length field outside parameters", ":DECODE_ERROR:"},
       {"Invalid CertificateVerify: Extra bytes at end of message", ":DECODE_ERROR:"},
+      {"Invalid Certificate_Status message: too small", ":DECODE_ERROR:"},
       {"Invalid Certificate_Status: invalid length field", ":DECODE_ERROR:"},
       {"Invalid ChangeCipherSpec", ":BAD_CHANGE_CIPHER_SPEC:"},
       {"Invalid ClientHello: Length field outside parameters", ":DECODE_ERROR:"},
@@ -173,24 +208,36 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Invalid SessionTicket: Extra bytes at end of message", ":DECODE_ERROR:"},
       {"Invalid authentication tag: ChaCha20Poly1305 tag check failed", ":DECRYPTION_FAILED_OR_BAD_RECORD_MAC:"},
       {"Invalid authentication tag: GCM tag check failed", ":DECRYPTION_FAILED_OR_BAD_RECORD_MAC:"},
+      {"Invalid ECDH public key encoding", ":BAD_ECPOINT:"},
+      {"Invalid encapsulated key length", ":BAD_ECPOINT:"},
+      {"Invalid handshake message type", ":UNEXPECTED_RECORD:"},
+      {"Invalid hybrid KEM ciphertext", ":BAD_ECPOINT:"},
+      {"Invalid size 31 for X25519 public key", ":BAD_ECPOINT:"},
+      {"Invalid size 33 for X25519 public key", ":BAD_ECPOINT:"},
       {"Message authentication failure", ":DECRYPTION_FAILED_OR_BAD_RECORD_MAC:"},
       {"No content type found in encrypted record", ":DECRYPTION_FAILED_OR_BAD_RECORD_MAC:"},
       {"No shared DTLS version", ":UNSUPPORTED_PROTOCOL:"},
       {"No shared TLS version", ":UNSUPPORTED_PROTOCOL:"},
       {"OS2ECP: Unknown format type 251", ":BAD_ECPOINT:"},
       {"Peer sent signature algorithm that is not suitable for TLS 1.3", ":WRONG_SIGNATURE_TYPE:"},
+      {"Public key does not have the correct byte count", ":BAD_ECPOINT:"},
       {"Policy forbids all available DTLS version", ":NO_SUPPORTED_VERSIONS_ENABLED:"},
       {"Policy forbids all available TLS version", ":NO_SUPPORTED_VERSIONS_ENABLED:"},
       {"Policy refuses to accept signing with any hash supported by peer", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
+      {"Could not agree on a signature scheme with peer for RSA key", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
+      {"Could not agree on a signature scheme with peer for ECDSA key", ":NO_COMMON_SIGNATURE_ALGORITHMS:"},
       {"Policy requires client send a certificate, but it did not", ":PEER_DID_NOT_RETURN_A_CERTIFICATE:"},
       {"PSK binder does not check out", ":DIGEST_CHECK_FAILED:"},
       {"PSK identity selected by server is out of bounds", ":PSK_IDENTITY_NOT_FOUND:"},
       {"PSK and ciphersuite selected by server are not compatible", ":OLD_SESSION_PRF_HASH_MISMATCH:"},
+      {"Received an unexpectedly non-empty Certificate_Status_Request", ":DECODE_ERROR:"},
       {"Received a record that exceeds maximum size", ":ENCRYPTED_LENGTH_TOO_LONG:"},
-      {"Received an encrypted record that exceeds maximum size", ":ENCRYPTED_LENGTH_TOO_LONG:"},
+      {"Received a protected record that exceeds maximum size", ":ENCRYPTED_LENGTH_TOO_LONG:"},
       {"received an illegal handshake message", ":UNEXPECTED_MESSAGE:"},
       {"Received a legacy Client Hello", ":UNSUPPORTED_PROTOCOL:"},
+      {"Received an unsupported Client Hello", ":UNSUPPORTED_PROTOCOL:"},
       {"Received an unexpected legacy Server Hello", ":UNSUPPORTED_PROTOCOL:"},
+      {"Received an unsupported Server Hello", ":UNSUPPORTED_PROTOCOL:"},
       {"Received application data after connection closure", ":APPLICATION_DATA_ON_SHUTDOWN:"},
       {"Received handshake data after connection closure", ":NO_RENEGOTIATION:"},
       {"Received multiple key share entries for the same group", ":DUPLICATE_KEY_SHARE:"},
@@ -218,6 +265,7 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Server replied with unsupported extensions: 0", ":UNEXPECTED_EXTENSION:"},
       {"Server replied with unsupported extensions: 1234", ":UNEXPECTED_EXTENSION:"},
       {"Server replied with unsupported extensions: 16", ":UNEXPECTED_EXTENSION:"},
+      {"Server replied with unsupported extensions: 20", ":UNEXPECTED_EXTENSION:"},
       {"Server replied with unsupported extensions: 43", ":UNEXPECTED_EXTENSION:"},
       {"Server replied with unsupported extensions: 5", ":UNEXPECTED_EXTENSION:"},
       {"Server resumed session and removed extended master secret", ":RESUMED_EMS_SESSION_WITHOUT_EMS_EXTENSION:"},
@@ -225,17 +273,19 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Server resumed session but with wrong version", ":OLD_SESSION_VERSION_NOT_RETURNED:"},
       {"Server selected a group that is not compatible with the negotiated ciphersuite", ":WRONG_CURVE:"},
       {"Server sent ECC curve prohibited by policy", ":WRONG_CURVE:"},
+      {"Server selected a curve we did not offer", ":WRONG_CURVE:"},
       {"group was not advertised as supported", ":WRONG_CURVE:"},
       {"group was already offered", ":WRONG_CURVE:"},
       {"Server selected a key exchange group we didn't offer.", ":WRONG_CURVE:"},
       {"TLS 1.3 Server Hello selected a different version", ":SECOND_SERVERHELLO_VERSION_MISMATCH:"},
+      {"TLS signature extension did not allow for RSA_PSS_SHA256 signature", ":WRONG_SIGNATURE_TYPE:"},
       {"Version downgrade received after Hello Retry", ":SECOND_SERVERHELLO_VERSION_MISMATCH:"},
-      {"protected change cipher spec received", ":UNEXPECTED_RECORD:"},
       {"Server sent an unsupported extension", ":UNEXPECTED_EXTENSION:"},
       {"Unsupported extension found in Server Hello", ":UNEXPECTED_EXTENSION:"},
       {"Unexpected extension received", ":UNEXPECTED_EXTENSION:"},
       {"server hello must contain key exchange information", ":MISSING_KEY_SHARE:"},
       {"Peer sent duplicated extensions", ":DUPLICATE_EXTENSION:"},
+      {"Policy does not accept any hash function supported by client", ":NO_SHARED_CIPHER:"},
       {"Server sent bad values for secure renegotiation", ":RENEGOTIATION_MISMATCH:"},
       {"Server version DTLS v1.0 is unacceptable by policy", ":UNSUPPORTED_PROTOCOL:"},
       {"Server version TLS v1.0 is unacceptable by policy", ":UNSUPPORTED_PROTOCOL:"},
@@ -247,10 +297,11 @@ std::string map_to_bogo_error(const std::string& e) {
       {"TLS plaintext record is larger than allowed maximum", ":DATA_LENGTH_TOO_LONG:"},
       {"Received an encrypted record that exceeds maximum plaintext size", ":DATA_LENGTH_TOO_LONG:"},
       {"TLS record type had unexpected value", ":UNEXPECTED_RECORD:"},
+      {"protected TLS record type had unexpected value", ":UNEXPECTED_RECORD:"},
       {"TLS record version had unexpected value", ":WRONG_VERSION_NUMBER:"},
       {"Test requires rejecting cert", ":CERTIFICATE_VERIFY_FAILED:"},
       {"Too many PSK binders", ":PSK_IDENTITY_BINDER_COUNT_MISMATCH:"},
-      {"Unexpected ALPN protocol", ":INVALID_ALPN_PROTOCOL:"},
+      {"Server selected an ALPN protocol not offered by the client", ":INVALID_ALPN_PROTOCOL:"},
       {"Unexpected record type 42 from counterparty", ":UNEXPECTED_RECORD:"},
       {"Unexpected state transition in handshake got a certificate_request expected server_hello_done seen server_hello+server_key_exchange",
        ":UNEXPECTED_MESSAGE:"},
@@ -293,6 +344,12 @@ std::string map_to_bogo_error(const std::string& e) {
        ":UNEXPECTED_MESSAGE:"},
       {"Unexpected state transition in handshake got a server_key_exchange not expecting messages",
        ":BAD_HELLO_REQUEST:"},
+      {"Unexpected state transition in handshake got a certificate_request expected finished seen server_hello+encrypted_extensions",
+       ":UNEXPECTED_MESSAGE:"},
+      {"Unexpected state transition in handshake got a certificate expected finished seen server_hello+encrypted_extensions",
+       ":UNEXPECTED_MESSAGE:"},
+      {"Unexpected state transition in handshake got a encrypted_extensions expected finished seen client_hello",
+       ":UNEXPECTED_MESSAGE:"},
       {"Unexpected state transition in handshake got a finished expected certificate_verify seen server_hello+certificate+encrypted_extensions",
        ":BAD_HELLO_REQUEST:"},
       {"Unknown TLS handshake message type 43", ":UNEXPECTED_MESSAGE:"},
@@ -323,6 +380,13 @@ std::string map_to_bogo_error(const std::string& e) {
       {"Error alert not marked fatal", ":BAD_ALERT:"},
       {"Peer sent unknown signature scheme", ":WRONG_SIGNATURE_TYPE:"},
       {"We did not offer the usage of RSA_PSS_SHA256 as a signature scheme", ":WRONG_SIGNATURE_TYPE:"},
+      {"X25519 public point appears to be of low order", ":BAD_ECPOINT:"},
+      {"TLS signature extension did not allow for RSA/SHA-256 signature", ":WRONG_SIGNATURE_TYPE:"},
+      {"No sufficient server certificate available", ":PSK_IDENTITY_NOT_FOUND:"},
+      {"Failed to agree on certificate_type", ":UNSUPPORTED_CERTIFICATE:"},
+      {"Selected certificate type was not offered: X509", ":UNSUPPORTED_CERTIFICATE:"},
+      {"Certificate type extension contains no types", ":DECODE_ERROR:"},
+      {"Application did not provide a means to validate the raw public key", ":CERTIFICATE_VERIFY_FAILED:"},
    };
 
    auto err_map_i = err_map.find(e);
@@ -335,7 +399,7 @@ std::string map_to_bogo_error(const std::string& e) {
 
 class Shim_Exception final : public std::exception {
    public:
-      Shim_Exception(std::string_view msg, int rc = 1) : m_msg(msg), m_rc(rc) {}
+      explicit Shim_Exception(std::string_view msg, int rc = 1) : m_msg(msg), m_rc(rc) {}
 
       const char* what() const noexcept override { return m_msg.c_str(); }
 
@@ -357,24 +421,23 @@ class Shim_Socket final {
 
       static std::string get_last_socket_error() { return ::strerror(errno); }
 
-      using unique_addrinfo_t = std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)>;
+      using unique_addr_info_ptr = std::unique_ptr<addrinfo, decltype([](addrinfo* p) {
+                                                      if(p != nullptr) {
+                                                         ::freeaddrinfo(p);
+                                                      }
+                                                   })>;
 
    public:
       Shim_Socket(const std::string& hostname, int port, const bool ipv6) : m_socket(-1) {
-         addrinfo hints;
-         std::memset(&hints, 0, sizeof(hints));
+         addrinfo hints{};
          hints.ai_family = AF_UNSPEC;
          hints.ai_socktype = SOCK_STREAM;
          hints.ai_flags = AI_NUMERICSERV;
 
          const std::string service = std::to_string(port);
 
-         // TODO: C++23 will introduce std::out_ptr() that should replace the
-         //       temporary variable for the call to ::getaddrinfo() and
-         //       std::unique_ptr<>::reset().
-         unique_addrinfo_t::pointer res_tmp;
-         int rc = ::getaddrinfo(hostname.c_str(), service.c_str(), &hints, &res_tmp);
-         unique_addrinfo_t res(res_tmp, &::freeaddrinfo);
+         unique_addr_info_ptr res = nullptr;
+         const int rc = ::getaddrinfo(hostname.c_str(), service.c_str(), &hints, Botan::out_ptr(res));
 
          shim_log("Connecting " + hostname + ":" + service);
 
@@ -382,7 +445,7 @@ class Shim_Socket final {
             throw Shim_Exception("Name resolution failed for " + hostname);
          }
 
-         for(addrinfo* rp = res.get(); (m_socket == -1) && (rp != nullptr); rp = rp->ai_next) {
+         for(const addrinfo* rp = res.get(); (m_socket == -1) && (rp != nullptr); rp = rp->ai_next) {
             if((!ipv6 && rp->ai_family != AF_INET) || (ipv6 && rp->ai_family != AF_INET6)) {
                continue;
             }
@@ -394,7 +457,7 @@ class Shim_Socket final {
                continue;
             }
 
-            int err = ::connect(m_socket, rp->ai_addr, rp->ai_addrlen);
+            const int err = ::connect(m_socket, rp->ai_addr, rp->ai_addrlen);
 
             if(err != 0) {
                ::close(m_socket);
@@ -414,8 +477,18 @@ class Shim_Socket final {
       Shim_Socket& operator=(Shim_Socket&&) = delete;
 
       ~Shim_Socket() {
-         ::close(m_socket);
-         m_socket = -1;
+         if(m_socket >= 0) {
+            // Signal that we are done writing so pending alert records
+            // are delivered with a FIN rather than lost to a RST.
+            ::shutdown(m_socket, SHUT_WR);
+            // Drain unread incoming data; if the receive buffer is
+            // non-empty when we close(), the kernel sends RST which
+            // discards our outgoing data (including any alert we sent).
+            char buf[256];
+            while(::read(m_socket, buf, sizeof(buf)) > 0) {}
+            ::close(m_socket);
+            m_socket = -1;
+         }
       }
 
       void write(const uint8_t buf[], size_t len) const {
@@ -425,7 +498,7 @@ class Shim_Socket final {
          size_t sent_so_far = 0;
          while(sent_so_far != len) {
             const size_t left = len - sent_so_far;
-            socket_op_ret_type sent =
+            const socket_op_ret_type sent =
                ::send(m_socket, Botan::cast_uint8_ptr_to_char(&buf[sent_so_far]), left, MSG_NOSIGNAL);
             if(sent < 0) {
                if(errno == EPIPE) {
@@ -443,7 +516,7 @@ class Shim_Socket final {
          if(m_socket < 0) {
             throw Shim_Exception("Socket was bad on read");
          }
-         socket_op_ret_type got = ::read(m_socket, Botan::cast_uint8_ptr_to_char(buf), len);
+         const socket_op_ret_type got = ::read(m_socket, Botan::cast_uint8_ptr_to_char(buf), len);
 
          if(got < 0) {
             if(errno == ECONNRESET) {
@@ -461,7 +534,7 @@ class Shim_Socket final {
          }
 
          while(len > 0) {
-            socket_op_ret_type got = ::read(m_socket, Botan::cast_uint8_ptr_to_char(buf), len);
+            const socket_op_ret_type got = ::read(m_socket, Botan::cast_uint8_ptr_to_char(buf), len);
 
             if(got == 0) {
                throw Shim_Exception("Socket read EOF");
@@ -585,7 +658,7 @@ class Shim_Arguments final {
 
       std::vector<std::string> get_alpn_string_vec_opt(const std::string& option) const {
          // hack used for alpn list (relies on all ALPNs being 3 chars long...)
-         char delim = 0x03;
+         const char delim = 0x03;
 
          if(option_used(option)) {
             return Botan::split_on(get_string_opt(option), delim);
@@ -598,14 +671,16 @@ class Shim_Arguments final {
          if(!m_all_options.contains(key)) {
             throw Shim_Exception("Invalid option " + key);
          }
-         if(m_parsed_opts.find(key) != m_parsed_opts.end()) {
+         if(m_parsed_opts.contains(key)) {
             return true;
          }
-         if(m_parsed_int_vec_opts.find(key) != m_parsed_int_vec_opts.end()) {
+         if(m_parsed_int_vec_opts.contains(key)) {
             return true;
          }
          return false;
       }
+
+      const std::vector<std::string>& raw_argv() const { return m_raw_argv; }
 
    private:
       std::string get_opt(const std::string& key) const {
@@ -626,9 +701,113 @@ class Shim_Arguments final {
       std::set<std::string> m_parsed_flags;
       std::map<std::string, std::string> m_parsed_opts;
       std::map<std::string, std::vector<size_t>> m_parsed_int_vec_opts;
+      std::vector<std::string> m_raw_argv;
 };
 
+// A credential block parsed from a `-new-{x509,rpk,psk}-credential` argv segment.
+// X509 and RPK blocks share cert/key file fields; the public key for an RPK
+// block is derived from the loaded private key.
+struct Shim_Credential {
+      enum class Kind : uint8_t { X509, RPK, PSK };
+
+      Kind kind = Kind::X509;
+      std::string cert_file;
+      std::string key_file;
+      Botan::secure_vector<uint8_t> psk_key;
+      std::vector<uint8_t> psk_identity;
+      std::vector<uint8_t> psk_context;
+      std::string psk_hash;
+
+      std::shared_ptr<Botan::Private_Key> key;
+      std::shared_ptr<Botan::Public_Key> raw_public_key;
+      std::vector<Botan::X509_Certificate> cert_chain;
+};
+
+// Walk raw argv and extract `-new-{x509,rpk,psk}-credential` blocks. Each block
+// captures the per-credential flags that follow until the next `-new-*-credential`
+// or end of args. `-on-resume-*` blocks are ignored (we do not differentiate
+// initial vs resume credentials).
+std::vector<Shim_Credential> parse_credential_blocks(const std::vector<std::string>& argv) {
+   std::vector<Shim_Credential> creds;
+   std::optional<Shim_Credential> current;
+
+   auto flush = [&]() {
+      if(current.has_value()) {
+         creds.push_back(std::move(*current));
+         current.reset();
+      }
+   };
+
+   for(size_t i = 1; i < argv.size(); ++i) {
+      const auto& arg = argv[i];
+
+      auto start_block = [&](Shim_Credential::Kind k) {
+         flush();
+         Shim_Credential block;
+         block.kind = k;
+         current = std::move(block);
+      };
+
+      if(arg == "-new-x509-credential") {
+         start_block(Shim_Credential::Kind::X509);
+      } else if(arg == "-new-rpk-credential") {
+         start_block(Shim_Credential::Kind::RPK);
+      } else if(arg == "-new-psk-credential") {
+         start_block(Shim_Credential::Kind::PSK);
+      } else if(arg.starts_with("-on-resume-new-") || arg.starts_with("-new-")) {
+         // Unsupported credential block kind (resume, SPAKE2+, delegated, etc.).
+         flush();
+      } else if(current.has_value()) {
+         auto take_arg = [&]() -> std::optional<std::string> {
+            if(i + 1 < argv.size()) {
+               return argv[++i];
+            }
+            return std::nullopt;
+         };
+
+         if(arg == "-cert-file") {
+            if(auto v = take_arg()) {
+               current->cert_file = *v;
+            }
+         } else if(arg == "-key-file") {
+            if(auto v = take_arg()) {
+               current->key_file = *v;
+            }
+         } else if(arg == "-psk-importer-key") {
+            if(auto v = take_arg()) {
+               current->psk_key = Botan::base64_decode(*v);
+            }
+         } else if(arg == "-psk-importer-identity") {
+            if(auto v = take_arg()) {
+               auto decoded = Botan::base64_decode(*v);
+               current->psk_identity.assign(decoded.begin(), decoded.end());
+            }
+         } else if(arg == "-psk-importer-context") {
+            if(auto v = take_arg()) {
+               auto decoded = Botan::base64_decode(*v);
+               current->psk_context.assign(decoded.begin(), decoded.end());
+            }
+         } else if(arg == "-psk-importer-sha256") {
+            current->psk_hash = "SHA-256";
+         } else if(arg == "-psk-importer-sha384") {
+            current->psk_hash = "SHA-384";
+         }
+         // Other per-credential fields (ocsp-response, signing-prefs, must-match-issuer,
+         // signed-cert-timestamps, trust-anchor-id, delegated-credential, pake-*) are
+         // accepted by the global parser but their semantics are not enforced here.
+      }
+   }
+
+   flush();
+   return creds;
+}
+
 void Shim_Arguments::parse_args(char* argv[]) {
+   // Store raw argv for later credential parsing
+   for(int j = 0; argv[j] != nullptr; ++j) {
+      m_raw_argv.emplace_back(argv[j]);
+   }
+
    int i = 1;  // skip argv[0]
 
    while(argv[i] != nullptr) {
@@ -645,7 +824,7 @@ void Shim_Arguments::parse_args(char* argv[]) {
             if(argv[i + 1] == nullptr) {
                throw Shim_Exception("Expected argument following " + param);
             }
-            std::string val(argv[i + 1]);
+            const std::string val(argv[i + 1]);
             shim_log(Botan::fmt("param {}={}", flag_name, val));
 
             if(m_int_vec_opts.contains(flag_name)) {
@@ -687,6 +866,7 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
       //"expect-accept-early-data",
       "expect-extended-master-secret",
       "expect-no-offer-early-data",
+      "expect-no-peer-cert",
       "expect-no-secure-renegotiation",
       "expect-no-session",
       "expect-no-session-id",
@@ -721,6 +901,11 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
       "is-handshaker-supported",
       //"jdk11-workaround",
       "key-update",
+      "no-key-shares",
+      "new-psk-credential",
+      "new-rpk-credential",
+      "new-x509-credential",
+      "must-match-issuer",
       "no-check-client-certificate-type",
       "no-check-ecdsa-curve",
       "no-op-extra-handshake",
@@ -730,10 +915,16 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
       "no-tls11",
       "no-tls12",
       "no-tls13",
+      "on-resume-expect-no-session",
+      //"on-resume-new-psk-credential",
       "on-resume-no-ticket",
+      //"on-resume-psk-importer-sha256",
+      //"on-resume-psk-importer-sha384",
       //"on-resume-verify-fail",
       //"partial-write",
       //"peek-then-read",
+      "psk-importer-sha256",
+      "psk-importer-sha384",
       //"read-with-unfinished-write",
       "reject-alpn",
       "renegotiate-freely",
@@ -801,9 +992,19 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
       "expect-certificate-types",
       //"expect-channel-id",
       "expect-ocsp-response",
+      "expect-peer-rpk-sha256",
+      "delegated-credential",
+      "signed-cert-timestamps",
+      "trust-anchor-id",
       //"expect-quic-transport-params",
       //"expect-signed-cert-timestamps",
       "ocsp-response",
+      "on-resume-psk-importer-context",
+      "on-resume-psk-importer-identity",
+      "on-resume-psk-importer-key",
+      "psk-importer-context",
+      "psk-importer-identity",
+      "psk-importer-key",
       //"quic-transport-params",
       //"signed-cert-timestamps",
       //"ticket-key", /* we use a different ticket format from Boring */
@@ -813,7 +1014,12 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
    const std::set<std::string> bogo_shim_int_opts{
       "expect-cipher-aes",
       "expect-cipher-no-aes",
+      "expect-client-certificate-type",
       "expect-curve-id",
+      "expect-selected-credential",
+      "on-initial-expect-selected-credential",
+      "on-resume-expect-selected-credential",
+      "expect-peer-certificate-type",
       "expect-peer-signature-algorithm",
       "expect-ticket-age-skew",
       "expect-token-binding-param",
@@ -837,14 +1043,16 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
    };
 
    const std::set<std::string> bogo_shim_int_vec_opts{
+      "accepted-peer-cert-types",
       "curves",
       "expect-peer-verify-pref",
+      "key-shares",
       "signing-prefs",
       "verify-prefs",
    };
 
-   std::unique_ptr<Shim_Arguments> args(new Shim_Arguments(
-      bogo_shim_flags, bogo_shim_string_opts, bogo_shim_base64_opts, bogo_shim_int_opts, bogo_shim_int_vec_opts));
+   auto args = std::make_unique<Shim_Arguments>(
+      bogo_shim_flags, bogo_shim_string_opts, bogo_shim_base64_opts, bogo_shim_int_opts, bogo_shim_int_vec_opts);
 
    // may throw:
    args->parse_args(argv);
@@ -854,7 +1062,7 @@ std::unique_ptr<Shim_Arguments> parse_options(char* argv[]) {
 
 class Shim_Policy final : public Botan::TLS::Policy {
    public:
-      Shim_Policy(const Shim_Arguments& args) : m_args(args), m_sessions(0) {}
+      explicit Shim_Policy(const Shim_Arguments& args) : m_args(args), m_sessions(0) {}
 
       void incr_session_established() { m_sessions += 1; }
 
@@ -905,7 +1113,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
       std::vector<std::string> allowed_signature_hashes() const override {
          if(m_args.option_used("signing-prefs")) {
             std::vector<std::string> pref_hash;
-            for(size_t pref : m_args.get_int_vec_opt("signing-prefs")) {
+            for(const size_t pref : m_args.get_int_vec_opt("signing-prefs")) {
                const Botan::TLS::Signature_Scheme scheme(pref);
                if(!scheme.is_available()) {
                   shim_log("skipping inavailable but preferred signature scheme: " + std::to_string(pref));
@@ -936,7 +1144,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
       std::vector<Botan::TLS::Signature_Scheme> acceptable_signature_schemes() const override {
          if(m_args.option_used("verify-prefs")) {
             std::vector<Botan::TLS::Signature_Scheme> schemes;
-            for(size_t pref : m_args.get_int_vec_opt("verify-prefs")) {
+            for(const size_t pref : m_args.get_int_vec_opt("verify-prefs")) {
                schemes.emplace_back(static_cast<uint16_t>(pref));
             }
 
@@ -949,7 +1157,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
       std::vector<Botan::TLS::Signature_Scheme> allowed_signature_schemes() const override {
          if(m_args.option_used("signing-prefs")) {
             std::vector<Botan::TLS::Signature_Scheme> schemes;
-            for(size_t pref : m_args.get_int_vec_opt("signing-prefs")) {
+            for(const size_t pref : m_args.get_int_vec_opt("signing-prefs")) {
                schemes.emplace_back(static_cast<uint16_t>(pref));
             }
 
@@ -963,7 +1171,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
             if(!m_args.flag_set("server")) {
                schemes.emplace_back(Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA256);
                schemes.emplace_back(Botan::TLS::Signature_Scheme::RSA_PSS_SHA256);
-               schemes.emplace_back(Botan::TLS::Signature_Scheme::ECDSA_SHA256);
+               schemes.emplace_back(Botan::TLS::Signature_Scheme::ECDSA_SECP256R1_TLS13_SHA256);
             }
 
             return schemes;
@@ -980,22 +1188,9 @@ class Shim_Policy final : public Botan::TLS::Policy {
          if(m_args.option_used("curves")) {
             std::vector<Botan::TLS::Group_Params> groups;
 
-            // upcall to base class to find the groups actually supported by
-            // this Botan build
-            const auto supported_groups = Botan::TLS::Policy::key_exchange_groups();
-
-            for(size_t pref : m_args.get_int_vec_opt("curves")) {
+            for(const size_t pref : m_args.get_int_vec_opt("curves")) {
                const auto group = static_cast<Botan::TLS::Group_Params>(pref);
-               if(std::find(supported_groups.cbegin(), supported_groups.cend(), group) != supported_groups.end()) {
-                  groups.push_back(group);
-               }
-
-               // Given that this is still a draft-standard, we didn't add the
-               // hybrid groups to the default policy, yet.
-               //
-               // TODO: once `TLS::Policy::key_exchange_groups()` contains it by
-               //       default, remove this explicit check.
-               if(group == Botan::TLS::Group_Params::HYBRID_X25519_KYBER_768_R3_OQS) {
+               if(group.to_string().has_value() && group.is_available()) {
                   groups.push_back(group);
                }
             }
@@ -1004,6 +1199,53 @@ class Shim_Policy final : public Botan::TLS::Policy {
          }
 
          return Botan::TLS::Policy::key_exchange_groups();
+      }
+
+      std::vector<Botan::TLS::Group_Params> key_exchange_groups_to_offer() const override {
+         if(m_args.flag_set("no-key-shares")) {
+            return {};
+         }
+
+         const auto groups = key_exchange_groups();
+
+         if(m_args.option_used("key-shares")) {
+            // BoGo's -key-shares specifies an explicit subset of -curves to
+            // pre-emptively send key_share entries for. The list must be in
+            // the same relative order as key_exchange_groups().
+            std::vector<Botan::TLS::Group_Params> to_offer;
+            for(const size_t pref : m_args.get_int_vec_opt("key-shares")) {
+               const auto group = static_cast<Botan::TLS::Group_Params>(pref);
+               if(group.to_string().has_value() && group.is_available()) {
+                  to_offer.push_back(group);
+               }
+            }
+            return to_offer;
+         }
+
+         // Default: offer key shares for the first classical group and the
+         // first post-quantum group, matching BoringSSL's default heuristic.
+         std::vector<Botan::TLS::Group_Params> to_offer;
+         bool have_classical = false;
+         bool have_pq = false;
+
+         for(auto g : groups) {
+            if(g.is_post_quantum()) {
+               if(!have_pq) {
+                  to_offer.push_back(g);
+                  have_pq = true;
+               }
+            } else {
+               if(!have_classical) {
+                  to_offer.push_back(g);
+                  have_classical = true;
+               }
+            }
+            if(have_classical && have_pq) {
+               break;
+            }
+         }
+
+         return to_offer;
       }
 
       bool use_ecc_point_compression() const override { return false; }  // BoGo expects this
@@ -1034,15 +1276,11 @@ class Shim_Policy final : public Botan::TLS::Policy {
                 require_client_certificate_authentication();
       }
 
-      bool allow_insecure_renegotiation() const override {
-         if(m_args.flag_set("expect-no-secure-renegotiation")) {
-            return true;
-         } else {
-            return false;
-         }
-      }
+      bool allow_insecure_renegotiation() const override { return m_args.flag_set("expect-no-secure-renegotiation"); }
 
       //bool include_time_in_hello_random() const override;
+
+      uint64_t minimum_key_update_interval_ms() const override { return 0; }
 
       bool allow_client_initiated_renegotiation() const override {
          if(m_args.flag_set("renegotiate-freely")) {
@@ -1063,7 +1301,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
       bool allow_version(Botan::TLS::Protocol_Version version) const {
          if(m_args.option_used("min-version")) {
             const uint16_t min_version_16 = static_cast<uint16_t>(m_args.get_int_opt("min-version"));
-            Botan::TLS::Protocol_Version min_version(min_version_16 >> 8, min_version_16 & 0xFF);
+            const Botan::TLS::Protocol_Version min_version(min_version_16 >> 8, min_version_16 & 0xFF);
             if(min_version > version) {
                return false;
             }
@@ -1071,7 +1309,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
 
          if(m_args.option_used("max-version")) {
             const uint16_t max_version_16 = static_cast<uint16_t>(m_args.get_int_opt("max-version"));
-            Botan::TLS::Protocol_Version max_version(max_version_16 >> 8, max_version_16 & 0xFF);
+            const Botan::TLS::Protocol_Version max_version(max_version_16 >> 8, max_version_16 & 0xFF);
             if(version > max_version) {
                return false;
             }
@@ -1081,6 +1319,26 @@ class Shim_Policy final : public Botan::TLS::Policy {
       }
 
       bool allow_tls12() const override {
+         // Botan implements RFC 7250 raw public keys only in its TLS 1.3 code
+         // path. When a test configures RawPublicKey as an accepted peer
+         // certificate type on the client side, disable TLS 1.2 so the TLS 1.3
+         // ClientHello builder does not filter RawPublicKey out of the
+         // advertised certificate_type extension.
+         if(m_args.option_used("accepted-peer-cert-types") && !m_args.flag_set("server")) {
+            for(const size_t t : m_args.get_int_vec_opt("accepted-peer-cert-types")) {
+               if(static_cast<Botan::TLS::Certificate_Type>(t) == Botan::TLS::Certificate_Type::RawPublicKey) {
+                  return false;
+               }
+            }
+         }
+         // Likewise, when we have an RPK credential configured (server side or
+         // when the client uses -new-rpk-credential), disable TLS 1.2 so the
+         // ClientHello builder emits the certificate_type extensions.
+         for(const auto& a : m_args.raw_argv()) {
+            if(a == "-new-rpk-credential") {
+               return false;
+            }
+         }
          return !m_args.flag_set("dtls") && !m_args.flag_set("no-tls12") &&
                 allow_version(Botan::TLS::Protocol_Version::TLS_V12);
       }
@@ -1119,7 +1377,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
 
       std::vector<uint16_t> srtp_profiles() const override {
          if(m_args.option_used("srtp-profiles")) {
-            std::string srtp = m_args.get_string_opt("srtp-profiles");
+            const std::string srtp = m_args.get_string_opt("srtp-profiles");
 
             if(srtp == "SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32") {
                return {1, 2};
@@ -1138,6 +1396,8 @@ class Shim_Policy final : public Botan::TLS::Policy {
       //bool server_uses_own_ciphersuite_preferences() const override;
 
       //bool negotiate_encrypt_then_mac() const override;
+
+      bool require_extended_master_secret() const override { return false; }
 
       bool support_cert_status_message() const override {
          if(m_args.flag_set("server")) {
@@ -1158,20 +1418,76 @@ class Shim_Policy final : public Botan::TLS::Policy {
 
       size_t dtls_default_mtu() const override { return m_args.get_int_opt_or_else("mtu", 1500); }
 
-      //size_t dtls_initial_timeout() const override;
-
-      //size_t dtls_maximum_timeout() const override;
+      size_t dtls_initial_timeout() const override {
+         // BoGo's default expectation is 400ms; tests that override pass
+         // -initial-timeout-duration-ms (typically 250ms for the Short variant).
+         return m_args.get_int_opt_or_else("initial-timeout-duration-ms", 400);
+      }
 
       bool abort_connection_on_undesired_renegotiation() const override {
-         if(m_args.flag_set("renegotiate-ignore")) {
-            return false;
-         } else {
-            return true;
-         }
+         return !m_args.flag_set("renegotiate-ignore");
       }
 
       size_t maximum_certificate_chain_size() const override { return m_args.get_int_opt_or_else("max-cert-list", 0); }
 
+      std::vector<Botan::TLS::Certificate_Type> accepted_client_certificate_types() const override {
+         if(m_args.option_used("accepted-peer-cert-types") && m_args.flag_set("server")) {
+            std::vector<Botan::TLS::Certificate_Type> types;
+            for(const size_t t : m_args.get_int_vec_opt("accepted-peer-cert-types")) {
+               types.push_back(static_cast<Botan::TLS::Certificate_Type>(t));
+            }
+            return types;
+         }
+         // As a client, advertise the cert types we have credentials for.
+         if(!m_args.flag_set("server")) {
+            if(auto types = configured_credential_types(); !types.empty()) {
+               return types;
+            }
+         }
+         return Botan::TLS::Policy::accepted_client_certificate_types();
+      }
+
+      std::vector<Botan::TLS::Certificate_Type> accepted_server_certificate_types() const override {
+         if(m_args.option_used("accepted-peer-cert-types") && !m_args.flag_set("server")) {
+            std::vector<Botan::TLS::Certificate_Type> types;
+            for(const size_t t : m_args.get_int_vec_opt("accepted-peer-cert-types")) {
+               types.push_back(static_cast<Botan::TLS::Certificate_Type>(t));
+            }
+            return types;
+         }
+         // As a server, advertise the cert types we have credentials for.
+         if(m_args.flag_set("server")) {
+            if(auto types = configured_credential_types(); !types.empty()) {
+               return types;
+            }
+         }
+         return Botan::TLS::Policy::accepted_server_certificate_types();
+      }
+
+   private:
+      // Scan raw argv for `-new-x509-credential` / `-new-rpk-credential` block markers
+      // and report which Certificate_Types are backed by available credentials,
+      // preserving the order in which credentials were configured (the first
+      // credential is the most-preferred one).
+      std::vector<Botan::TLS::Certificate_Type> configured_credential_types() const {
+         std::vector<Botan::TLS::Certificate_Type> types;
+         for(const auto& a : m_args.raw_argv()) {
+            Botan::TLS::Certificate_Type t = Botan::TLS::Certificate_Type::X509;
+            if(a == "-new-rpk-credential") {
+               t = Botan::TLS::Certificate_Type::RawPublicKey;
+            } else if(a == "-new-x509-credential") {
+               t = Botan::TLS::Certificate_Type::X509;
+            } else {
+               continue;
+            }
+            if(std::find(types.begin(), types.end(), t) == types.end()) {
+               types.push_back(t);
+            }
+         }
+         return types;
+      }
+
+   public:
       bool tls_13_middlebox_compatibility_mode() const override {
          // These tests expect the client to send an alert in return of a malformed TLS 1.2 server hello.
          // However, our TLS 1.3 implementation produces an alert without downgrading to TLS 1.2 first.
@@ -1186,11 +1502,7 @@ class Shim_Policy final : public Botan::TLS::Policy {
             "MinimumVersion-Client-TLS13-TLS12-TLS",
             "MinimumVersion-Client2-TLS13-TLS12-TLS",
          };
-         if(Botan::value_exists(alert_after_server_hello, m_args.test_name())) {
-            return false;
-         }
-
-         return true;
+         return !Botan::value_exists(alert_after_server_hello, m_args.test_name());
       }
 
    private:
@@ -1204,7 +1516,7 @@ std::vector<uint16_t> Shim_Policy::ciphersuite_list(Botan::TLS::Protocol_Version
    const std::string cipher_limit = m_args.get_string_opt_or_else("cipher", "");
    if(cipher_limit ==
       "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:[TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384|TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256|TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA]:TLS_RSA_WITH_AES_128_GCM_SHA256:TLS_RSA_WITH_AES_128_CBC_SHA:[TLS_RSA_WITH_AES_256_GCM_SHA384|TLS_RSA_WITH_AES_256_CBC_SHA]") {
-      std::vector<std::string> suites = {
+      const std::vector<std::string> suites = {
          "ECDHE_RSA_WITH_AES_128_GCM_SHA256",
          "ECDHE_RSA_WITH_AES_256_GCM_SHA384",
          "ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
@@ -1223,16 +1535,17 @@ std::vector<uint16_t> Shim_Policy::ciphersuite_list(Botan::TLS::Protocol_Version
    } else {
       // Hack: go in reverse order to avoid preferring 3DES
       auto ciphersuites = Botan::TLS::Ciphersuite::all_known_ciphersuites();
+      // TODO(Botan4) use std::ranges::reverse_view here once available (need newer Clang)
+      // NOLINTNEXTLINE(modernize-loop-convert)
       for(auto i = ciphersuites.rbegin(); i != ciphersuites.rend(); ++i) {
          const auto suite = *i;
 
-         // Can we use it?
-         if(suite.valid() == false || !suite.usable_in_version(version) ||
-            !Botan::value_exists(allowed_ciphers(), suite.cipher_algo())) {
-            continue;
-         }
+         const bool usable = suite.valid() && suite.usable_in_version(version) &&
+                             Botan::value_exists(allowed_ciphers(), suite.cipher_algo());
 
-         ciphersuite_codes.push_back(suite.ciphersuite_code());
+         if(usable) {
+            ciphersuite_codes.push_back(suite.ciphersuite_code());
+         }
       }
    }
 
@@ -1241,7 +1554,7 @@ std::vector<uint16_t> Shim_Policy::ciphersuite_list(Botan::TLS::Protocol_Version
 
 class Shim_Credentials final : public Botan::Credentials_Manager {
    public:
-      Shim_Credentials(const Shim_Arguments& args) : m_args(args) {
+      explicit Shim_Credentials(const Shim_Arguments& args) : m_args(args) {
          const auto psk_identity = m_args.get_string_opt_or_else("psk-identity", "");
          const auto psk_str = m_args.get_string_opt_or_else("psk", "");
 
@@ -1255,17 +1568,23 @@ class Shim_Credentials final : public Botan::Credentials_Manager {
             m_psk = Botan::SymmetricKey(reinterpret_cast<const uint8_t*>(psk_str.data()), psk_str.size());
          }
 
-         if(m_args.option_used("key-file") && m_args.option_used("cert-file")) {
-            Botan::DataSource_Stream key_stream(m_args.get_string_opt("key-file"));
-            m_key.reset(Botan::PKCS8::load_key(key_stream).release());
+         m_credentials = parse_credential_blocks(m_args.raw_argv());
+         for(auto& cred : m_credentials) {
+            load_credential(cred);
+         }
 
-            Botan::DataSource_Stream cert_stream(m_args.get_string_opt("cert-file"));
-
-            while(!cert_stream.end_of_data()) {
-               try {
-                  m_cert_chain.push_back(Botan::X509_Certificate(cert_stream));
-               } catch(...) {}
-            }
+         // Legacy default cert/key (no `-new-*-credential` block) — only honored
+         // when no X509/RPK credential blocks were provided.
+         const bool has_block_cert = std::any_of(m_credentials.begin(), m_credentials.end(), [](const auto& c) {
+            return c.kind == Shim_Credential::Kind::X509 || c.kind == Shim_Credential::Kind::RPK;
+         });
+         if(!has_block_cert && m_args.option_used("key-file") && m_args.option_used("cert-file")) {
+            Shim_Credential cred;
+            cred.kind = Shim_Credential::Kind::X509;
+            cred.key_file = m_args.get_string_opt("key-file");
+            cred.cert_file = m_args.get_string_opt("cert-file");
+            load_credential(cred);
+            m_credentials.push_back(std::move(cred));
          }
 
          if(m_args.option_used("trust-cert") && !m_args.get_string_opt("trust-cert").empty()) {
@@ -1278,6 +1597,31 @@ class Shim_Credentials final : public Botan::Credentials_Manager {
          }
       }
 
+   private:
+      static void load_credential(Shim_Credential& cred) {
+         if(cred.kind == Shim_Credential::Kind::PSK) {
+            return;
+         }
+         if(cred.key_file.empty()) {
+            return;
+         }
+         Botan::DataSource_Stream key_stream(cred.key_file);
+         cred.key.reset(Botan::PKCS8::load_key(key_stream).release());
+
+         if(cred.kind == Shim_Credential::Kind::X509) {
+            Botan::DataSource_Stream cert_stream(cred.cert_file);
+            while(!cert_stream.end_of_data()) {
+               try {
+                  cred.cert_chain.emplace_back(cert_stream);
+               } catch(...) {}
+            }
+         } else {
+            // RPK: derive the public key from the loaded private key.
+            cred.raw_public_key = cred.key->public_key();
+         }
+      }
+
+   public:
       std::vector<Botan::Certificate_Store*> trusted_certificate_authorities(const std::string& type,
                                                                              const std::string& context) override {
          if(m_args.flag_set("server") && type != "tls-server") {
@@ -1318,6 +1662,41 @@ class Shim_Credentials final : public Botan::Credentials_Manager {
          Botan::TLS::Connection_Side whoami,
          const std::vector<std::string>& identities = {},
          const std::optional<std::string>& prf = std::nullopt) override {
+         std::vector<Botan::TLS::ExternalPSK> psks;
+#if defined(BOTAN_HAS_TLS_13)
+         // TLS 1.3 PSK credentials from -new-psk-credential blocks
+         const Botan::TLS::Protocol_Version target_version(Botan::TLS::Protocol_Version::TLS_V13);
+         bool any_psk_block = false;
+
+         for(const auto& cred : m_credentials) {
+            if(cred.kind != Shim_Credential::Kind::PSK) {
+               continue;
+            }
+            any_psk_block = true;
+            const Botan::TLS::PSKImporter importer(
+               cred.psk_key, cred.psk_identity, cred.psk_context, cred.psk_hash.empty() ? "SHA-256" : cred.psk_hash);
+
+            // Import each credential against both SHA-256 and SHA-384 cipher suites.
+            for(const auto& target_hash : {"SHA-256", "SHA-384"}) {
+               if(prf.has_value() && *prf != target_hash) {
+                  continue;
+               }
+
+               auto imported = importer.derive_imported_psk(target_version, target_hash);
+
+               if(!identities.empty() &&
+                  std::find(identities.begin(), identities.end(), imported.identity()) == identities.end()) {
+                  continue;
+               }
+
+               psks.push_back(std::move(imported));
+            }
+         }
+         if(any_psk_block) {
+            return psks;
+         }
+#endif
+         // Legacy TLS 1.2 PSK from -psk / -psk-identity flags
          if(!m_psk_identity.has_value()) {
             return Botan::Credentials_Manager::find_preshared_keys(host, whoami, identities, prf);
          }
@@ -1333,52 +1712,82 @@ class Shim_Credentials final : public Botan::Credentials_Manager {
             throw Shim_Exception("PSK identified but not set");
          }
 
-         std::vector<Botan::TLS::ExternalPSK> psks;
-
-         // Currently, BoGo tests PSK with TLS 1.2 only. In TLS 1.2 the PRF does not
-         // need to be specified for PSKs.
-         //
-         // TODO: Once BoGo has tests for TLS 1.3 with externally provided PSKs, this
-         //       will need to be handled somehow.
          const std::string psk_prf = "SHA-256";
          psks.emplace_back(m_psk_identity.value(), psk_prf, m_psk->bits_of());
          return psks;
       }
 
-      std::vector<Botan::X509_Certificate> cert_chain(
+      std::vector<Botan::X509_Certificate> find_cert_chain(
          const std::vector<std::string>& cert_key_types,
          const std::vector<Botan::AlgorithmIdentifier>& /*cert_signature_schemes*/,
+         const std::vector<Botan::X509_DN>& /*acceptable_CAs*/,
          const std::string& /*type*/,
          const std::string& /*context*/) override {
          if(m_args.flag_set("fail-cert-callback")) {
             throw std::runtime_error("Simulating cert verify callback failure");
          }
 
-         if(m_key != nullptr && !m_cert_chain.empty()) {
-            for(const std::string& t : cert_key_types) {
-               if(t == m_key->algo_name()) {
-                  return m_cert_chain;
-               }
+         for(const auto& cred : m_credentials) {
+            if(cred.kind != Shim_Credential::Kind::X509 || cred.key == nullptr || cred.cert_chain.empty()) {
+               continue;
+            }
+            if(cert_key_types.empty() ||
+               std::find(cert_key_types.begin(), cert_key_types.end(), cred.key->algo_name()) != cert_key_types.end()) {
+               return cred.cert_chain;
             }
          }
 
          return {};
       }
 
-      std::shared_ptr<Botan::Private_Key> private_key_for(const Botan::X509_Certificate& /*cert*/,
+      std::shared_ptr<Botan::Public_Key> find_raw_public_key(const std::vector<std::string>& key_types,
+                                                             const std::string& /*type*/,
+                                                             const std::string& /*context*/) override {
+         for(const auto& cred : m_credentials) {
+            if(cred.kind != Shim_Credential::Kind::RPK || cred.raw_public_key == nullptr) {
+               continue;
+            }
+            if(key_types.empty() ||
+               std::find(key_types.begin(), key_types.end(), cred.raw_public_key->algo_name()) != key_types.end()) {
+               return cred.raw_public_key;
+            }
+         }
+         return nullptr;
+      }
+
+      std::shared_ptr<Botan::Private_Key> private_key_for(const Botan::X509_Certificate& cert,
                                                           const std::string& /*type*/,
                                                           const std::string& /*context*/) override {
-         // assumes cert == m_cert
-         return m_key;
+         for(const auto& cred : m_credentials) {
+            if(cred.kind == Shim_Credential::Kind::X509 && !cred.cert_chain.empty() &&
+               cred.cert_chain.front() == cert) {
+               return cred.key;
+            }
+         }
+         return nullptr;
+      }
+
+      std::shared_ptr<Botan::Private_Key> private_key_for(const Botan::Public_Key& raw_public_key,
+                                                          const std::string& /*type*/,
+                                                          const std::string& /*context*/) override {
+         const auto wanted = raw_public_key.public_key_bits();
+         for(const auto& cred : m_credentials) {
+            if(cred.kind != Shim_Credential::Kind::RPK || cred.raw_public_key == nullptr) {
+               continue;
+            }
+            if(cred.raw_public_key->public_key_bits() == wanted) {
+               return cred.key;
+            }
+         }
+         return nullptr;
       }
 
    private:
       const Shim_Arguments& m_args;
       std::optional<Botan::SymmetricKey> m_psk;
       std::optional<std::string> m_psk_identity;
-      std::shared_ptr<Botan::Private_Key> m_key;
-      std::vector<Botan::X509_Certificate> m_cert_chain;
       Botan::Certificate_Store_In_Memory m_trust_roots;
+      std::vector<Shim_Credential> m_credentials;
 };
 
 class Shim_Callbacks final : public Botan::TLS::Callbacks {
@@ -1427,8 +1836,8 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
          }
       }
 
-      std::vector<uint8_t> tls_provide_cert_status(const std::vector<Botan::X509_Certificate>&,
-                                                   const Botan::TLS::Certificate_Status_Request&) override {
+      std::vector<uint8_t> tls_provide_cert_status(const std::vector<Botan::X509_Certificate>& /*certs*/,
+                                                   const Botan::TLS::Certificate_Status_Request& /*status*/) override {
          if(m_args.flag_set("use-ocsp-callback") && m_args.flag_set("fail-ocsp-callback")) {
             throw std::runtime_error("Simulating failure from OCSP response callback");
          }
@@ -1509,8 +1918,8 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
          }
 
          if(!cert_chain.empty() && cert_chain.front().is_self_signed()) {
-            for(const auto roots : trusted_roots) {
-               if(roots->certificate_known(cert_chain.front())) {
+            for(auto* const roots : trusted_roots) {
+               if(roots->contains(cert_chain.front())) {
                   shim_log("Trusting self-signed certificate");
                   return;
                }
@@ -1521,6 +1930,31 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
 
          Botan::TLS::Callbacks::tls_verify_cert_chain(
             cert_chain, ocsp_responses, trusted_roots, usage, "" /* hostname */, policy);
+      }
+
+      void tls_verify_raw_public_key(const Botan::Public_Key& raw_public_key,
+                                     Botan::Usage_Type /*usage*/,
+                                     std::string_view /*hostname*/,
+                                     const Botan::TLS::Policy& /*policy*/) override {
+         if(m_args.flag_set("verify-fail")) {
+            auto alert = Botan::TLS::Alert::HandshakeFailure;
+            if(m_args.flag_set("use-custom-verify-callback")) {
+               alert = Botan::TLS::Alert::CertificateUnknown;
+            }
+            throw Botan::TLS::TLS_Exception(alert, "Test requires rejecting cert");
+         }
+
+         if(m_args.option_used("expect-peer-rpk-sha256")) {
+            const auto expected = m_args.get_b64_opt("expect-peer-rpk-sha256");
+            const auto spki = raw_public_key.subject_public_key();
+            auto sha256 = Botan::HashFunction::create_or_throw("SHA-256");
+            sha256->update(spki);
+            const auto digest = sha256->final_stdvec();
+            if(digest != expected) {
+               throw Botan::TLS::TLS_Exception(Botan::TLS::Alert::CertificateUnknown,
+                                               "Raw public key SHA-256 did not match -expect-peer-rpk-sha256");
+            }
+         }
       }
 
       std::optional<Botan::OCSP::Response> tls_parse_ocsp_response(const std::vector<uint8_t>& raw_response) override {
@@ -1608,7 +2042,7 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
          }
 
          if(alert.type() == Botan::TLS::Alert::CloseNotify) {
-            if(m_got_close == false && !m_args.flag_set("shim-shuts-down")) {
+            if(!m_got_close && !m_args.flag_set("shim-shuts-down")) {
                shim_log("Sending return close notify");
                m_channel->send_alert(alert);
             }
@@ -1620,8 +2054,8 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
 
       void tls_session_established(const Botan::TLS::Session_Summary& session) override {
          shim_log("Session established: " + Botan::hex_encode(session.session_id().get()) + " version " +
-                  session.version().to_string() + " cipher " + session.ciphersuite().to_string() + " EMS " +
-                  std::to_string(session.supports_extended_master_secret()));
+                  session.version().to_string() + " cipher " + session.ciphersuite().to_string() + " " +
+                  std::string((session.supports_extended_master_secret() ? "with EMS" : "without EMS")));
          // probably need tests here?
 
          m_policy.incr_session_established();
@@ -1643,17 +2077,17 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
          }
 
          if(m_args.flag_set("expect-secure-renegotiation")) {
-            if(m_channel->secure_renegotiation_supported() == false) {
+            if(!m_channel->secure_renegotiation_supported()) {
                shim_exit_with_error("Expected secure renegotiation");
             }
          } else if(m_args.flag_set("expect-no-secure-renegotiation")) {
-            if(m_channel->secure_renegotiation_supported() == true) {
-               shim_exit_with_error("Expected no secure renegotation");
+            if(m_channel->secure_renegotiation_supported()) {
+               shim_exit_with_error("Expected no secure renegotiation");
             }
          }
 
          if(m_args.flag_set("expect-extended-master-secret")) {
-            if(session.supports_extended_master_secret() == false) {
+            if(!session.supports_extended_master_secret()) {
                shim_exit_with_error("Expected extended maseter secret");
             }
          }
@@ -1665,7 +2099,7 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
             return;
          }
 
-         if(size_t length = m_args.get_int_opt_or_else("export-keying-material", 0)) {
+         if(const size_t length = m_args.get_int_opt_or_else("export-keying-material", 0)) {
             const std::string label = m_args.get_string_opt("export-label");
             const std::string context = m_args.get_string_opt("export-context");
             const auto exported = m_channel->key_material_export(label, context, length);
@@ -1681,10 +2115,6 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
             }
          }
 
-         if(alpn == "baz" && !m_args.flag_set("allow-unknown-alpn-protos")) {
-            throw Botan::TLS::TLS_Exception(Botan::TLS::Alert::IllegalParameter, "Unexpected ALPN protocol");
-         }
-
          if(m_args.flag_set("shim-shuts-down")) {
             shim_log("Shim shutting down");
             m_channel->close();
@@ -1695,7 +2125,7 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
 
             std::vector<uint8_t> buf(32769, 0x42);
 
-            for(size_t sz : record_sizes) {
+            for(const size_t sz : record_sizes) {
                m_channel->send(buf.data(), sz);
             }
 
@@ -1725,6 +2155,19 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
          return g_now + m_clock_skew;
       }
 
+      // The DTLS retransmit timer reads this. BoGo's AdvanceClock opcode ('T')
+      // bumps the virtual clock forward so the runner can fire timeouts
+      // deterministically without real-time waits.
+      uint64_t tls_current_monotonic_clock_ms() override { return m_dtls_timer_ns / 1'000'000; }
+
+      void advance_dtls_timer_ns(uint64_t ns) { m_dtls_timer_ns += ns; }
+
+      // A DTLS server requires a non-empty peer network identity to bind the
+      // HelloVerifyRequest cookie to (RFC 6347 4.2.1). BoGo drives each test from
+      // a single peer, so a constant identity is sufficient; without this the
+      // cookie path throws and every DTLS server test fails.
+      std::string tls_peer_network_identity() override { return "bogo-shim-peer"; }
+
       void tls_inspect_handshake_msg(const Botan::TLS::Handshake_Message& msg) override {
          if(msg.type() == Botan::TLS::Handshake_Type::HelloRetryRequest) {
             m_hello_retry_request = true;
@@ -1743,6 +2186,9 @@ class Shim_Callbacks final : public Botan::TLS::Callbacks {
       bool m_got_close;
       bool m_hello_retry_request;
       std::chrono::seconds m_clock_skew;
+      // Virtual clock for the DTLS retransmit timer. Tracked in nanoseconds
+      // (BoGo's wire unit) to avoid rounding errors
+      uint64_t m_dtls_timer_ns = 0;
 };
 
 }  // namespace
@@ -1761,7 +2207,7 @@ int main(int /*argc*/, char* argv[]) {
       const bool is_datagram = args->flag_set("dtls");
       const size_t buf_size = args->get_int_opt_or_else("read-size", 18 * 1024);
 
-      auto rng = std::make_shared<Botan::ChaCha_RNG>(Botan::secure_vector<uint8_t>(64));
+      auto rng = std::make_shared<Botan::ChaCha_RNG>(Botan::system_rng().random_vec(64));
       auto creds = std::make_shared<Shim_Credentials>(*args);
       auto session_manager = [&]() -> std::shared_ptr<Botan::TLS::Session_Manager> {
          if(args->flag_set("no-ticket") || args->flag_set("on-resume-no-ticket")) {
@@ -1791,7 +2237,7 @@ int main(int /*argc*/, char* argv[]) {
             // *before* any test data is transferred
             // See: https://github.com/google/boringssl/commit/50ee09552cde1c2019bef24520848d041920cfd4
             shim_log("Sending ShimID: " + std::to_string(args->get_int_opt("shim-id")));
-            std::array<uint8_t, 8> shim_id;
+            std::array<uint8_t, 8> shim_id{};
             Botan::store_le(static_cast<uint64_t>(args->get_int_opt("shim-id")), shim_id.data());
             socket.write(shim_id.data(), shim_id.size());
 
@@ -1808,7 +2254,7 @@ int main(int /*argc*/, char* argv[]) {
             if(is_server) {
                chan = std::make_unique<Botan::TLS::Server>(callbacks, session_manager, creds, policy, rng, is_datagram);
             } else {
-               Botan::TLS::Protocol_Version offer_version = policy->latest_supported_version(is_datagram);
+               const Botan::TLS::Protocol_Version offer_version = policy->latest_supported_version(is_datagram);
                shim_log("Offering " + offer_version.to_string());
 
                std::string host_name = args->get_string_opt_or_else("host-name", hostname);
@@ -1816,7 +2262,7 @@ int main(int /*argc*/, char* argv[]) {
                   host_name = "";  // avoid sending SNI for this test
                }
 
-               Botan::TLS::Server_Information server_info(host_name, port);
+               const Botan::TLS::Server_Information server_info(host_name, port);
                const std::vector<std::string> next_protocols = args->get_alpn_string_vec_opt("advertise-alpn");
                chan = std::make_unique<Botan::TLS::Client>(
                   callbacks, session_manager, creds, policy, rng, server_info, offer_version, next_protocols);
@@ -1828,8 +2274,8 @@ int main(int /*argc*/, char* argv[]) {
 
             for(;;) {
                if(is_datagram) {
-                  uint8_t opcode;
-                  size_t got = socket.read(&opcode, 1);
+                  uint8_t opcode = 0;
+                  const size_t got = socket.read(&opcode, 1);
                   if(got == 0) {
                      shim_log("EOF on socket");
                      break;
@@ -1839,7 +2285,7 @@ int main(int /*argc*/, char* argv[]) {
                      uint8_t len_bytes[4];
                      socket.read_exactly(len_bytes, sizeof(len_bytes));
 
-                     size_t packet_len = Botan::load_be<uint32_t>(len_bytes, 0);
+                     const size_t packet_len = Botan::load_be<uint32_t>(len_bytes, 0);
 
                      if(buf.size() < packet_len) {
                         buf.resize(packet_len);
@@ -1848,23 +2294,46 @@ int main(int /*argc*/, char* argv[]) {
 
                      chan->received_data(buf.data(), packet_len);
                   } else if(opcode == 'T') {
-                     uint8_t timeout_ack = 't';
-
+                     // AdvanceClock: bump the virtual DTLS timer, ACK, and
+                     // THEN fire timeout_check. Any packets emitted during
+                     // the AdvanceClock window (between 'T' and 't' ACK) are
+                     // treated by the runner as unexpected; the retransmit
+                     // packets must arrive only after the ACK, where the
+                     // runner's ReadRetransmit picks them up.
                      uint8_t timeout_bytes[8];
                      socket.read_exactly(timeout_bytes, sizeof(timeout_bytes));
-
                      const uint64_t nsec = Botan::load_be<uint64_t>(timeout_bytes, 0);
-
-                     shim_log("Timeout nsec " + std::to_string(nsec));
-
-                     // FIXME handle this!
-
-                     socket.write(&timeout_ack, 1);  // ack it anyway
+                     shim_log("AdvanceClock " + std::to_string(nsec) + "ns");
+                     callbacks->advance_dtls_timer_ns(nsec);
+                     const uint8_t timeout_ack = 't';
+                     socket.write(&timeout_ack, 1);
+                     chan->timeout_check();
+                  } else if(opcode == 'E') {
+                     // ExpectNextTimeout: runner-side self-check that the next
+                     // timeout matches its model. Botan doesn't expose the
+                     // pending timer to the application; consume the bytes and
+                     // skip. AdvanceClock failures (unexpected packets / no
+                     // packets) still catch incorrect timing.
+                     uint8_t bytes[8];
+                     socket.read_exactly(bytes, sizeof(bytes));
+                  } else if(opcode == 'M') {
+                     // SetPeerMTU: Botan's MTU is fixed at handshake
+                     // construction; consume and ignore.
+                     uint8_t bytes[4];
+                     socket.read_exactly(bytes, sizeof(bytes));
+                     shim_log(Botan::fmt("SetPeerMTU({}), currently ignored!", Botan::load_be<uint32_t>(bytes)));
+                  } else if(opcode == 'U') {
+                     // SetPeerTimeout: not yet plumbed through Botan's IO
+                     // (no API to override the running m_next_timeout).
+                     // Consume and ignore; SetTimeout-* tests will fail.
+                     uint8_t bytes[4];
+                     socket.read_exactly(bytes, sizeof(bytes));
+                     shim_log(Botan::fmt("SetPeerTimeout({}), currently ignored!", Botan::load_be<uint32_t>(bytes)));
                   } else {
                      shim_exit_with_error("Unknown opcode " + std::to_string(opcode));
                   }
                } else {
-                  size_t got = socket.read(buf.data(), buf.size());
+                  const size_t got = socket.read(buf.data(), buf.size());
                   if(got == 0) {
                      shim_log("EOF on socket");
                      break;
@@ -1884,7 +2353,7 @@ int main(int /*argc*/, char* argv[]) {
                   }
                   const size_t needed = chan->received_data(buf.data(), got);
 
-                  if(needed) {
+                  if(needed > 0) {
                      shim_log("Short read still need " + std::to_string(needed));
                   }
                }
@@ -1913,8 +2382,7 @@ int main(int /*argc*/, char* argv[]) {
             if(std::string(e.what()) == "Failed to connect to host") {
                execute_test("::1");
             } else {
-               // NOLINTNEXTLINE(cert-err60-cpp)
-               throw e;
+               throw;
             }
          }
       }

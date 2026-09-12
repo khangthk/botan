@@ -12,10 +12,8 @@
 #ifndef BOTAN_DILITHIUM_POLYNOMIAL_H_
 #define BOTAN_DILITHIUM_POLYNOMIAL_H_
 
-#include <botan/mem_ops.h>
 #include <botan/internal/dilithium_constants.h>
 #include <botan/internal/pqcrystals.h>
-#include <botan/internal/pqcrystals_helpers.h>
 
 namespace Botan {
 
@@ -23,12 +21,9 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
    private:
       friend class CRYSTALS::Trait_Base<DilithiumConstants, DilithiumPolyTraits>;
 
-      /**
-       * NIST FIPS 204 IPD, Algorithm 37 (Montgomery_Reduce)
-       */
       static constexpr T montgomery_reduce_coefficient(T2 a) {
          const T2 t = static_cast<T>(static_cast<T2>(static_cast<T>(a)) * Q_inverse);
-         return (a - static_cast<T2>(t) * Q) >> (sizeof(T) * 8);
+         return static_cast<T>((a - static_cast<T2>(t) * Q) >> (sizeof(T) * 8));
       }
 
       static constexpr T barrett_reduce_coefficient(T a) {
@@ -40,7 +35,7 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
 
    public:
       /**
-       * NIST FIPS 204 IPD, Algorithm 35 (NTT)
+       * NIST FIPS 204, Algorithm 41 (NTT)
        *
        * Note: ntt(), inverse_ntt() and operator* have side effects on the
        *       montgomery factor of the involved coefficients!
@@ -51,7 +46,7 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
        * factors in the coefficients.
        */
       static constexpr void ntt(std::span<T, N> coeffs) {
-         size_t j;
+         size_t j = 0;
          size_t k = 0;
 
          for(size_t len = N / 2; len > 0; len >>= 1) {
@@ -59,7 +54,7 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
                const T zeta = zetas[++k];
                for(j = start; j < start + len; ++j) {
                   // Zetas contain the montgomery parameter 2^32 mod q
-                  T t = fqmul(zeta, coeffs[j + len]);
+                  const T t = fqmul(zeta, coeffs[j + len]);
                   coeffs[j + len] = coeffs[j] - t;
                   coeffs[j] = coeffs[j] + t;
                }
@@ -68,7 +63,7 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
       }
 
       /**
-       * NIST FIPS 204 IPD, Algorithm 36 (NTT^-1).
+       * NIST FIPS 204, Algorithm 42 (NTT^-1).
        *
        * The output is effectively multiplied by the montgomery parameter 2^32
        * mod q so that the input factors 2^(-32) mod q are eliminated. Note
@@ -79,13 +74,13 @@ class DilithiumPolyTraits final : public CRYSTALS::Trait_Base<DilithiumConstants
        * factor of (2^32 mod q) added (!). See above.
        */
       static constexpr void inverse_ntt(std::span<T, N> coeffs) {
-         size_t j;
+         size_t j = 0;
          size_t k = N;
          for(size_t len = 1; len < N; len <<= 1) {
             for(size_t start = 0; start < N; start = j + len) {
                const T zeta = -zetas[--k];
                for(j = start; j < start + len; ++j) {
-                  T t = coeffs[j];
+                  const T t = coeffs[j];
                   coeffs[j] = t + coeffs[j + len];
                   coeffs[j + len] = t - coeffs[j + len];
                   // Zetas contain the montgomery parameter 2^32 mod q

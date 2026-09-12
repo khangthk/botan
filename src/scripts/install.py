@@ -11,11 +11,12 @@ Botan is released under the Simplified BSD License (see license.txt)
 import errno
 import json
 import logging
-import optparse # pylint: disable=deprecated-module
+import optparse  # pylint: disable=deprecated-module
 import os
 import shutil
 import sys
 import traceback
+
 
 def parse_command_line(args):
 
@@ -76,7 +77,7 @@ def prepend_destdir(path):
             raise PrependDestdirError("--prefix must be an absolute path when DESTDIR is set.")
 
         path = os.path.normpath(path)
-        # Remove / or \ prefixes if existent to accomodate for os.path.join()
+        # Remove / or \ prefixes if existent to accommodate for os.path.join()
         path = path.lstrip(os.path.sep)
         path = os.path.join(destdir, path)
 
@@ -92,7 +93,7 @@ def makedirs(dirname, exist_ok=True):
         os.makedirs(dirname)
     except OSError as ex:
         if ex.errno != errno.EEXIST or not exist_ok:
-            raise ex
+            raise
 
 # Clear link and create new one
 def force_symlink(target, linkname):
@@ -100,7 +101,7 @@ def force_symlink(target, linkname):
         os.unlink(linkname)
     except OSError as ex:
         if ex.errno != errno.ENOENT:
-            raise ex
+            raise
     os.symlink(target, linkname)
 
 def calculate_exec_mode(options):
@@ -123,7 +124,7 @@ def main(args):
 
     def copy_file(src, dst):
         logging.debug('Copying %s to %s', src, dst)
-        shutil.copyfile(src, dst)
+        shutil.copy2(src, dst)
 
     def copy_executable(src, dst):
         copy_file(src, dst)
@@ -146,7 +147,7 @@ def main(args):
     lib_dir = cfg['libdir']
     target_include_dir = cfg['installed_include_dir']
     pkgconfig_dir = os.path.join(lib_dir, 'pkgconfig')
-    cmake_dir = os.path.join(lib_dir, 'cmake', 'Botan-%s' % cfg["version"])
+    cmake_dir = cfg.get('cmake_install_dir')
 
     prefix = cfg['prefix']
 

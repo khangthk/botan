@@ -7,15 +7,17 @@
 #include <botan/internal/primality.h>
 
 #include <botan/bigint.h>
-#include <botan/reducer.h>
+#include <botan/numthry.h>
 #include <botan/rng.h>
+#include <botan/internal/barrett.h>
 #include <botan/internal/monty.h>
 #include <botan/internal/monty_exp.h>
-#include <algorithm>
 
 namespace Botan {
 
-bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
+bool is_lucas_probable_prime(const BigInt& C, const Barrett_Reduction& mod_C) {
+   BOTAN_ARG_CHECK(C.signum() >= 0, "Argument must be non-negative");
+
    if(C == 2 || C == 3 || C == 5 || C == 7 || C == 11 || C == 13) {
       return true;
    }
@@ -27,7 +29,7 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
    BigInt D = BigInt::from_word(5);
 
    for(;;) {
-      int32_t j = jacobi(D, C);
+      const int32_t j = jacobi(D, C);
       if(j == 0) {
          return false;
       }
@@ -37,7 +39,7 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
       }
 
       // Check 5, -7, 9, -11, 13, -15, 17, ...
-      if(D.is_negative()) {
+      if(D.signum() < 0) {
          D.flip_sign();
          D += 2;
       } else {
@@ -45,9 +47,13 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
          D.flip_sign();
       }
 
-      if(D == 17 && is_perfect_square(C).is_nonzero()) {
+      if(D == 17 && is_perfect_square(C).signum() != 0) {
          return false;
       }
+   }
+
+   if(D.signum() < 0) {
+      D += C;
    }
 
    const BigInt K = C + 1;
@@ -56,7 +62,10 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
    BigInt U = BigInt::one();
    BigInt V = BigInt::one();
 
-   BigInt Ut, Vt, U2, V2;
+   BigInt Ut;
+   BigInt Vt;
+   BigInt U2;
+   BigInt V2;
 
    for(size_t i = 0; i != K_bits; ++i) {
       const bool k_bit = K.get_bit(K_bits - 1 - i);
@@ -75,7 +84,7 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
       U2.ct_cond_add(U2.is_odd(), C);
       U2 >>= 1;
 
-      V2 = mod_C.reduce(Vt + Ut * D);
+      V2 = mod_C.reduce(Vt + mod_C.multiply(Ut, D));
       V2.ct_cond_add(V2.is_odd(), C);
       V2 >>= 1;
 
@@ -86,26 +95,21 @@ bool is_lucas_probable_prime(const BigInt& C, const Modular_Reducer& mod_C) {
    return (U == 0);
 }
 
-bool is_bailie_psw_probable_prime(const BigInt& n, const Modular_Reducer& mod_n) {
+bool is_bailie_psw_probable_prime(const BigInt& n, const Barrett_Reduction& mod_n) {
    if(n == 2) {
       return true;
    } else if(n <= 1 || n.is_even()) {
       return false;
    }
 
-   auto monty_n = std::make_shared<Montgomery_Params>(n, mod_n);
+   const Montgomery_Params monty_n(n, mod_n);
    const auto base = BigInt::from_word(2);
    return passes_miller_rabin_test(n, mod_n, monty_n, base) && is_lucas_probable_prime(n, mod_n);
 }
 
-bool is_bailie_psw_probable_prime(const BigInt& n) {
-   Modular_Reducer mod_n(n);
-   return is_bailie_psw_probable_prime(n, mod_n);
-}
-
 bool passes_miller_rabin_test(const BigInt& n,
-                              const Modular_Reducer& mod_n,
-                              const std::shared_ptr<Montgomery_Params>& monty_n,
+                              const Barrett_Reduction& mod_n,
+                              const Montgomery_Params& monty_n,
                               const BigInt& a) {
    if(n < 3 || n.is_even()) {
       return false;
@@ -114,7 +118,13 @@ bool passes_miller_rabin_test(const BigInt& n,
    BOTAN_ASSERT_NOMSG(n > 1);
 
    const BigInt n_minus_1 = n - 1;
-   const size_t s = low_zero_bits(n_minus_1);
+   /*
+   * This unpoison is not ideal but realistically there is no way to
+   * hide the number of loop iterations (below). The main user of
+   * secret primes is RSA and we always generate RSA primes such that
+   * p == 3 (mod 4), which means s is always 1.
+   */
+   const size_t s = CT::driveby_unpoison(low_zero_bits(n_minus_1));
    const BigInt nm1_s = n_minus_1 >> s;
    const size_t n_bits = n.bits();
 
@@ -122,7 +132,7 @@ bool passes_miller_rabin_test(const BigInt& n,
 
    auto powm_a_n = monty_precompute(monty_n, a, powm_window);
 
-   BigInt y = monty_execute(*powm_a_n, nm1_s, n_bits);
+   BigInt y = monty_execute(*powm_a_n, nm1_s, n_bits).value();
 
    if(y == 1 || y == n_minus_1) {
       return true;
@@ -148,14 +158,13 @@ bool passes_miller_rabin_test(const BigInt& n,
 }
 
 bool is_miller_rabin_probable_prime(const BigInt& n,
-                                    const Modular_Reducer& mod_n,
+                                    const Barrett_Reduction& mod_n,
+                                    const Montgomery_Params& monty_n,
                                     RandomNumberGenerator& rng,
                                     size_t test_iterations) {
    if(n < 3 || n.is_even()) {
       return false;
    }
-
-   auto monty_n = std::make_shared<Montgomery_Params>(n, mod_n);
 
    for(size_t i = 0; i != test_iterations; ++i) {
       const BigInt a = BigInt::random_integer(rng, BigInt::from_word(2), n);
@@ -170,13 +179,18 @@ bool is_miller_rabin_probable_prime(const BigInt& n,
 }
 
 size_t miller_rabin_test_iterations(size_t n_bits, size_t prob, bool random) {
+   // Cap prob at 512 bits as _way_ more than enough; a random fault causing
+   // false accept is much more likely to occur than an actual 2^-512 event is.
+
+   prob = std::min<size_t>(512, prob);
+
    const size_t base = (prob + 2) / 2;  // worst case 4^-t error rate
 
    /*
    * If the candidate prime was maliciously constructed, we can't rely
    * on arguments based on p being random.
    */
-   if(random == false) {
+   if(!random) {
       return base;
    }
 

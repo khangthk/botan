@@ -8,16 +8,19 @@
 #ifndef BOTAN_CERT_STORE_H_
 #define BOTAN_CERT_STORE_H_
 
+#include <botan/pkix_types.h>
 #include <botan/x509_crl.h>
 #include <botan/x509cert.h>
+#include <memory>
 #include <optional>
+#include <vector>
 
 namespace Botan {
 
 /**
 * Certificate Store Interface
 */
-class BOTAN_PUBLIC_API(2, 0) Certificate_Store {
+class BOTAN_PUBLIC_API(2, 0) Certificate_Store /* NOLINT(*-special-member-functions) */ {
    public:
       virtual ~Certificate_Store();
 
@@ -57,6 +60,18 @@ class BOTAN_PUBLIC_API(2, 0) Certificate_Store {
          const std::vector<uint8_t>& subject_hash) const = 0;
 
       /**
+      * Find a certificate by searching for one with a matching issuer DN and
+      * serial number. Used for CMS or PKCS#7.
+      * @param issuer_dn the distinguished name of the issuer
+      * @param serial_number the certificate's serial number
+      * @return a matching certificate or nullopt otherwise
+      *
+      * TODO(Botan4) change this to use X509_Serial_Number
+      */
+      virtual std::optional<X509_Certificate> find_cert_by_issuer_dn_and_serial_number(
+         const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const = 0;
+
+      /**
       * Finds a CRL for the given certificate
       * @param subject the subject certificate
       * @return the CRL for subject or nullopt otherwise
@@ -64,12 +79,17 @@ class BOTAN_PUBLIC_API(2, 0) Certificate_Store {
       virtual std::optional<X509_CRL> find_crl_for(const X509_Certificate& subject) const;
 
       /**
-      * @return whether the certificate is known
-      * @param cert certififcate to be searched
+      * @return whether this certificate is contained within the store
+      * @param cert certificate to be searched
+      *
+      * Default implementation uses find_all_certs
       */
-      bool certificate_known(const X509_Certificate& cert) const {
-         return find_cert(cert.subject_dn(), cert.subject_key_id()).has_value();
-      }
+      virtual bool contains(const X509_Certificate& cert) const;
+
+      /**
+      * Old version of contains
+      */
+      bool certificate_known(const X509_Certificate& cert) const;
 
       // remove this (used by TLS::Server)
       virtual std::vector<X509_DN> all_subjects() const = 0;
@@ -80,11 +100,13 @@ class BOTAN_PUBLIC_API(2, 0) Certificate_Store {
 */
 class BOTAN_PUBLIC_API(2, 0) Certificate_Store_In_Memory final : public Certificate_Store {
    public:
+#if defined(BOTAN_TARGET_OS_HAS_FILESYSTEM)
       /**
       * Attempt to parse all files in dir (including subdirectories)
       * as certificates. Ignores errors.
       */
       explicit Certificate_Store_In_Memory(std::string_view dir);
+#endif
 
       /**
       * Adds given certificate to the store.
@@ -92,9 +114,22 @@ class BOTAN_PUBLIC_API(2, 0) Certificate_Store_In_Memory final : public Certific
       explicit Certificate_Store_In_Memory(const X509_Certificate& cert);
 
       /**
+      * Adds given certificate and CRL to the store.
+      */
+      Certificate_Store_In_Memory(const X509_Certificate& cert, const X509_CRL& crl);
+
+      /**
       * Create an empty store.
       */
-      Certificate_Store_In_Memory() = default;
+      Certificate_Store_In_Memory();
+
+      Certificate_Store_In_Memory(const Certificate_Store_In_Memory& other);
+      Certificate_Store_In_Memory(Certificate_Store_In_Memory&& other) noexcept;
+
+      Certificate_Store_In_Memory& operator=(const Certificate_Store_In_Memory& other) = delete;
+      Certificate_Store_In_Memory& operator=(Certificate_Store_In_Memory&& other) noexcept;
+
+      ~Certificate_Store_In_Memory() override;
 
       /**
       * Add a certificate to the store.
@@ -132,15 +167,23 @@ class BOTAN_PUBLIC_API(2, 0) Certificate_Store_In_Memory final : public Certific
       std::optional<X509_Certificate> find_cert_by_raw_subject_dn_sha256(
          const std::vector<uint8_t>& subject_hash) const override;
 
+      std::optional<X509_Certificate> find_cert_by_issuer_dn_and_serial_number(
+         const X509_DN& issuer_dn, std::span<const uint8_t> serial_number) const override;
+
       /**
       * Finds a CRL for the given certificate
       */
       std::optional<X509_CRL> find_crl_for(const X509_Certificate& subject) const override;
 
+      bool contains(const X509_Certificate& cert) const override;
+
    private:
-      // TODO: Add indexing on the DN and key id to avoid linear search
-      std::vector<X509_Certificate> m_certs;
-      std::vector<X509_CRL> m_crls;
+      class Impl;
+
+      Impl& impl();
+      const Impl& impl() const;
+
+      std::unique_ptr<Impl> m_impl;
 };
 
 }  // namespace Botan

@@ -10,9 +10,14 @@
 
 #include <botan/pk_keys.h>
 
-#include <array>
+#include <memory>
+#include <vector>
 
 namespace Botan {
+
+class X448_PublicKey_Data;
+class X448_PrivateKey_Data;
+
 /**
  * @brief A public key for the X448 key agreement scheme according to RFC 7748.
  */
@@ -41,7 +46,9 @@ class BOTAN_PUBLIC_API(3, 4) X448_PublicKey : public virtual Public_Key {
 
       AlgorithmIdentifier algorithm_identifier() const override;
 
-      std::vector<uint8_t> public_value() const { return {m_public.begin(), m_public.end()}; }
+      BOTAN_DEPRECATED("Use raw_public_key_bits") std::vector<uint8_t> public_value() const {
+         return raw_public_key_bits();
+      }
 
       std::vector<uint8_t> raw_public_key_bits() const override;
 
@@ -53,7 +60,7 @@ class BOTAN_PUBLIC_API(3, 4) X448_PublicKey : public virtual Public_Key {
 
    protected:
       X448_PublicKey() = default;
-      std::array<uint8_t, 56> m_public;
+      std::shared_ptr<const X448_PublicKey_Data> m_public;  // NOLINT(*non-private-member-variable*)
 };
 
 BOTAN_DIAGNOSTIC_PUSH
@@ -85,9 +92,9 @@ class BOTAN_PUBLIC_API(3, 4) X448_PrivateKey final : public X448_PublicKey,
       */
       explicit X448_PrivateKey(std::span<const uint8_t> secret_key);
 
-      std::vector<uint8_t> public_value() const override { return X448_PublicKey::public_key_bits(); }
+      std::vector<uint8_t> public_value() const override { return raw_public_key_bits(); }
 
-      secure_vector<uint8_t> raw_private_key_bits() const override { return {m_private.begin(), m_private.end()}; }
+      secure_vector<uint8_t> raw_private_key_bits() const override;
 
       secure_vector<uint8_t> private_key_bits() const override;
 
@@ -100,7 +107,7 @@ class BOTAN_PUBLIC_API(3, 4) X448_PrivateKey final : public X448_PublicKey,
                                                                      std::string_view provider) const override;
 
    private:
-      secure_vector<uint8_t> m_private;
+      std::shared_ptr<const X448_PrivateKey_Data> m_private;
 };
 
 BOTAN_DIAGNOSTIC_POP

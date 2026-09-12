@@ -10,12 +10,15 @@
 
 #include <botan/internal/frodo_constants.h>
 
+#include <botan/assert.h>
 #include <botan/xof.h>
 
 namespace Botan {
 
 FrodoKEMConstants::FrodoKEMConstants(FrodoKEMMode mode) : m_mode(mode), m_len_a(128), m_n_bar(8) {
-   BOTAN_ASSERT(m_mode.is_available(), "Mode is not available.");
+   if(!mode.is_available()) {
+      throw Not_Implemented("FrodoKEM mode " + mode.to_string() + " is not available");
+   }
 
    if(mode.is_ephemeral()) {
       m_len_salt = 0;
@@ -94,9 +97,8 @@ FrodoKEMConstants::FrodoKEMConstants(FrodoKEMMode mode) : m_mode(mode), m_len_a(
 
 FrodoKEMConstants::~FrodoKEMConstants() = default;
 
-XOF& FrodoKEMConstants::SHAKE_XOF() const {
-   m_shake_xof->clear();
-   return *m_shake_xof;
+std::unique_ptr<XOF> FrodoKEMConstants::create_xof() const {
+   return m_shake_xof->new_object();
 }
 
 }  // namespace Botan

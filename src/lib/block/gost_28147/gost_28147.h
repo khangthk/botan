@@ -9,6 +9,7 @@
 #define BOTAN_GOST_28147_89_H_
 
 #include <botan/block_cipher.h>
+#include <botan/secmem.h>
 
 namespace Botan {
 
@@ -78,7 +79,7 @@ class GOST_28147_89 final : public Block_Cipher_Fixed_Params<8, 32> {
       explicit GOST_28147_89(std::string_view param_name) : GOST_28147_89(GOST_28147_89_Params(param_name)) {}
 
       explicit GOST_28147_89(const std::vector<uint32_t>& other_SBOX, std::string_view name) :
-            m_SBOX(other_SBOX), m_EK(8), m_name(name) {}
+            m_SBOX(other_SBOX), m_name(name) {}
 
    private:
       void key_schedule(std::span<const uint8_t> key) override;

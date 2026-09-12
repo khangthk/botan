@@ -8,7 +8,12 @@
 
 #include <botan/internal/lms.h>
 
-#include <botan/internal/int_utils.h>
+#include <botan/exceptn.h>
+#include <botan/hash.h>
+#include <botan/internal/buffer_slicer.h>
+#include <botan/internal/buffer_stuffer.h>
+#include <botan/internal/concat_util.h>
+#include <botan/internal/hash_engine.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/tree_hash.h>
 
@@ -80,11 +85,35 @@ void lms_gen_leaf(StrongSpan<LMS_Tree_Node> out,
    hash.final(out);
 }
 
-auto lms_gen_leaf_func(const LMS_PrivateKey& lms_sk) {
-   return [hash = lms_sk.lms_params().hash(), lms_sk](StrongSpan<LMS_Tree_Node> out, const TreeAddress& tree_address) {
-      auto lmots_sk = LMOTS_Private_Key(lms_sk.lmots_params(), lms_sk.identifier(), tree_address.q(), lms_sk.seed());
-      auto lmots_pk = LMOTS_Public_Key(lmots_sk);
-      lms_gen_leaf(out, lmots_pk, tree_address, *hash);
+auto lms_gen_leaves_func(const LMS_PrivateKey& lms_sk) {
+   // The hash engine is created once here and reused for all leaves
+   return [engine = Hash_Engine::create_or_throw(lms_sk.lmots_params().hash_name()), lms_sk](
+             std::span<uint8_t> out, LMS_Tree_Node_Idx first_idx, size_t count) {
+      const size_t m = lms_sk.lms_params().m();
+      const auto& identifier = lms_sk.identifier();
+
+      // The OTS public key hashes of all requested leaves
+      std::vector<uint8_t> ks(count * m);
+      lmots_compute_pubkeys(ks, lms_sk.lmots_params(), identifier, first_idx, count, lms_sk.seed(), *engine);
+
+      // Leaf node hash: H(I || u32str(r) || u16str(D_LEAF) || K)
+      const size_t prefix_len = identifier.size() + sizeof(uint32_t) + sizeof(uint16_t);
+      std::vector<uint8_t> prefixes(count * prefix_len);
+      std::vector<std::span<uint8_t>> outs(count);
+      std::vector<std::span<const uint8_t>> prefix_spans(count);
+      std::vector<std::span<const uint8_t>> k_spans(count);
+      for(size_t i = 0; i != count; ++i) {
+         const uint32_t r = (uint32_t(1) << lms_sk.lms_params().h()) + first_idx.get() + static_cast<uint32_t>(i);
+         const auto prefix_span = std::span(prefixes).subspan(i * prefix_len, prefix_len);
+         BufferStuffer prefix(prefix_span);
+         prefix.append(identifier);
+         prefix.append(store_be(r));
+         prefix.append(store_be(D_LEAF));
+         prefix_spans[i] = prefix_span;
+         outs[i] = out.subspan(i * m, m);
+         k_spans[i] = std::span(ks).subspan(i * m, m);
+      }
+      engine->batch_hash(outs, prefix_spans, k_spans);
    };
 }
 
@@ -93,7 +122,7 @@ void lms_treehash(StrongSpan<LMS_Tree_Node> out_root,
                   std::optional<LMS_Tree_Node_Idx> leaf_idx,
                   const LMS_PrivateKey& lms_sk) {
    auto hash_pair_func = get_hash_pair_func_for_identifier(lms_sk.lms_params(), lms_sk.identifier());
-   auto gen_leaf = lms_gen_leaf_func(lms_sk);
+   auto gen_leaves = lms_gen_leaves_func(lms_sk);
    TreeAddress lms_tree_address(lms_sk.lms_params().h());
 
    treehash(out_root,
@@ -103,55 +132,59 @@ void lms_treehash(StrongSpan<LMS_Tree_Node> out_root,
             LMS_TreeLayerIndex(lms_sk.lms_params().h()),
             0,
             std::move(hash_pair_func),
-            std::move(gen_leaf),
+            std::move(gen_leaves),
             lms_tree_address);
 }
 
 }  // namespace
 
+std::unique_ptr<HashFunction> LMS_Params::hash() const {
+   return HashFunction::create_or_throw(hash_name());
+}
+
 LMS_Params LMS_Params::create_or_throw(LMS_Algorithm_Type type) {
    auto [hash_name, height] = [](const LMS_Algorithm_Type& lms_type) -> std::pair<std::string_view, uint8_t> {
       switch(lms_type) {
          case LMS_Algorithm_Type::SHA256_M32_H5:
-            return {"SHA-256", 5};
+            return {"SHA-256", static_cast<uint8_t>(5)};
          case LMS_Algorithm_Type::SHA256_M32_H10:
-            return {"SHA-256", 10};
+            return {"SHA-256", static_cast<uint8_t>(10)};
          case LMS_Algorithm_Type::SHA256_M32_H15:
-            return {"SHA-256", 15};
+            return {"SHA-256", static_cast<uint8_t>(15)};
          case LMS_Algorithm_Type::SHA256_M32_H20:
-            return {"SHA-256", 20};
+            return {"SHA-256", static_cast<uint8_t>(20)};
          case LMS_Algorithm_Type::SHA256_M32_H25:
-            return {"SHA-256", 25};
+            return {"SHA-256", static_cast<uint8_t>(25)};
          case LMS_Algorithm_Type::SHA256_M24_H5:
-            return {"Truncated(SHA-256,192)", 5};
+            return {"Truncated(SHA-256,192)", static_cast<uint8_t>(5)};
          case LMS_Algorithm_Type::SHA256_M24_H10:
-            return {"Truncated(SHA-256,192)", 10};
+            return {"Truncated(SHA-256,192)", static_cast<uint8_t>(10)};
          case LMS_Algorithm_Type::SHA256_M24_H15:
-            return {"Truncated(SHA-256,192)", 15};
+            return {"Truncated(SHA-256,192)", static_cast<uint8_t>(15)};
          case LMS_Algorithm_Type::SHA256_M24_H20:
-            return {"Truncated(SHA-256,192)", 20};
+            return {"Truncated(SHA-256,192)", static_cast<uint8_t>(20)};
          case LMS_Algorithm_Type::SHA256_M24_H25:
-            return {"Truncated(SHA-256,192)", 25};
+            return {"Truncated(SHA-256,192)", static_cast<uint8_t>(25)};
          case LMS_Algorithm_Type::SHAKE_M32_H5:
-            return {"SHAKE-256(256)", 5};
+            return {"SHAKE-256(256)", static_cast<uint8_t>(5)};
          case LMS_Algorithm_Type::SHAKE_M32_H10:
-            return {"SHAKE-256(256)", 10};
+            return {"SHAKE-256(256)", static_cast<uint8_t>(10)};
          case LMS_Algorithm_Type::SHAKE_M32_H15:
-            return {"SHAKE-256(256)", 15};
+            return {"SHAKE-256(256)", static_cast<uint8_t>(15)};
          case LMS_Algorithm_Type::SHAKE_M32_H20:
-            return {"SHAKE-256(256)", 20};
+            return {"SHAKE-256(256)", static_cast<uint8_t>(20)};
          case LMS_Algorithm_Type::SHAKE_M32_H25:
-            return {"SHAKE-256(256)", 25};
+            return {"SHAKE-256(256)", static_cast<uint8_t>(25)};
          case LMS_Algorithm_Type::SHAKE_M24_H5:
-            return {"SHAKE-256(192)", 5};
+            return {"SHAKE-256(192)", static_cast<uint8_t>(5)};
          case LMS_Algorithm_Type::SHAKE_M24_H10:
-            return {"SHAKE-256(192)", 10};
+            return {"SHAKE-256(192)", static_cast<uint8_t>(10)};
          case LMS_Algorithm_Type::SHAKE_M24_H15:
-            return {"SHAKE-256(192)", 15};
+            return {"SHAKE-256(192)", static_cast<uint8_t>(15)};
          case LMS_Algorithm_Type::SHAKE_M24_H20:
-            return {"SHAKE-256(192)", 20};
+            return {"SHAKE-256(192)", static_cast<uint8_t>(20)};
          case LMS_Algorithm_Type::SHAKE_M24_H25:
-            return {"SHAKE-256(192)", 25};
+            return {"SHAKE-256(192)", static_cast<uint8_t>(25)};
          default:
             throw Decoding_Error("Unsupported LMS algorithm type");
       }
@@ -161,7 +194,7 @@ LMS_Params LMS_Params::create_or_throw(LMS_Algorithm_Type type) {
 }
 
 LMS_Params LMS_Params::create_or_throw(std::string_view hash_name, uint8_t height) {
-   LMS_Algorithm_Type type = [](std::string_view hash, uint8_t h) -> LMS_Algorithm_Type {
+   const LMS_Algorithm_Type type = [](std::string_view hash, uint8_t h) -> LMS_Algorithm_Type {
       if(hash == "SHA-256") {
          switch(h) {
             case 5:
@@ -253,7 +286,7 @@ LMS_PublicKey LMS_PrivateKey::sign_and_get_pk(StrongSpan<LMS_Signature_Bytes> ou
 
    BOTAN_ASSERT_NOMSG(sig_stuffer.full());
 
-   TreeAddress lms_tree_address(lms_params().h());
+   const TreeAddress lms_tree_address(lms_params().h());
    LMS_Tree_Node pk_buffer(lms_params().m());
    lms_treehash(StrongSpan<LMS_Tree_Node>(pk_buffer.get()), auth_path_buffer, q, *this);
 
@@ -262,7 +295,7 @@ LMS_PublicKey LMS_PrivateKey::sign_and_get_pk(StrongSpan<LMS_Signature_Bytes> ou
 }
 
 LMS_PublicKey LMS_PublicKey::from_bytes_or_throw(BufferSlicer& slicer) {
-   size_t total_remaining_bytes = slicer.remaining();
+   const size_t total_remaining_bytes = slicer.remaining();
    // Alg. 6. 1. (4 bytes are sufficient until the next check)
    if(total_remaining_bytes < sizeof(LMS_Algorithm_Type)) {
       throw Decoding_Error("Too few bytes while parsing LMS public key.");
@@ -315,7 +348,7 @@ size_t LMS_PublicKey::size(const LMS_Params& lms_params) {
 }
 
 LMS_Signature LMS_Signature::from_bytes_or_throw(BufferSlicer& slicer) {
-   size_t total_remaining_bytes = slicer.remaining();
+   const size_t total_remaining_bytes = slicer.remaining();
    // Alg. 6a 1. (next 4 bytes are checked in LMOTS_Signature::from_bytes_or_throw)
    if(total_remaining_bytes < sizeof(LMS_Tree_Node_Idx)) {
       throw Decoding_Error("Too few signature bytes while parsing LMS signature.");
@@ -325,7 +358,7 @@ LMS_Signature LMS_Signature::from_bytes_or_throw(BufferSlicer& slicer) {
 
    // Alg. 6a 2.b.-e.
    auto lmots_sig = LMOTS_Signature::from_bytes_or_throw(slicer);
-   LMOTS_Params lmots_params = LMOTS_Params::create_or_throw(lmots_sig.algorithm_type());
+   const LMOTS_Params lmots_params = LMOTS_Params::create_or_throw(lmots_sig.algorithm_type());
 
    if(slicer.remaining() < sizeof(LMS_Algorithm_Type)) {
       throw Decoding_Error("Too few signature bytes while parsing LMS signature.");
@@ -333,7 +366,7 @@ LMS_Signature LMS_Signature::from_bytes_or_throw(BufferSlicer& slicer) {
    // Alg. 6a 2.f.
    auto lms_type = load_be<LMS_Algorithm_Type>(slicer.take<sizeof(LMS_Algorithm_Type)>());
    // Alg. 6a 2.h.
-   LMS_Params lms_params = LMS_Params::create_or_throw(lms_type);
+   const LMS_Params lms_params = LMS_Params::create_or_throw(lms_type);
    // Alg. 6a 2.i. (signature is not exactly [...] bytes long)
    if(total_remaining_bytes < size(lms_params, lmots_params)) {
       throw Decoding_Error("Too few signature bytes while parsing LMS signature.");
@@ -345,7 +378,8 @@ LMS_Signature LMS_Signature::from_bytes_or_throw(BufferSlicer& slicer) {
    return LMS_Signature(q, std::move(lmots_sig), lms_type, std::move(auth_path));
 }
 
-LMS_PublicKey::LMS_PublicKey(const LMS_PrivateKey& sk) : LMS_Instance(sk), m_lms_root(sk.lms_params().m()) {
+LMS_PublicKey::LMS_PublicKey(const LMS_PrivateKey& sk) :
+      /* NOLINT(*-slicing) */ LMS_Instance(sk), m_lms_root(sk.lms_params().m()) {
    lms_treehash(StrongSpan<LMS_Tree_Node>(m_lms_root), std::nullopt, std::nullopt, sk);
 }
 
@@ -395,7 +429,7 @@ std::optional<LMS_Tree_Node> LMS_PublicKey::lms_compute_root_from_sig(const LMS_
       auto lms_address = TreeAddress(lms_params.h());
       lms_address.set_address(LMS_TreeLayerIndex(0), LMS_Tree_Node_Idx(sig.q().get()));
 
-      LMOTS_Public_Key pk_candidate(lmots_params, identifier(), sig.q(), Kc);
+      const LMOTS_Public_Key pk_candidate(lmots_params, identifier(), sig.q(), Kc);
       LMS_Tree_Node tmp(lms_params.m());
       lms_gen_leaf(tmp, pk_candidate, lms_address, *hash);
 

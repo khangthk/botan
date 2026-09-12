@@ -6,17 +6,38 @@
 
 #include <botan/argon2.h>
 
+#include <botan/assert.h>
 #include <botan/exceptn.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/timer.h>
+#include <botan/internal/time_utils.h>
 #include <algorithm>
 #include <limits>
 
 namespace Botan {
 
+namespace {
+
+std::string argon2_family_name(uint8_t f) {
+   switch(f) {
+      case 0:
+         return "Argon2d";
+      case 1:
+         return "Argon2i";
+      case 2:
+         return "Argon2id";
+      default:
+         throw Invalid_Argument("Unknown Argon2 parameter");
+   }
+}
+
+constexpr size_t MAX_ARGON_MEMORY_GB = sizeof(size_t) == 4 ? 2 : 8;
+
+}  // namespace
+
 Argon2::Argon2(uint8_t family, size_t M, size_t t, size_t p) : m_family(family), m_M(M), m_t(t), m_p(p) {
+   BOTAN_ARG_CHECK(m_family == 0 || m_family == 1 || m_family == 2, "Invalid Argon2 family parameter");
    BOTAN_ARG_CHECK(m_p >= 1 && m_p <= 128, "Invalid Argon2 threads parameter");
-   BOTAN_ARG_CHECK(m_M >= 8 * m_p && m_M <= 8192 * 1024, "Invalid Argon2 M parameter");
+   BOTAN_ARG_CHECK(m_M >= 8 * m_p && m_M <= MAX_ARGON_MEMORY_GB * 1024 * 1024, "Invalid Argon2 M parameter");
    BOTAN_ARG_CHECK(m_t >= 1 && m_t <= std::numeric_limits<uint32_t>::max(), "Invalid Argon2 t parameter");
 }
 
@@ -42,23 +63,6 @@ void Argon2::derive_key(uint8_t output[],
    argon2(output, output_len, password, password_len, salt, salt_len, key, key_len, ad, ad_len);
 }
 
-namespace {
-
-std::string argon2_family_name(uint8_t f) {
-   switch(f) {
-      case 0:
-         return "Argon2d";
-      case 1:
-         return "Argon2i";
-      case 2:
-         return "Argon2id";
-      default:
-         throw Invalid_Argument("Unknown Argon2 parameter");
-   }
-}
-
-}  // namespace
-
 std::string Argon2::to_string() const {
    return fmt("{}({},{},{})", argon2_family_name(m_family), m_M, m_t, m_p);
 }
@@ -73,45 +77,38 @@ std::string Argon2_Family::name() const {
    return argon2_family_name(m_family);
 }
 
-std::unique_ptr<PasswordHash> Argon2_Family::tune(size_t /*output_length*/,
-                                                  std::chrono::milliseconds msec,
-                                                  size_t max_memory,
-                                                  std::chrono::milliseconds tune_time) const {
-   const size_t max_kib = (max_memory == 0) ? 256 * 1024 : max_memory * 1024;
+std::unique_ptr<PasswordHash> Argon2_Family::tune_params(size_t /*output_length*/,
+                                                         uint64_t desired_msec,
+                                                         std::optional<size_t> max_memory,
+                                                         uint64_t tune_msec) const {
+   // If not set use 256 MB as default max
+   const size_t max_kib = std::min(MAX_ARGON_MEMORY_GB * 1024 * 1024, max_memory.value_or(256) * 1024);
 
    // Tune with a large memory otherwise we measure cache vs RAM speeds and underestimate
    // costs for larger params. Default is 36 MiB, or use 128 for long times.
-   const size_t tune_M = (msec >= std::chrono::milliseconds(200) ? 128 : 36) * 1024;
+   const size_t tune_M = (desired_msec >= 200 ? 128 : 36) * 1024;
    const size_t p = 1;
    size_t t = 1;
 
-   Timer timer("Argon2");
+   size_t M = 4 * 1024;
 
    auto pwhash = this->from_params(tune_M, t, p);
 
-   timer.run_until_elapsed(tune_time, [&]() {
+   auto tune_fn = [&]() {
       uint8_t output[64] = {0};
       pwhash->derive_key(output, sizeof(output), "test", 4, nullptr, 0);
-   });
+   };
 
-   if(timer.events() == 0 || timer.value() == 0) {
-      return default_params();
-   }
+   const uint64_t measured_time = measure_cost(tune_msec, tune_fn) / (tune_M / M);
 
-   size_t M = 4 * 1024;
-
-   const uint64_t measured_time = timer.value() / (timer.events() * (tune_M / M));
-
-   const uint64_t target_nsec = msec.count() * static_cast<uint64_t>(1000000);
+   const uint64_t target_nsec = desired_msec * static_cast<uint64_t>(1000000);
 
    /*
    * Argon2 scaling rules:
    * k*M, k*t, k*p all increase cost by about k
    *
-   * Since we don't even take advantage of p > 1, we prefer increasing
-   * t or M instead.
-   *
-   * If possible to increase M, prefer that.
+   * First preference is to increase M up to max allowed value.
+   * Any remaining time budget is spent on increasing t.
    */
 
    uint64_t est_nsec = measured_time;

@@ -37,14 +37,18 @@
    #include <boost/beast/http.hpp>
 
    #include <botan/asio_stream.h>
+   #include <botan/tls_ciphersuite.h>
    #include <botan/tls_messages.h>
    #include <botan/tls_session_manager_memory.h>
    #include <botan/version.h>
    #include <botan/internal/fmt.h>
-   #include <botan/internal/os_utils.h>
 
    #if defined(BOTAN_HAS_TLS_SQLITE3_SESSION_MANAGER)
       #include <botan/tls_session_manager_sqlite.h>
+   #endif
+
+   #if defined(BOTAN_HAS_OS_UTILS)
+      #include <botan/internal/os_utils.h>
    #endif
 
    #include "tls_helpers.h"
@@ -63,23 +67,29 @@ using tcp_stream = typename beast::tcp_stream::rebind_executor<
 
 class Logger final {
    private:
-      std::string timestamp() const { return Botan::OS::format_time(std::time(nullptr), "%c"); }
+      std::string timestamp() const {
+   #if defined(BOTAN_HAS_OS_UTILS)
+         return Botan::OS::format_time(std::time(nullptr), "%c");
+   #else
+         return std::to_string(std::time(nullptr));
+   #endif
+      }
 
    public:
       Logger(std::ostream& out, std::ostream& err) : m_out(out), m_err(err) {}
 
       void log(std::string_view out) {
-         std::scoped_lock lk(m_mutex);
+         const std::scoped_lock lk(m_mutex);
          m_out << Botan::fmt("[{}] {}", timestamp(), out) << "\n";
       }
 
       void error(std::string_view err) {
-         std::scoped_lock lk(m_mutex);
+         const std::scoped_lock lk(m_mutex);
          m_err << Botan::fmt("[{}] {}", timestamp(), err) << "\n";
       }
 
       void flush() {
-         std::scoped_lock lk(m_mutex);
+         const std::scoped_lock lk(m_mutex);
          m_out.flush();
          m_err.flush();
       }
@@ -124,7 +134,7 @@ class TlsHttpCallbacks final : public Botan::TLS::StreamCallbacks {
             strm << "Client random: " << Botan::hex_encode(client_hello.random()) << "\n";
 
             strm << "Client offered following ciphersuites:\n";
-            for(uint16_t suite_id : client_hello.ciphersuites()) {
+            for(const uint16_t suite_id : client_hello.ciphersuites()) {
                const auto ciphersuite = Botan::TLS::Ciphersuite::by_id(suite_id);
 
                strm << " - 0x" << std::hex << std::setfill('0') << std::setw(4) << suite_id << std::dec
@@ -295,7 +305,9 @@ net::awaitable<void> do_listen(tcp::endpoint endpoint,
 
    const bool run_forever = (max_clients == 0);
 
-   logger->log(Botan::fmt("Listening for new connections on {}:{}", endpoint.address().to_string(), endpoint.port()));
+   const auto local_endpoint = acceptor.local_endpoint();
+   logger->log(Botan::fmt(
+      "Listening for new connections on {}:{}", local_endpoint.address().to_string(), local_endpoint.port()));
    logger->flush();
 
    auto done = [&] {
@@ -313,8 +325,6 @@ net::awaitable<void> do_listen(tcp::endpoint endpoint,
    }
 }
 
-}  // namespace
-
 class TLS_HTTP_Server final : public Command {
    public:
       TLS_HTTP_Server() :
@@ -328,12 +338,14 @@ class TLS_HTTP_Server final : public Command {
       std::string description() const override { return "Provides a simple HTTP server"; }
 
       size_t thread_count() const {
-         if(size_t t = get_arg_sz("threads")) {
+         if(const size_t t = get_arg_sz("threads")) {
             return t;
          }
-         if(size_t t = Botan::OS::get_cpu_available()) {
+   #if defined(BOTAN_HAS_OS_UTILS)
+         if(const size_t t = Botan::OS::get_cpu_available()) {
             return t;
          }
+   #endif
          return 2;
       }
 
@@ -389,13 +401,15 @@ class TLS_HTTP_Server final : public Command {
 
          io.run();
 
-         for(size_t i = 0; i < threads.size(); ++i) {
-            threads[i]->join();
+         for(auto& thread : threads) {
+            thread->join();
          }
       }
 };
 
 BOTAN_REGISTER_COMMAND("tls_http_server", TLS_HTTP_Server);
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

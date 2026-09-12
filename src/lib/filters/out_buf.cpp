@@ -8,6 +8,7 @@
 
 #include <botan/internal/out_buf.h>
 
+#include <botan/assert.h>
 #include <botan/internal/secqueue.h>
 
 namespace Botan {
@@ -17,7 +18,7 @@ namespace Botan {
 */
 size_t Output_Buffers::read(uint8_t output[], size_t length, Pipe::message_id msg) {
    SecureQueue* q = get(msg);
-   if(q) {
+   if(q != nullptr) {
       return q->read(output, length);
    }
    return 0;
@@ -27,8 +28,8 @@ size_t Output_Buffers::read(uint8_t output[], size_t length, Pipe::message_id ms
 * Peek at data in a message
 */
 size_t Output_Buffers::peek(uint8_t output[], size_t length, size_t stream_offset, Pipe::message_id msg) const {
-   SecureQueue* q = get(msg);
-   if(q) {
+   const SecureQueue* q = get(msg);
+   if(q != nullptr) {
       return q->peek(output, length, stream_offset);
    }
    return 0;
@@ -38,8 +39,8 @@ size_t Output_Buffers::peek(uint8_t output[], size_t length, size_t stream_offse
 * Check available bytes in a message
 */
 size_t Output_Buffers::remaining(Pipe::message_id msg) const {
-   SecureQueue* q = get(msg);
-   if(q) {
+   const SecureQueue* q = get(msg);
+   if(q != nullptr) {
       return q->size();
    }
    return 0;
@@ -49,8 +50,8 @@ size_t Output_Buffers::remaining(Pipe::message_id msg) const {
 * Return the total bytes of a message that have already been read.
 */
 size_t Output_Buffers::get_bytes_read(Pipe::message_id msg) const {
-   SecureQueue* q = get(msg);
-   if(q) {
+   const SecureQueue* q = get(msg);
+   if(q != nullptr) {
       return q->get_bytes_read();
    }
    return 0;
@@ -101,13 +102,6 @@ SecureQueue* Output_Buffers::get(Pipe::message_id msg) const {
 */
 Pipe::message_id Output_Buffers::message_count() const {
    return (m_offset + m_buffers.size());
-}
-
-/*
-* Output_Buffers Constructor
-*/
-Output_Buffers::Output_Buffers() {
-   m_offset = 0;
 }
 
 }  // namespace Botan

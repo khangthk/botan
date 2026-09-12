@@ -101,23 +101,38 @@ The ``PasswordHashFamily`` creates specific instances of ``PasswordHash``:
       Create a default instance of the password hashing algorithm. Be warned the
       value returned here may change from release to release.
 
+   .. cpp:function:: std::unique_ptr<PasswordHash> tune_params( \
+                     size_t output_len, \
+                     uint64_t desired_msec, \
+                     std::optional<size_t> max_memory_usage_mb = {}, \
+                     uint64_t tuning_msec = 10) const
+
+      Return a password hash instance tuned to run for approximately ``desired_msec``
+      milliseconds when producing an output of length ``output_len``. (Accuracy
+      may vary, use the command line utility ``botan pbkdf_tune`` to check.)
+
+      The parameters will be selected to use at most *max_memory_usage_mb* megabytes
+      of memory, or if left as nullopt any size is allowed.
+
+      This function works by running a short tuning loop to estimate the
+      performance of the algorithm, then scaling the parameters appropriately to
+      hit the target size. The length of time the tuning loop runs can be
+      controlled using the *tuning_msec* parameter, though it always runs at
+      least a few iterations and so may take longer for expensive functions.
+
+      The tuning loop measures the CPU time of the calling thread (where the
+      platform supports this) and uses the fastest iteration observed, so the
+      result reflects the capacity of the machine rather than its load at the
+      moment of tuning. On a heavily loaded system the returned parameters may
+      therefore take longer than requested.
+
    .. cpp:function:: std::unique_ptr<PasswordHash> tune( \
                      size_t output_len, \
                      std::chrono::milliseconds msec, \
                      size_t max_memory_usage_mb = 0, \
                      std::chrono::milliseconds tuning_msec = std::chrono::milliseconds(10)) const
 
-      Return a password hash instance tuned to run for approximately ``msec``
-      milliseconds when producing an output of length ``output_len``. (Accuracy
-      may vary, use the command line utility ``botan pbkdf_tune`` to check.)
-
-      The parameters will be selected to use at most *max_memory_usage_mb* megabytes
-      of memory, or if left as zero any size is allowed.
-
-      This function works by runing a short tuning loop to estimate the
-      performance of the algorithm, then scaling the parameters appropriately to
-      hit the target size. The length of time the tuning loop runs can be
-      controlled using the *tuning_msec* parameter.
+      A deprecated variant of tune_params. It will be removed in Botan4.
 
    .. cpp:function:: std::unique_ptr<PasswordHash> from_params( \
          size_t i1, size_t i2 = 0, size_t i3 = 0) const
@@ -185,6 +200,28 @@ e.g. ``PBKDF2(HMAC(SHA-256))``
 If a ``HashFunction`` is provided as an argument,
 it will create ``HMAC(HashFunction)`` as the ``MessageAuthenticationCode``.
 I.e. ``PBKDF2(SHA-256)`` will result in ``PBKDF2(HMAC(SHA-256))``.
+
+PKCS12-KDF
+^^^^^^^^^^^^
+
+.. versionadded:: 3.13.0
+
+PKCS12-KDF follows the construction in :rfc:`7292` (Appendix B).
+
+Algorithm specification name for ``PasswordHashFamily::create``:
+``PKCS12-KDF(<HashFunction>,<ID>)``
+
+Where ``ID`` selects the derivation purpose:
+
+* ``1`` = encryption key
+* ``2`` = IV
+* ``3`` = MAC key
+
+For example: ``PKCS12-KDF(SHA-256,1)``.
+
+Instances created from a family include the iteration count in
+``PasswordHash::to_string()``, yielding
+``PKCS12-KDF(<HashFunction>,<ID>,<iterations>)``.
 
 Scrypt
 ^^^^^^^^^^

@@ -20,13 +20,11 @@ namespace Botan {
 */
 class BOTAN_PUBLIC_API(2, 0) DataSink : public Filter {
    public:
+      /**
+      * Check whether this filter is an attachable filter
+      * @return always false, since nothing may be attached after a sink
+      */
       bool attachable() override { return false; }
-
-      DataSink() = default;
-      ~DataSink() override = default;
-
-      DataSink& operator=(const DataSink&) = delete;
-      DataSink(const DataSink&) = delete;
 };
 
 /**
@@ -39,7 +37,7 @@ class BOTAN_PUBLIC_API(2, 0) DataSink_Stream final : public DataSink {
       * @param stream the stream to write to
       * @param name identifier
       */
-      DataSink_Stream(std::ostream& stream, std::string_view name = "<std::ostream>");
+      BOTAN_FUTURE_EXPLICIT DataSink_Stream(std::ostream& stream, std::string_view name = "<std::ostream>");
 
 #if defined(BOTAN_TARGET_OS_HAS_FILESYSTEM)
 
@@ -49,13 +47,30 @@ class BOTAN_PUBLIC_API(2, 0) DataSink_Stream final : public DataSink {
       * @param use_binary indicates whether to treat the file
       * as a binary file or not
       */
-      DataSink_Stream(std::string_view pathname, bool use_binary = false);
+      BOTAN_FUTURE_EXPLICIT DataSink_Stream(std::string_view pathname, bool use_binary = false);
 #endif
 
+      DataSink_Stream(const DataSink_Stream& other) = delete;
+      DataSink_Stream(DataSink_Stream&& other) = delete;
+      DataSink_Stream& operator=(const DataSink_Stream& other) = delete;
+      DataSink_Stream& operator=(DataSink_Stream&& other) = delete;
+
+      /**
+      * Return a descriptive name for this filter
+      * @return the identifier given at construction
+      */
       std::string name() const override { return m_identifier; }
 
-      void write(const uint8_t[], size_t) override;
+      /**
+      * Write a portion of a message to the stream
+      * @param buf the input as a byte array
+      * @param len the length of the byte array buf
+      */
+      void write(const uint8_t buf[], size_t len) override;
 
+      /**
+      * Notify that the current message is finished and flush the stream
+      */
       void end_msg() override;
 
       ~DataSink_Stream() override;

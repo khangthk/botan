@@ -11,13 +11,17 @@
 #include <botan/internal/gf2m_small_m.h>
 
 #include <botan/exceptn.h>
+#include <botan/internal/ct_utils.h>
+#include <array>
 #include <string>
 
 namespace Botan {
 
-const size_t MAX_EXT_DEG = 16;
+const size_t MAX_EXT_DEG = 15;
 
 namespace {
+
+using GF2m_Tables = std::array<std::vector<gf2m>, MAX_EXT_DEG + 1>;
 
 const gf2m prim_poly[MAX_EXT_DEG + 1] = {
    01,      /* extension degree 0 (!) never used */
@@ -52,18 +56,22 @@ std::vector<gf2m> gf_exp_table(size_t deg, gf2m prime_poly) {
    return tab;
 }
 
-const std::vector<gf2m>& exp_table(size_t deg) {
-   static std::vector<gf2m> tabs[MAX_EXT_DEG + 1];
+const GF2m_Tables& exp_tables() {
+   static const GF2m_Tables tables = [] {
+      GF2m_Tables result;
+      for(size_t degree = 2; degree <= MAX_EXT_DEG; ++degree) {
+         result[degree] = gf_exp_table(degree, prim_poly[degree]);
+      }
+      return result;
+   }();
+   return tables;
+}
 
+const std::vector<gf2m>& exp_table(size_t deg) {
    if(deg < 2 || deg > MAX_EXT_DEG) {
       throw Invalid_Argument("GF2m_Field does not support degree " + std::to_string(deg));
    }
-
-   if(tabs[deg].empty()) {
-      tabs[deg] = gf_exp_table(deg, prim_poly[deg]);
-   }
-
-   return tabs[deg];
+   return exp_tables()[deg];
 }
 
 std::vector<gf2m> gf_log_table(size_t deg, const std::vector<gf2m>& exp) {
@@ -76,18 +84,22 @@ std::vector<gf2m> gf_log_table(size_t deg, const std::vector<gf2m>& exp) {
    return tab;
 }
 
-const std::vector<gf2m>& log_table(size_t deg) {
-   static std::vector<gf2m> tabs[MAX_EXT_DEG + 1];
+const GF2m_Tables& log_tables() {
+   static const GF2m_Tables tables = [] {
+      GF2m_Tables result;
+      for(size_t degree = 2; degree <= MAX_EXT_DEG; ++degree) {
+         result[degree] = gf_log_table(degree, exp_table(degree));
+      }
+      return result;
+   }();
+   return tables;
+}
 
+const std::vector<gf2m>& log_table(size_t deg) {
    if(deg < 2 || deg > MAX_EXT_DEG) {
       throw Invalid_Argument("GF2m_Field does not support degree " + std::to_string(deg));
    }
-
-   if(tabs[deg].empty()) {
-      tabs[deg] = gf_log_table(deg, exp_table(deg));
-   }
-
-   return tabs[deg];
+   return log_tables()[deg];
 }
 
 }  // namespace
@@ -99,8 +111,7 @@ uint32_t encode_gf2m(gf2m to_enc, uint8_t* mem) {
 }
 
 gf2m decode_gf2m(const uint8_t* mem) {
-   gf2m result;
-   result = mem[0] << 8;
+   gf2m result = mem[0] << 8;
    result |= mem[1];
    return result;
 }
@@ -114,8 +125,8 @@ GF2m_Field::GF2m_Field(size_t extdeg) :
 gf2m GF2m_Field::gf_div(gf2m x, gf2m y) const {
    const int32_t sub_res = static_cast<int32_t>(gf_log(x) - static_cast<int32_t>(gf_log(y)));
    const gf2m modq_res = _gf_modq_1(sub_res);
-   const int32_t div_res = static_cast<int32_t>(x) ? static_cast<int32_t>(gf_exp(modq_res)) : 0;
-   return static_cast<gf2m>(div_res);
+   const gf2m div = gf_exp(modq_res);
+   return (~CT::Mask<gf2m>::is_zero(x)).if_set_return(div);
 }
 
 }  // namespace Botan

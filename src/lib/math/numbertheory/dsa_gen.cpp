@@ -7,9 +7,10 @@
 
 #include <botan/internal/primality.h>
 
+#include <botan/bigint.h>
+#include <botan/exceptn.h>
 #include <botan/hash.h>
 #include <botan/numthry.h>
-#include <botan/reducer.h>
 #include <botan/rng.h>
 #include <botan/internal/fmt.h>
 
@@ -79,7 +80,8 @@ bool generate_dsa_primes(RandomNumberGenerator& rng,
 
          Seed& operator++() {
             for(size_t j = m_seed.size(); j > 0; --j) {
-               if(++m_seed[j - 1]) {
+               m_seed[j - 1] += 1;
+               if(m_seed[j - 1] != 0) {
                   break;
                }
             }
@@ -100,12 +102,13 @@ bool generate_dsa_primes(RandomNumberGenerator& rng,
       return false;
    }
 
-   const size_t n = (pbits - 1) / (HASH_SIZE * 8), b = (pbits - 1) % (HASH_SIZE * 8);
+   const size_t n = (pbits - 1) / (HASH_SIZE * 8);
+   const size_t b = (pbits - 1) % (HASH_SIZE * 8);
 
    BigInt X;
    std::vector<uint8_t> V(HASH_SIZE * (n + 1));
 
-   Modular_Reducer mod_2q(2 * q);
+   const BigInt q2 = 2 * q;
 
    for(size_t j = 0; j != 4 * pbits; ++j) {
       for(size_t k = 0; k <= n; ++k) {
@@ -118,7 +121,8 @@ bool generate_dsa_primes(RandomNumberGenerator& rng,
          X._assign_from_bytes(std::span{V}.subspan(HASH_SIZE - 1 - b / 8));
          X.set_bit(pbits - 1);
 
-         p = X - (mod_2q.reduce(X) - 1);
+         // Variable time division is OK here since DSA primes are public anyway
+         p = X - ((X % q2) - 1);
 
          if(p.bits() == pbits && is_prime(p, rng, 128, true)) {
             return true;

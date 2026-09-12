@@ -1,5 +1,3 @@
-endian little
-wordsize 64
 
 family x86
 
@@ -23,6 +21,7 @@ sse2
 sse41
 ssse3
 avx512
+avx512_clmul
 vaes
 sha512
 sm3

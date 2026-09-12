@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 IDEA_SSE2 -> 20131128
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "IDEA SSE2"
@@ -10,3 +10,7 @@ brief -> "IDEA using SSE2 SIMD instructions"
 <isa>
 sse2
 </isa>
+
+<requires>
+cpuid
+</requires>

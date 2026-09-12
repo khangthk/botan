@@ -61,7 +61,7 @@ class BOTAN_PUBLIC_API(2, 3) ChaCha_RNG final : public Stateful_RNG {
       *
       * @param seed the seed material, should be at least 256 bits
       */
-      ChaCha_RNG(std::span<const uint8_t> seed);
+      BOTAN_FUTURE_EXPLICIT ChaCha_RNG(std::span<const uint8_t> seed);
 
       /**
       * Automatic reseeding from @p underlying_rng will take place after
@@ -72,7 +72,8 @@ class BOTAN_PUBLIC_API(2, 3) ChaCha_RNG final : public Stateful_RNG {
       * @param reseed_interval specifies a limit of how many times
       * the RNG will be called before automatic reseeding is performed
       */
-      ChaCha_RNG(RandomNumberGenerator& underlying_rng, size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL);
+      BOTAN_FUTURE_EXPLICIT ChaCha_RNG(RandomNumberGenerator& underlying_rng,
+                                       size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval);
 
       /**
       * Automatic reseeding from @p entropy_sources will take place after
@@ -82,7 +83,8 @@ class BOTAN_PUBLIC_API(2, 3) ChaCha_RNG final : public Stateful_RNG {
       * @param reseed_interval specifies a limit of how many times
       * the RNG will be called before automatic reseeding is performed.
       */
-      ChaCha_RNG(Entropy_Sources& entropy_sources, size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL);
+      BOTAN_FUTURE_EXPLICIT ChaCha_RNG(Entropy_Sources& entropy_sources,
+                                       size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval);
 
       /**
       * Automatic reseeding from @p underlying_rng and @p entropy_sources
@@ -97,12 +99,24 @@ class BOTAN_PUBLIC_API(2, 3) ChaCha_RNG final : public Stateful_RNG {
       */
       ChaCha_RNG(RandomNumberGenerator& underlying_rng,
                  Entropy_Sources& entropy_sources,
-                 size_t reseed_interval = BOTAN_RNG_DEFAULT_RESEED_INTERVAL);
+                 size_t reseed_interval = RandomNumberGenerator::DefaultReseedInterval);
 
+      /**
+      * Return the name of this RNG type
+      * @return the name of this RNG type
+      */
       std::string name() const override { return "ChaCha_RNG"; }
 
+      /**
+      * Return the security level of this DRBG
+      * @return the estimated security level in bits
+      */
       size_t security_level() const override;
 
+      /**
+      * Return the largest number of bytes this DRBG will produce per request
+      * @return always zero, as this RNG has no such limit
+      */
       size_t max_number_of_bytes_per_request() const override { return 0; }
 
    private:

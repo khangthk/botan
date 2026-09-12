@@ -8,6 +8,7 @@
 
 #include <botan/bigint.h>
 
+#include <botan/exceptn.h>
 #include <botan/internal/bit_ops.h>
 #include <botan/internal/divide.h>
 #include <botan/internal/mp_core.h>
@@ -16,23 +17,33 @@
 namespace Botan {
 
 //static
-BigInt BigInt::add2(const BigInt& x, const word y[], size_t y_words, BigInt::Sign y_sign) {
+BigInt BigInt::add2(const BigInt& x, const word y[], size_t y_size, BigInt::Sign y_sign) {
    const size_t x_sw = x.sig_words();
 
-   BigInt z = BigInt::with_capacity(std::max(x_sw, y_words) + 1);
+   BigInt z = BigInt::with_capacity(std::max(x_sw, y_size) + 1);
 
    if(x.sign() == y_sign) {
-      bigint_add3(z.mutable_data(), x._data(), x_sw, y, y_words);
+      const word carry = bigint_add3(z.mutable_data(), x._data(), x_sw, y, y_size);
+      z.mutable_data()[std::max(x_sw, y_size)] += carry;
       z.set_sign(x.sign());
    } else {
-      const int32_t relative_size = bigint_sub_abs(z.mutable_data(), x._data(), x_sw, y, y_words);
+      const int32_t relative_size = bigint_cmp(x.data(), x_sw, y, y_size);
 
-      //z.sign_fixup(relative_size, y_sign);
       if(relative_size < 0) {
+         // x < y so z = abs(y - x)
+         // NOLINTNEXTLINE(*-suspicious-call-argument) intentionally swapping x and y here
+         bigint_sub3(z.mutable_data(), y, y_size, x.data(), x_sw);
          z.set_sign(y_sign);
       } else if(relative_size == 0) {
-         z.set_sign(BigInt::Positive);
+         // Positive zero (nothing to do in this case)
       } else {
+         /*
+         * We know at this point that x >= y so if y_size is larger than
+         * x_sw, we are guaranteed they are just leading zeros which can
+         * be ignored
+         */
+         y_size = std::min(x_sw, y_size);
+         bigint_sub3(z.mutable_data(), x.data(), x_sw, y, y_size);
          z.set_sign(x.sign());
       }
    }
@@ -49,11 +60,11 @@ BigInt operator*(const BigInt& x, const BigInt& y) {
 
    BigInt z = BigInt::with_capacity(x.size() + y.size());
 
-   if(x_sw == 1 && y_sw) {
+   if(x_sw == 1 && y_sw > 0) {
       bigint_linmul3(z.mutable_data(), y._data(), y_sw, x.word_at(0));
-   } else if(y_sw == 1 && x_sw) {
+   } else if(y_sw == 1 && x_sw > 0) {
       bigint_linmul3(z.mutable_data(), x._data(), x_sw, y.word_at(0));
-   } else if(x_sw && y_sw) {
+   } else if(x_sw > 0 && y_sw > 0) {
       secure_vector<word> workspace(z.size());
 
       bigint_mul(z.mutable_data(),
@@ -81,7 +92,7 @@ BigInt operator*(const BigInt& x, word y) {
 
    BigInt z = BigInt::with_capacity(x_sw + 1);
 
-   if(x_sw && y) {
+   if(x_sw > 0 && y > 0) {
       bigint_linmul3(z.mutable_data(), x._data(), x_sw, y);
       z.set_sign(x.sign());
    }
@@ -93,12 +104,13 @@ BigInt operator*(const BigInt& x, word y) {
 * Division Operator
 */
 BigInt operator/(const BigInt& x, const BigInt& y) {
-   if(y.sig_words() == 1) {
+   if(y.sig_words() == 1 && y.signum() >= 0) {
       return x / y.word_at(0);
    }
 
-   BigInt q, r;
-   vartime_divide(x, y, q, r);
+   BigInt q;
+   BigInt r;
+   ct_divide(x, y, q, r);
    return q;
 }
 
@@ -111,7 +123,7 @@ BigInt operator/(const BigInt& x, word y) {
    }
 
    BigInt q;
-   word r;
+   word r = 0;
    ct_divide_word(x, y, q, r);
    return q;
 }
@@ -123,10 +135,10 @@ BigInt operator%(const BigInt& n, const BigInt& mod) {
    if(mod.is_zero()) {
       throw Invalid_Argument("BigInt::operator% divide by zero");
    }
-   if(mod.is_negative()) {
+   if(mod.signum() < 0) {
       throw Invalid_Argument("BigInt::operator% modulus must be > 0");
    }
-   if(n.is_positive() && mod.is_positive() && n < mod) {
+   if(n.signum() >= 0 && mod.signum() >= 0 && n < mod) {
       return n;
    }
 
@@ -134,8 +146,9 @@ BigInt operator%(const BigInt& n, const BigInt& mod) {
       return BigInt::from_word(n % mod.word_at(0));
    }
 
-   BigInt q, r;
-   vartime_divide(n, mod, q, r);
+   BigInt q;
+   BigInt r;
+   ct_divide(n, mod, q, r);
    return r;
 }
 
@@ -153,16 +166,17 @@ word operator%(const BigInt& n, word mod) {
 
    word remainder = 0;
 
-   if(is_power_of_2(mod)) {
+   if(n.signum() >= 0 && is_power_of_2(mod)) {
       remainder = (n.word_at(0) & (mod - 1));
    } else {
+      const auto redc_mod = divide_precomp<word>::setup_vartime(mod);
       const size_t sw = n.sig_words();
       for(size_t i = sw; i > 0; --i) {
-         remainder = bigint_modop_vartime(remainder, n.word_at(i - 1), mod);
+         remainder = redc_mod.mod_2to1(remainder, n.word_at(i - 1));
       }
    }
 
-   if(remainder && n.sign() == BigInt::Negative) {
+   if(remainder != 0 && n.sign() == BigInt::Negative) {
       return mod - remainder;
    }
    return remainder;
@@ -172,11 +186,19 @@ word operator%(const BigInt& n, word mod) {
 * Left Shift Operator
 */
 BigInt operator<<(const BigInt& x, size_t shift) {
+   if(shift >= 65536) {
+      throw Invalid_Argument("BigInt left shift count too large");
+   }
+
+   if(x.is_zero()) {
+      return BigInt::zero();
+   }
+
    const size_t x_sw = x.sig_words();
 
-   const size_t new_size = x_sw + (shift + BOTAN_MP_WORD_BITS - 1) / BOTAN_MP_WORD_BITS;
+   const size_t new_size = x_sw + shift / WordInfo<word>::bits + 1;
    BigInt y = BigInt::with_capacity(new_size);
-   bigint_shl2(y.mutable_data(), x._data(), x_sw, shift);
+   bigint_shl2(y.mutable_data(), new_size, x._data(), x_sw, shift);
    y.set_sign(x.sign());
    return y;
 }
@@ -185,17 +207,18 @@ BigInt operator<<(const BigInt& x, size_t shift) {
 * Right Shift Operator
 */
 BigInt operator>>(const BigInt& x, size_t shift) {
-   const size_t shift_words = shift / BOTAN_MP_WORD_BITS;
+   const size_t shift_words = shift / WordInfo<word>::bits;
    const size_t x_sw = x.sig_words();
 
    if(shift_words >= x_sw) {
       return BigInt::zero();
    }
 
-   BigInt y = BigInt::with_capacity(x_sw - shift_words);
-   bigint_shr2(y.mutable_data(), x._data(), x_sw, shift);
+   const size_t new_size = x_sw - shift_words;
+   BigInt y = BigInt::with_capacity(new_size);
+   bigint_shr2(y.mutable_data(), new_size, x._data(), x_sw, shift);
 
-   if(x.is_negative() && y.is_zero()) {
+   if(x.signum() < 0 && y.is_zero()) {
       y.set_sign(BigInt::Positive);
    } else {
       y.set_sign(x.sign());

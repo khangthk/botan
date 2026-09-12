@@ -18,42 +18,60 @@ namespace Botan {
 
 class RandomNumberGenerator;
 
+/**
+* A universally unique identifier (UUID)
+*/
 class BOTAN_UNSTABLE_API UUID final {
    public:
       /**
       * Create an uninitialized UUID object
       */
-      UUID() : m_uuid() {}
+      UUID() = default;
 
       /**
       * Create a random UUID
       */
-      UUID(RandomNumberGenerator& rng);
+      BOTAN_FUTURE_EXPLICIT UUID(RandomNumberGenerator& rng);
 
       /**
       * Load a UUID from a 16 byte vector
       */
-      UUID(const std::vector<uint8_t>& blob);
-
-      UUID& operator=(const UUID& other) = default;
-      UUID(const UUID& other) = default;
+      BOTAN_FUTURE_EXPLICIT UUID(const std::vector<uint8_t>& blob);
 
       /**
       * Decode a UUID string
       */
-      UUID(std::string_view uuid_str);
+      BOTAN_FUTURE_EXPLICIT UUID(std::string_view uuid_str);
 
       /**
       * Convert the UUID to a string
       */
       std::string to_string() const;
 
+      /**
+      * Access the raw bytes of the UUID
+      * @return the 16 byte binary value, or an empty vector if uninitialized
+      */
       const std::vector<uint8_t>& binary_value() const { return m_uuid; }
 
+      /**
+      * Compare two UUIDs for equality
+      * @param other the UUID to compare against
+      * @return true if the two UUIDs are equal
+      */
       bool operator==(const UUID& other) const { return m_uuid == other.m_uuid; }
 
+      /**
+      * Compare two UUIDs for inequality
+      * @param other the UUID to compare against
+      * @return true if the two UUIDs are not equal
+      */
       bool operator!=(const UUID& other) const { return !(*this == other); }
 
+      /**
+      * Test whether this UUID was initialized
+      * @return true if this object holds a 16 byte UUID
+      */
       bool is_valid() const { return m_uuid.size() == 16; }
 
    private:

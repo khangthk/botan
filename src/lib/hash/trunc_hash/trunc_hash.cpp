@@ -8,8 +8,11 @@
 
 #include <botan/internal/trunc_hash.h>
 
+#include <botan/assert.h>
 #include <botan/exceptn.h>
+#include <botan/mem_ops.h>
 #include <botan/internal/fmt.h>
+#include <algorithm>
 
 namespace Botan {
 
@@ -24,7 +27,7 @@ void Truncated_Hash::final_result(std::span<uint8_t> out) {
 
    // truncate output to a full number of bytes
    const auto bytes = output_length();
-   std::copy_n(m_buffer.begin(), bytes, out.data());
+   copy_mem(out.data(), m_buffer.data(), bytes);
    zeroise(m_buffer);
 
    // mask the unwanted bits in the final byte
@@ -36,6 +39,10 @@ void Truncated_Hash::final_result(std::span<uint8_t> out) {
 
 size_t Truncated_Hash::output_length() const {
    return (m_output_bits + 7) / 8;
+}
+
+size_t Truncated_Hash::security_level() const {
+   return std::min(m_output_bits / 2, m_hash->security_level());
 }
 
 std::string Truncated_Hash::name() const {
@@ -55,16 +62,18 @@ void Truncated_Hash::clear() {
 }
 
 Truncated_Hash::Truncated_Hash(std::unique_ptr<HashFunction> hash, size_t bits) :
-      m_hash(std::move(hash)), m_output_bits(bits), m_buffer(m_hash->output_length()) {
+      m_hash(std::move(hash)), m_output_bits(bits) {
    BOTAN_ASSERT_NONNULL(m_hash);
 
    if(m_output_bits == 0) {
       throw Invalid_Argument("Truncating a hash to 0 does not make sense");
    }
 
-   if(m_hash->output_length() * 8 < m_output_bits) {
+   const size_t hash_output_length = m_hash->output_length();
+   if(hash_output_length * 8 < m_output_bits) {
       throw Invalid_Argument("Underlying hash function does not produce enough bytes for truncation");
    }
+   m_buffer.resize(hash_output_length);
 }
 
 }  // namespace Botan

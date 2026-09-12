@@ -39,6 +39,7 @@ class Secp256k1Rep final {
 };
 
 // clang-format off
+
 class Params final : public EllipticCurveParameters<
    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
    "0",
@@ -49,16 +50,14 @@ class Params final : public EllipticCurveParameters<
 };
 
 // clang-format on
-#if BOTAN_MP_WORD_BITS == 64
-typedef EllipticCurve<Params, Secp256k1Rep> Secp256k1Base;
-#else
-typedef EllipticCurve<Params> Secp256k1Base;
-#endif
+
+using Secp256k1Base =
+   std::conditional_t<WordInfo<word>::bits >= 33, EllipticCurve<Params, Secp256k1Rep>, EllipticCurve<Params>>;
 
 class Curve final : public Secp256k1Base {
    public:
       // Return the square of the inverse of x
-      static FieldElement fe_invert2(const FieldElement& x) {
+      static constexpr FieldElement fe_invert2(const FieldElement& x) {
          auto z = x.square();
          z *= x;
          auto t0 = z;
@@ -99,7 +98,46 @@ class Curve final : public Secp256k1Base {
          return z;
       }
 
-      static Scalar scalar_invert(const Scalar& x) {
+      static constexpr FieldElement fe_sqrt(const FieldElement& x) {
+         auto z = x.square();
+         z *= x;
+         auto t0 = z;
+         t0.square_n(2);
+         t0 *= z;
+         auto t1 = t0.square();
+         auto t2 = t1 * x;
+         t1 = t2;
+         t1.square_n(2);
+         t1 *= z;
+         auto t3 = t1;
+         t3.square_n(4);
+         t0 *= t3;
+         t3 = t0;
+         t3.square_n(11);
+         t0 *= t3;
+         t3 = t0;
+         t3.square_n(5);
+         t2 *= t3;
+         t3 = t2;
+         t3.square_n(27);
+         t2 *= t3;
+         t3 = t2;
+         t3.square_n(54);
+         t2 *= t3;
+         t3 = t2;
+         t3.square_n(108);
+         t2 *= t3;
+         t2.square_n(7);
+         t1 *= t2;
+         t1.square_n(23);
+         t0 *= t1;
+         t0.square_n(6);
+         z *= t0;
+         z.square_n(2);
+         return z;
+      }
+
+      static constexpr Scalar scalar_invert(const Scalar& x) {
          auto z = x.square();
          auto t2 = x * z;
          auto t6 = t2 * z;

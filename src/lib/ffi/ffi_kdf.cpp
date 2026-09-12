@@ -6,6 +6,7 @@
 
 #include <botan/ffi.h>
 
+#include <botan/assert.h>
 #include <botan/kdf.h>
 #include <botan/pwdhash.h>
 #include <botan/internal/ffi_rng.h>
@@ -60,7 +61,13 @@ int botan_pwdhash(const char* algo,
                   size_t password_len,
                   const uint8_t salt[],
                   size_t salt_len) {
-   if(algo == nullptr || password == nullptr) {
+   if(any_null_pointers(algo, password)) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   if(out_len > 0 && out == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   if(salt_len > 0 && salt == nullptr) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
 
@@ -94,7 +101,13 @@ int botan_pwdhash_timed(const char* algo,
                         size_t password_len,
                         const uint8_t salt[],
                         size_t salt_len) {
-   if(algo == nullptr || password == nullptr) {
+   if(any_null_pointers(algo, password)) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   if(out_len > 0 && out == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   if(salt_len > 0 && salt == nullptr) {
       return BOTAN_FFI_ERROR_NULL_POINTER;
    }
 
@@ -109,15 +122,15 @@ int botan_pwdhash_timed(const char* algo,
          return BOTAN_FFI_ERROR_NOT_IMPLEMENTED;
       }
 
-      auto pwdhash = pwdhash_fam->tune(out_len, std::chrono::milliseconds(msec));
+      auto pwdhash = pwdhash_fam->tune_params(out_len, msec);
 
-      if(param1) {
+      if(param1 != nullptr) {
          *param1 = pwdhash->iterations();
       }
-      if(param2) {
+      if(param2 != nullptr) {
          *param2 = pwdhash->parallelism();
       }
-      if(param3) {
+      if(param3 != nullptr) {
          *param3 = pwdhash->memory_param();
       }
 
@@ -136,6 +149,13 @@ int botan_kdf(const char* kdf_algo,
               size_t salt_len,
               const uint8_t label[],
               size_t label_len) {
+   if(kdf_algo == nullptr) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
+   if((out_len > 0 && out == nullptr) || (secret_len > 0 && secret == nullptr) || (salt_len > 0 && salt == nullptr) ||
+      (label_len > 0 && label == nullptr)) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
    return ffi_guard_thunk(__func__, [=]() -> int {
       auto kdf = Botan::KDF::create_or_throw(kdf_algo);
       kdf->kdf(out, out_len, secret, secret_len, salt, salt_len, label, label_len);
@@ -158,7 +178,7 @@ int botan_bcrypt_generate(
    uint8_t* out, size_t* out_len, const char* pass, botan_rng_t rng_obj, size_t wf, uint32_t flags) {
 #if defined(BOTAN_HAS_BCRYPT)
    return ffi_guard_thunk(__func__, [=]() -> int {
-      if(out == nullptr || out_len == nullptr || pass == nullptr) {
+      if(any_null_pointers(out, out_len, pass)) {
          return BOTAN_FFI_ERROR_NULL_POINTER;
       }
 
@@ -177,7 +197,8 @@ int botan_bcrypt_generate(
 
       Botan::RandomNumberGenerator& rng = safe_get(rng_obj);
       const std::string bcrypt = Botan::generate_bcrypt(pass, rng, static_cast<uint16_t>(wf));
-      return write_str_output(out, out_len, bcrypt);
+      // TODO(Botan4) change the type of out and remove this cast
+      return write_str_output(reinterpret_cast<char*>(out), out_len, bcrypt);
    });
 #else
    BOTAN_UNUSED(out, out_len, pass, rng_obj, wf, flags);
@@ -186,6 +207,9 @@ int botan_bcrypt_generate(
 }
 
 int botan_bcrypt_is_valid(const char* pass, const char* hash) {
+   if(any_null_pointers(pass, hash)) {
+      return BOTAN_FFI_ERROR_NULL_POINTER;
+   }
 #if defined(BOTAN_HAS_BCRYPT)
    return ffi_guard_thunk(__func__, [=]() -> int {
       return Botan::check_bcrypt(pass, hash) ? BOTAN_FFI_SUCCESS : BOTAN_FFI_INVALID_VERIFIER;

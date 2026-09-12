@@ -6,23 +6,50 @@
 * Botan is released under the Simplified BSD License (see license.txt)
 */
 
-#include <botan/tls_messages.h>
-
-#include <botan/rng.h>
-#include <botan/tls_extensions.h>
+#include <botan/tls_messages_12.h>
 
 #include <botan/credentials_manager.h>
+#include <botan/dl_group.h>
+#include <botan/rng.h>
+#include <botan/rsa.h>
+#include <botan/tls_callbacks.h>
+#include <botan/tls_extensions.h>
+#include <botan/tls_policy.h>
 #include <botan/internal/ct_utils.h>
+#include <botan/internal/fmt.h>
 #include <botan/internal/stl_util.h>
 #include <botan/internal/tls_handshake_hash.h>
 #include <botan/internal/tls_handshake_io.h>
 #include <botan/internal/tls_handshake_state.h>
 #include <botan/internal/tls_reader.h>
 
-#include <botan/ecdh.h>
-#include <botan/rsa.h>
-
 namespace Botan::TLS {
+
+namespace {
+
+/*
+* If the (p, g) pair the server sent corresponds to a known group
+* (RFC 7919 or RFC 3526), return that group.
+*/
+std::optional<DL_Group> match_well_known_dh_group(const BigInt& p, const BigInt& g) {
+   const size_t p_bits = p.bits();
+
+   if(p_bits != 2048 && p_bits != 3072 && p_bits != 4096 && p_bits != 6144 && p_bits != 8192) {
+      return {};
+   }
+
+   for(const char* prefix : {"ffdhe/ietf", "modp/ietf"}) {
+      const std::string name = fmt("{}/{}", prefix, p_bits);
+      auto candidate = DL_Group::from_name(name);
+      if(candidate.get_p() == p && candidate.get_g() == g) {
+         return candidate;
+      }
+   }
+
+   return std::nullopt;
+}
+
+}  // namespace
 
 /*
 * Create a new Client Key Exchange message
@@ -39,34 +66,42 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
    if(kex_algo == Kex_Algo::PSK) {
       std::string identity_hint;
 
-      if(state.server_kex()) {
+      if(state.server_kex() != nullptr) {
          TLS_Data_Reader reader("ClientKeyExchange", state.server_kex()->params());
          identity_hint = reader.get_string(2, 0, 65535);
       }
 
       m_psk_identity = creds.psk_identity("tls-client", std::string(hostname), identity_hint);
 
-      append_tls_length_value(m_key_material, to_byte_vector(m_psk_identity.value()), 2);
+      append_tls_length_value(m_key_material, as_span_of_bytes(m_psk_identity.value()), 2);
 
-      SymmetricKey psk = creds.psk("tls-client", std::string(hostname), m_psk_identity.value());
+      const SymmetricKey psk = creds.psk("tls-client", std::string(hostname), m_psk_identity.value());
 
-      std::vector<uint8_t> zeros(psk.length());
+      if(psk.empty()) {
+         throw TLS_Exception(Alert::InternalError, "Application did not provide a PSK for the negotiated identity");
+      }
+
+      const std::vector<uint8_t> zeros(psk.length());
 
       append_tls_length_value(m_pre_master, zeros, 2);
       append_tls_length_value(m_pre_master, psk.bits_of(), 2);
-   } else if(state.server_kex()) {
+   } else if(state.server_kex() != nullptr) {
       TLS_Data_Reader reader("ClientKeyExchange", state.server_kex()->params());
 
       SymmetricKey psk;
 
       if(kex_algo == Kex_Algo::ECDHE_PSK) {
-         std::string identity_hint = reader.get_string(2, 0, 65535);
+         const std::string identity_hint = reader.get_string(2, 0, 65535);
 
          m_psk_identity = creds.psk_identity("tls-client", std::string(hostname), identity_hint);
 
-         append_tls_length_value(m_key_material, to_byte_vector(m_psk_identity.value()), 2);
+         append_tls_length_value(m_key_material, as_span_of_bytes(m_psk_identity.value()), 2);
 
          psk = creds.psk("tls-client", std::string(hostname), m_psk_identity.value());
+
+         if(psk.empty()) {
+            throw TLS_Exception(Alert::InternalError, "Application did not provide a PSK for the negotiated identity");
+         }
       }
 
       if(kex_algo == Kex_Algo::DH) {
@@ -74,27 +109,36 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
          const auto generator = BigInt::from_bytes(reader.get_range<uint8_t>(2, 1, 65535));
          const std::vector<uint8_t> peer_public_value = reader.get_range<uint8_t>(2, 1, 65535);
 
-         if(reader.remaining_bytes()) {
+         if(reader.remaining_bytes() > 0) {
             throw Decoding_Error("Bad params size for DH key exchange");
          }
 
-         DL_Group group(modulus, generator);
-
-         if(!group.verify_group(rng, false)) {
-            throw TLS_Exception(Alert::InsufficientSecurity, "DH group validation failed");
+         if(modulus.bits() < policy.minimum_dh_group_size()) {
+            throw TLS_Exception(Alert::InsufficientSecurity, "DH prime too small for policy");
          }
+         if(modulus.bits() > policy.maximum_dh_group_size()) {
+            throw TLS_Exception(Alert::IllegalParameter, "DH prime too large for policy");
+         }
+
+         const auto group = [&] {
+            if(auto matched = match_well_known_dh_group(modulus, generator)) {
+               return std::move(*matched);
+            } else {
+               /*
+               * Even if we sent ffdhe groups in the supported_groups extension
+               * a server may have replied with some other group.
+               */
+               DL_Group ad_hoc(modulus, generator);
+               if(!ad_hoc.verify_group(rng, false)) {
+                  throw TLS_Exception(Alert::InsufficientSecurity, "DH group validation failed");
+               }
+               return ad_hoc;
+            }
+         }();
 
          const auto private_key = state.callbacks().tls_generate_ephemeral_key(group, rng);
-         auto shared_secret = CT::strip_leading_zeros(
+         m_pre_master = CT::strip_leading_zeros(
             state.callbacks().tls_ephemeral_key_agreement(group, *private_key, peer_public_value, rng, policy));
-
-         if(kex_algo == Kex_Algo::DH) {
-            m_pre_master = std::move(shared_secret);
-         } else {
-            append_tls_length_value(m_pre_master, shared_secret, 2);
-            append_tls_length_value(m_pre_master, psk.bits_of(), 2);
-         }
-
          append_tls_length_value(m_key_material, private_key->public_value(), 2);
       } else if(kex_algo == Kex_Algo::ECDH || kex_algo == Kex_Algo::ECDHE_PSK) {
          const uint8_t curve_type = reader.get_byte();
@@ -106,26 +150,40 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
          const std::vector<uint8_t> peer_public_value = reader.get_range<uint8_t>(1, 1, 255);
 
          if(!curve_id.is_ecdh_named_curve() && !curve_id.is_x25519() && !curve_id.is_x448()) {
-            throw TLS_Exception(Alert::HandshakeFailure,
+            throw TLS_Exception(Alert::IllegalParameter,
                                 "Server selected a group that is not compatible with the negotiated ciphersuite");
+         }
+
+         // RFC 8422 5.1: the server MUST select a curve from the
+         // supported_groups list the client offered. Check against the actual
+         // offered list (which may be a strict subset of the policy's
+         // key_exchange_groups() if the application narrowed it via
+         // tls_modify_extensions) rather than just the policy.
+         if(!value_exists(state.client_hello()->supported_ecc_curves(), curve_id)) {
+            throw TLS_Exception(Alert::IllegalParameter, "Server selected a curve we did not offer");
          }
 
          if(policy.choose_key_exchange_group({curve_id}, {}) != curve_id) {
             throw TLS_Exception(Alert::HandshakeFailure, "Server sent ECC curve prohibited by policy");
          }
 
-         const auto private_key = state.callbacks().tls_generate_ephemeral_key(curve_id, rng);
+         const auto private_key = [&] {
+            if(curve_id.is_ecdh_named_curve()) {
+               const auto pubkey_point_format = state.server_hello()->prefers_compressed_ec_points()
+                                                   ? EC_Point_Format::Compressed
+                                                   : EC_Point_Format::Uncompressed;
+               return state.callbacks().tls12_generate_ephemeral_ecdh_key(curve_id, rng, pubkey_point_format);
+            } else {
+               return state.callbacks().tls_generate_ephemeral_key(curve_id, rng);
+            }
+         }();
+
+         if(!private_key) {
+            throw TLS_Exception(Alert::InternalError, "Application did not provide an EC key");
+         }
+
          auto shared_secret =
             state.callbacks().tls_ephemeral_key_agreement(curve_id, *private_key, peer_public_value, rng, policy);
-
-         // RFC 8422 - 5.11.
-         //   With X25519 and X448, a receiving party MUST check whether the
-         //   computed premaster secret is the all-zero value and abort the
-         //   handshake if so, as described in Section 6 of [RFC7748].
-         if((curve_id == Group_Params::X25519 || curve_id == Group_Params::X448) &&
-            CT::all_zeros(shared_secret.data(), shared_secret.size()).as_bool()) {
-            throw TLS_Exception(Alert::DecryptError, "Bad X25519 or X448 key exchange");
-         }
 
          if(kex_algo == Kex_Algo::ECDH) {
             m_pre_master = std::move(shared_secret);
@@ -134,19 +192,10 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
             append_tls_length_value(m_pre_master, psk.bits_of(), 2);
          }
 
-         if(curve_id.is_ecdh_named_curve()) {
-            auto ecdh_key = dynamic_cast<ECDH_PublicKey*>(private_key.get());
-            if(!ecdh_key) {
-               throw TLS_Exception(Alert::InternalError, "Application did not provide a ECDH_PublicKey");
-            }
-            append_tls_length_value(m_key_material,
-                                    ecdh_key->public_value(state.server_hello()->prefers_compressed_ec_points()
-                                                              ? EC_Point_Format::Compressed
-                                                              : EC_Point_Format::Uncompressed),
-                                    1);
-         } else {
-            append_tls_length_value(m_key_material, private_key->public_value(), 1);
-         }
+         // Note: In contrast to public_value(), raw_public_key_bits() takes the
+         // point format (compressed vs. uncompressed) into account that was set
+         // in its construction within tls_generate_ephemeral_key().
+         append_tls_length_value(m_key_material, private_key->raw_public_key_bits(), 1);
       } else {
          throw Internal_Error("Client_Key_Exchange: Unknown key exchange method was negotiated");
       }
@@ -159,18 +208,18 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
          throw Unexpected_Message("No server kex message, but negotiated a key exchange that required it");
       }
 
-      if(!server_public_key) {
+      if(server_public_key == nullptr) {
          throw Internal_Error("No server public key for RSA exchange");
       }
 
-      if(auto rsa_pub = dynamic_cast<const RSA_PublicKey*>(server_public_key)) {
+      if(const auto* rsa_pub = dynamic_cast<const RSA_PublicKey*>(server_public_key)) {
          const Protocol_Version offered_version = state.client_hello()->legacy_version();
 
          rng.random_vec(m_pre_master, 48);
          m_pre_master[0] = offered_version.major_version();
          m_pre_master[1] = offered_version.minor_version();
 
-         PK_Encryptor_EME encryptor(*rsa_pub, rng, "PKCS1v15");
+         const PK_Encryptor_EME encryptor(*rsa_pub, rng, "PKCS1v15");
 
          const std::vector<uint8_t> encrypted_key = encryptor.encrypt(m_pre_master, rng);
 
@@ -187,7 +236,7 @@ Client_Key_Exchange::Client_Key_Exchange(Handshake_IO& io,
 /*
 * Read a Client Key Exchange message
 */
-Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
+Client_Key_Exchange::Client_Key_Exchange(std::span<const uint8_t> contents,
                                          const Handshake_State& state,
                                          const Private_Key* server_rsa_kex_key,
                                          Credentials_Manager& creds,
@@ -199,7 +248,7 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
       BOTAN_ASSERT(state.server_certs() && !state.server_certs()->cert_chain().empty(),
                    "RSA key exchange negotiated so server sent a certificate");
 
-      if(!server_rsa_kex_key) {
+      if(server_rsa_kex_key == nullptr) {
          throw Internal_Error("Expected RSA kex but no server kex key set");
       }
 
@@ -208,10 +257,11 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
       }
 
       TLS_Data_Reader reader("ClientKeyExchange", contents);
-      const std::vector<uint8_t> encrypted_pre_master = reader.get_range<uint8_t>(2, 0, 65535);
+      // RFC 5246 7.4.7.1: encrypted_pre_master_secret<1..2^16-1>.
+      const std::vector<uint8_t> encrypted_pre_master = reader.get_range<uint8_t>(2, 1, 65535);
       reader.assert_done();
 
-      PK_Decryptor_EME decryptor(*server_rsa_kex_key, rng, "PKCS1v15");
+      const PK_Decryptor_EME decryptor(*server_rsa_kex_key, rng, "PKCS1v15");
 
       const uint8_t client_major = state.client_hello()->legacy_version().major_version();
       const uint8_t client_minor = state.client_hello()->legacy_version().minor_version();
@@ -242,7 +292,12 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
       if(key_exchange_is_psk(kex_algo)) {
          m_psk_identity = reader.get_string(2, 0, 65535);
 
-         psk = creds.psk("tls-server", state.client_hello()->sni_hostname(), m_psk_identity.value());
+         try {
+            psk = creds.psk("tls-server", state.client_hello()->sni_hostname(), m_psk_identity.value());
+         } catch(...) {
+            // Treat any lookup failure for the identity sent by the client as
+            // "no PSK for this identity" and let the logic below handle it
+         }
 
          if(psk.empty()) {
             if(policy.hide_unknown_users()) {
@@ -254,14 +309,15 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
       }
 
       if(kex_algo == Kex_Algo::PSK) {
-         std::vector<uint8_t> zeros(psk.length());
+         reader.assert_done();
+         const std::vector<uint8_t> zeros(psk.length());
          append_tls_length_value(m_pre_master, zeros, 2);
          append_tls_length_value(m_pre_master, psk.bits_of(), 2);
       } else if(kex_algo == Kex_Algo::DH || kex_algo == Kex_Algo::ECDH || kex_algo == Kex_Algo::ECDHE_PSK) {
          const PK_Key_Agreement_Key& ka_key = state.server_kex()->server_kex_key();
 
          const std::vector<uint8_t> client_pubkey = (ka_key.algo_name() == "DH")
-                                                       ? reader.get_range<uint8_t>(2, 0, 65535)
+                                                       ? reader.get_range<uint8_t>(2, 1, 65535)
                                                        : reader.get_range<uint8_t>(1, 1, 255);
 
          const auto shared_group = state.server_kex()->shared_group();
@@ -275,19 +331,6 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
                shared_secret = CT::strip_leading_zeros(shared_secret);
             }
 
-            if(kex_algo == Kex_Algo::ECDH || kex_algo == Kex_Algo::ECDHE_PSK) {
-               // RFC 8422 - 5.11.
-               //   With X25519 and X448, a receiving party MUST check whether the
-               //   computed premaster secret is the all-zero value and abort the
-               //   handshake if so, as described in Section 6 of [RFC7748].
-               BOTAN_ASSERT_NOMSG(state.server_kex()->params().size() >= 3);
-               Group_Params group = static_cast<Group_Params>(state.server_kex()->params().at(2));
-               if((group == Group_Params::X25519 || group == Group_Params::X448) &&
-                  CT::all_zeros(shared_secret.data(), shared_secret.size()).as_bool()) {
-                  throw TLS_Exception(Alert::DecryptError, "Bad X25519 or X448 key exchange");
-               }
-            }
-
             if(kex_algo == Kex_Algo::ECDHE_PSK) {
                append_tls_length_value(m_pre_master, shared_secret, 2);
                append_tls_length_value(m_pre_master, psk.bits_of(), 2);
@@ -296,9 +339,8 @@ Client_Key_Exchange::Client_Key_Exchange(const std::vector<uint8_t>& contents,
             }
          } catch(Invalid_Argument& e) {
             throw TLS_Exception(Alert::IllegalParameter, e.what());
-         } catch(TLS_Exception& e) {
-            // NOLINTNEXTLINE(cert-err60-cpp)
-            throw e;
+         } catch(TLS_Exception&) {
+            throw;  // rethrow
          } catch(std::exception&) {
             /*
             * Something failed in the DH/ECDH computation. To avoid possible

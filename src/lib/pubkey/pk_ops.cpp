@@ -7,13 +7,15 @@
 
 #include <botan/internal/pk_ops_impl.h>
 
+#include <botan/assert.h>
 #include <botan/hash.h>
+#include <botan/kdf.h>
 #include <botan/rng.h>
-#include <botan/internal/bit_ops.h>
+#include <botan/internal/ct_utils.h>
+#include <botan/internal/enc_padding.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/parsing.h>
-#include <botan/internal/scan_name.h>
-#include <sstream>
+#include <botan/internal/pk_options_impl.h>
 
 #if defined(BOTAN_HAS_RAW_HASH_FN)
    #include <botan/internal/raw_hash.h>
@@ -25,26 +27,36 @@ AlgorithmIdentifier PK_Ops::Signature::algorithm_identifier() const {
    throw Not_Implemented("This signature scheme does not have an algorithm identifier available");
 }
 
-PK_Ops::Encryption_with_EME::Encryption_with_EME(std::string_view eme) : m_eme(EME::create(eme)) {}
+PK_Ops::Encryption_with_Padding::Encryption_with_Padding(std::string_view padding) :
+      m_padding(EncryptionPaddingScheme::create(padding)) {}
 
-size_t PK_Ops::Encryption_with_EME::max_input_bits() const {
-   return 8 * m_eme->maximum_input_size(max_ptext_input_bits());
+PK_Ops::Encryption_with_Padding::~Encryption_with_Padding() = default;
+
+size_t PK_Ops::Encryption_with_Padding::max_input_bits() const {
+   return 8 * m_padding->maximum_input_size(max_ptext_input_bits());
 }
 
-std::vector<uint8_t> PK_Ops::Encryption_with_EME::encrypt(std::span<const uint8_t> msg, RandomNumberGenerator& rng) {
-   const size_t max_raw = max_ptext_input_bits();
-   secure_vector<uint8_t> eme_output((max_raw + 7) / 8);
-   size_t written = m_eme->pad(eme_output, msg, max_raw, rng);
-   return raw_encrypt(std::span{eme_output}.first(written), rng);
+std::vector<uint8_t> PK_Ops::Encryption_with_Padding::encrypt(std::span<const uint8_t> msg,
+                                                              RandomNumberGenerator& rng) {
+   const size_t max_input_bits = max_ptext_input_bits();
+   const size_t max_input_bytes = (max_input_bits + 7) / 8;
+   BOTAN_ARG_CHECK(msg.size() <= max_input_bytes, "Plaintext too large");
+
+   secure_vector<uint8_t> padded_ptext(max_input_bytes);
+   const size_t written = m_padding->pad(padded_ptext, msg, max_input_bits, rng);
+   return raw_encrypt(std::span{padded_ptext}.first(written), rng);
 }
 
-PK_Ops::Decryption_with_EME::Decryption_with_EME(std::string_view eme) : m_eme(EME::create(eme)) {}
+PK_Ops::Decryption_with_Padding::Decryption_with_Padding(std::string_view padding) :
+      m_padding(EncryptionPaddingScheme::create(padding)) {}
 
-secure_vector<uint8_t> PK_Ops::Decryption_with_EME::decrypt(uint8_t& valid_mask, std::span<const uint8_t> ctext) {
+PK_Ops::Decryption_with_Padding::~Decryption_with_Padding() = default;
+
+secure_vector<uint8_t> PK_Ops::Decryption_with_Padding::decrypt(uint8_t& valid_mask, std::span<const uint8_t> ctext) {
    const secure_vector<uint8_t> raw = raw_decrypt(ctext);
 
    secure_vector<uint8_t> ptext(raw.size());
-   auto len = m_eme->unpad(ptext, raw);
+   auto len = m_padding->unpad(ptext, raw);
 
    valid_mask = CT::Mask<uint8_t>::from_choice(len.has_value()).if_set_return(0xFF);
 
@@ -68,6 +80,8 @@ PK_Ops::Key_Agreement_with_KDF::Key_Agreement_with_KDF(std::string_view kdf) {
    }
 }
 
+PK_Ops::Key_Agreement_with_KDF::~Key_Agreement_with_KDF() = default;
+
 secure_vector<uint8_t> PK_Ops::Key_Agreement_with_KDF::agree(size_t key_len,
                                                              std::span<const uint8_t> other_key,
                                                              std::span<const uint8_t> salt) {
@@ -84,40 +98,41 @@ secure_vector<uint8_t> PK_Ops::Key_Agreement_with_KDF::agree(size_t key_len,
 
 namespace {
 
-std::unique_ptr<HashFunction> create_signature_hash(std::string_view padding) {
-   if(auto hash = HashFunction::create(padding)) {
-      return hash;
-   }
-
-   SCAN_Name req(padding);
-
-   if(req.algo_name() == "EMSA1" && req.arg_count() == 1) {
-      if(auto hash = HashFunction::create(req.arg(0))) {
-         return hash;
-      }
-   }
-
+std::unique_ptr<HashFunction> validate_options_returning_hash(const PK_Signature_Options& options) {
+   // The caller provides the digest; if they named the hash, its length is checked
+   if(options.using_externally_computed_prehash()) {
 #if defined(BOTAN_HAS_RAW_HASH_FN)
-   if(req.algo_name() == "Raw") {
-      if(req.arg_count() == 0) {
-         return std::make_unique<RawHashFunction>("Raw", 0);
+      if(auto prehash = externally_computed_prehash_name(options)) {
+         return std::make_unique<RawHashFunction>(HashFunction::create_or_throw(*prehash));
       }
+      return std::make_unique<RawHashFunction>("Raw", 0);
+#else
+      throw Lookup_Error("Signing an externally computed prehash requires the raw_hash module");
+#endif
+   }
 
-      if(req.arg_count() == 1) {
-         if(auto hash = HashFunction::create(req.arg(0))) {
-            return std::make_unique<RawHashFunction>(std::move(hash));
-         }
+   BOTAN_ARG_CHECK(!options.hash_function_name().empty(), "This algorithm requires a hash function for signing");
+
+   /*
+   * In a sense ECDSA/DSA are *always* in prehashing mode, so we accept the case
+   * where prehashing is requested as long as the prehash hash matches the signature hash.
+   */
+   if(options.using_prehash()) {
+      if(!options.prehash_function().has_value() ||
+         options.prehash_function().value() != options.hash_function_name()) {
+         throw Invalid_Argument("This algorithm does not support prehashing with a different hash");
       }
    }
-#endif
 
-   throw Algorithm_Not_Found(padding);
+   return HashFunction::create_or_throw(options.hash_function_name());
 }
 
 }  // namespace
 
-PK_Ops::Signature_with_Hash::Signature_with_Hash(std::string_view hash) :
-      Signature(), m_hash(create_signature_hash(hash)) {}
+PK_Ops::Signature_with_Hash::Signature_with_Hash(const PK_Signature_Options& options) :
+      Signature(), m_hash(validate_options_returning_hash(options)) {}
+
+PK_Ops::Signature_with_Hash::~Signature_with_Hash() = default;
 
 #if defined(BOTAN_HAS_RFC6979_GENERATOR)
 std::string PK_Ops::Signature_with_Hash::rfc6979_hash_function() const {
@@ -129,6 +144,10 @@ std::string PK_Ops::Signature_with_Hash::rfc6979_hash_function() const {
 }
 #endif
 
+std::string PK_Ops::Signature_with_Hash::hash_function() const {
+   return m_hash->name();
+}
+
 void PK_Ops::Signature_with_Hash::update(std::span<const uint8_t> msg) {
    m_hash->update(msg);
 }
@@ -138,13 +157,25 @@ std::vector<uint8_t> PK_Ops::Signature_with_Hash::sign(RandomNumberGenerator& rn
    return raw_sign(msg, rng);
 }
 
-PK_Ops::Verification_with_Hash::Verification_with_Hash(std::string_view padding) :
-      Verification(), m_hash(create_signature_hash(padding)) {}
+PK_Ops::Verification_with_Hash::Verification_with_Hash(const PK_Signature_Options& options) :
+      Verification(), m_hash(validate_options_returning_hash(options)) {}
+
+PK_Ops::Verification_with_Hash::~Verification_with_Hash() = default;
+
+std::string PK_Ops::Verification_with_Hash::hash_function() const {
+   return m_hash->name();
+}
 
 PK_Ops::Verification_with_Hash::Verification_with_Hash(const AlgorithmIdentifier& alg_id,
                                                        std::string_view pk_algo,
                                                        bool allow_null_parameters) {
-   const auto oid_info = split_on(alg_id.oid().to_formatted_string(), '/');
+   const auto oid_name = alg_id.oid().registered_name();
+   if(!oid_name) {
+      throw Decoding_Error(
+         fmt("Unexpected AlgorithmIdentifier OID {} in association with {} key", alg_id.oid(), pk_algo));
+   }
+
+   const auto oid_info = split_on(*oid_name, '/');
 
    if(oid_info.size() != 2 || oid_info[0] != pk_algo) {
       throw Decoding_Error(
@@ -208,6 +239,8 @@ PK_Ops::KEM_Encryption_with_KDF::KEM_Encryption_with_KDF(std::string_view kdf) {
    }
 }
 
+PK_Ops::KEM_Encryption_with_KDF::~KEM_Encryption_with_KDF() = default;
+
 size_t PK_Ops::KEM_Decryption_with_KDF::shared_key_length(size_t desired_shared_key_len) const {
    if(m_kdf) {
       return desired_shared_key_len;
@@ -240,5 +273,7 @@ PK_Ops::KEM_Decryption_with_KDF::KEM_Decryption_with_KDF(std::string_view kdf) {
       m_kdf = KDF::create_or_throw(kdf);
    }
 }
+
+PK_Ops::KEM_Decryption_with_KDF::~KEM_Decryption_with_KDF() = default;
 
 }  // namespace Botan

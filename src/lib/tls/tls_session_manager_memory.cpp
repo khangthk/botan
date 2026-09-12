@@ -10,8 +10,9 @@
 
 #include <botan/rng.h>
 #include <botan/internal/stl_util.h>
-
 #include <algorithm>
+#include <functional>
+#include <tuple>
 
 namespace Botan::TLS {
 
@@ -26,8 +27,8 @@ Session_Manager_In_Memory::Session_Manager_In_Memory(const std::shared_ptr<Rando
 void Session_Manager_In_Memory::store(const Session& session, const Session_Handle& handle) {
    // TODO: C++20 allows CTAD for template aliases (read: lock_guard_type), so
    //       technically we should be able to omit the explicit mutex type.
-   //       Unfortuately clang does not agree, yet.
-   lock_guard_type<recursive_mutex_type> lk(mutex());
+   //       Unfortunately clang does not agree, yet.
+   const lock_guard_type<recursive_mutex_type> lk(mutex());
 
    if(m_fifo.has_value()) {
       while(m_sessions.size() >= capacity()) {
@@ -40,7 +41,7 @@ void Session_Manager_In_Memory::store(const Session& session, const Session_Hand
    // Generate a random session ID if the peer did not provide one. Note that
    // this ID is just for internal use and won't be returned on ::find().
    auto id = handle.id().value_or(m_rng->random_vec<Session_ID>(32));
-   m_sessions.emplace(id, Session_with_Handle{session, handle});
+   m_sessions.emplace(id, Stored_Session{Session_with_Handle{session, handle}, m_next_sequence_number++});
 
    if(m_fifo.has_value()) {
       m_fifo->emplace_back(std::move(id));
@@ -48,12 +49,12 @@ void Session_Manager_In_Memory::store(const Session& session, const Session_Hand
 }
 
 std::optional<Session> Session_Manager_In_Memory::retrieve_one(const Session_Handle& handle) {
-   lock_guard_type<recursive_mutex_type> lk(mutex());
+   const lock_guard_type<recursive_mutex_type> lk(mutex());
 
    if(auto id = handle.id()) {
       const auto session = m_sessions.find(id.value());
       if(session != m_sessions.end()) {
-         return session->second.session;
+         return session->second.session_and_handle.session;
       }
    }
 
@@ -64,21 +65,35 @@ std::vector<Session_with_Handle> Session_Manager_In_Memory::find_some(const Serv
                                                                       const size_t max_sessions_hint) {
    BOTAN_UNUSED(max_sessions_hint);
 
-   lock_guard_type<recursive_mutex_type> lk(mutex());
+   const lock_guard_type<recursive_mutex_type> lk(mutex());
+
+   std::vector<std::reference_wrapper<const Stored_Session>> matches;
+   for(const auto& [_, stored] : m_sessions) {
+      if(stored.session_and_handle.session.server_info() == info) {
+         matches.emplace_back(stored);
+      }
+   }
+
+   // Prefer the most recently established session, i.e. the freshest ticket.
+   // Insertion order breaks ties, e.g. between tickets received within the
+   // same connection or from applications with a coarse-grained clock.
+   std::ranges::sort(matches, [](const Stored_Session& a, const Stored_Session& b) {
+      const auto a_start = a.session_and_handle.session.start_time();
+      const auto b_start = b.session_and_handle.session.start_time();
+      return std::tie(a_start, a.sequence_number) > std::tie(b_start, b.sequence_number);
+   });
 
    std::vector<Session_with_Handle> found_sessions;
-   // TODO: std::copy_if?
-   for(const auto& [_, session_and_handle] : m_sessions) {
-      if(session_and_handle.session.server_info() == info) {
-         found_sessions.emplace_back(session_and_handle);
-      }
+   found_sessions.reserve(matches.size());
+   for(const Stored_Session& stored : matches) {
+      found_sessions.emplace_back(stored.session_and_handle);
    }
 
    return found_sessions;
 }
 
 size_t Session_Manager_In_Memory::remove(const Session_Handle& handle) {
-   lock_guard_type<recursive_mutex_type> lk(mutex());
+   const lock_guard_type<recursive_mutex_type> lk(mutex());
    return remove_internal(handle);
 }
 
@@ -91,30 +106,25 @@ size_t Session_Manager_In_Memory::remove_internal(const Session_Handle& handle) 
                            // TODO: This is an O(n) operation. Typically, the Session_Manager will
                            //       not contain a plethora of sessions and this should be fine. If
                            //       it's not, we'll need to consider another index on tickets.
-                           //
-                           // TODO: C++20's std::erase_if should return the number of erased items
-                           //
-                           // Unfortunately, at the time of this writing Android NDK shipped with
-                           // a std::erase_if that returns void. Hence, the workaround.
-                           const auto before = m_sessions.size();
-                           std::erase_if(m_sessions, [&](const auto& item) {
-                              const auto& [_unused1, session_and_handle] = item;
-                              const auto& [_unused2, this_handle] = session_and_handle;
-                              return this_handle.is_ticket() && this_handle.ticket().value() == ticket;
+                           return std::erase_if(m_sessions, [&](const auto& item) {
+                              const auto& [_unused1, stored] = item;
+                              const auto& [_unused2, this_handle] = stored.session_and_handle;
+                              // TLS 1.3 clients store their tickets as Opaque_Session_Handle
+                              const auto this_ticket = this_handle.ticket();
+                              return this_ticket.has_value() && this_ticket.value() == ticket;
                            });
-                           return before - m_sessions.size();
                         },
                         [&](const Session_ID& id) -> size_t { return m_sessions.erase(id); },
                         [&](const Opaque_Session_Handle&) -> size_t {
                            if(auto id = handle.id()) {
-                              auto removed = remove_internal(id.value());
+                              auto removed = remove_internal(Session_Handle(id.value()));
                               if(removed > 0) {
                                  return removed;
                               }
                            }
 
                            if(auto ticket = handle.ticket()) {
-                              return remove_internal(ticket.value());
+                              return remove_internal(Session_Handle(ticket.value()));
                            }
 
                            return 0;
@@ -124,7 +134,7 @@ size_t Session_Manager_In_Memory::remove_internal(const Session_Handle& handle) 
 }
 
 size_t Session_Manager_In_Memory::remove_all() {
-   lock_guard_type<recursive_mutex_type> lk(mutex());
+   const lock_guard_type<recursive_mutex_type> lk(mutex());
 
    const auto sessions = m_sessions.size();
    m_sessions.clear();

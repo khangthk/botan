@@ -17,9 +17,9 @@ namespace Botan_CLI {
 
 class Argument_Parser final {
    public:
-      Argument_Parser(const std::string& spec,
-                      const std::vector<std::string>& extra_flags = {},
-                      const std::vector<std::string>& extra_opts = {});
+      explicit Argument_Parser(const std::string& spec,
+                               const std::vector<std::string>& extra_flags = {},
+                               const std::vector<std::string>& extra_opts = {});
 
       void parse_args(const std::vector<std::string>& params);
 
@@ -31,6 +31,8 @@ class Argument_Parser final {
       std::string get_arg_or(const std::string& option, const std::string& otherwise) const;
 
       size_t get_arg_sz(const std::string& option) const;
+
+      size_t get_arg_hex_sz_or(const std::string& opt_name, const std::string& otherwise) const;
 
       std::vector<std::string> get_arg_list(const std::string& what) const;
 
@@ -49,21 +51,21 @@ class Argument_Parser final {
       std::vector<std::string> m_user_rest;
 };
 
-std::vector<std::string> Argument_Parser::split_on(const std::string& str, char delim) {
+inline std::vector<std::string> Argument_Parser::split_on(const std::string& str, char delim) {
    std::vector<std::string> elems;
    if(str.empty()) {
       return elems;
    }
 
    std::string substr;
-   for(auto i = str.begin(); i != str.end(); ++i) {
-      if(*i == delim) {
+   for(const char c : str) {
+      if(c == delim) {
          if(!substr.empty()) {
             elems.push_back(substr);
          }
          substr.clear();
       } else {
-         substr += *i;
+         substr += c;
       }
    }
 
@@ -75,15 +77,15 @@ std::vector<std::string> Argument_Parser::split_on(const std::string& str, char 
    return elems;
 }
 
-bool Argument_Parser::flag_set(const std::string& flag_name) const {
+inline bool Argument_Parser::flag_set(const std::string& flag_name) const {
    return m_user_flags.contains(flag_name);
 }
 
-bool Argument_Parser::has_arg(const std::string& opt_name) const {
+inline bool Argument_Parser::has_arg(const std::string& opt_name) const {
    return m_user_args.contains(opt_name);
 }
 
-std::string Argument_Parser::get_arg(const std::string& opt_name) const {
+inline std::string Argument_Parser::get_arg(const std::string& opt_name) const {
    auto i = m_user_args.find(opt_name);
    if(i == m_user_args.end()) {
       // this shouldn't occur unless you passed the wrong thing to get_arg
@@ -92,7 +94,7 @@ std::string Argument_Parser::get_arg(const std::string& opt_name) const {
    return i->second;
 }
 
-std::string Argument_Parser::get_arg_or(const std::string& opt_name, const std::string& otherwise) const {
+inline std::string Argument_Parser::get_arg_or(const std::string& opt_name, const std::string& otherwise) const {
    auto i = m_user_args.find(opt_name);
    if(i == m_user_args.end() || i->second.empty()) {
       return otherwise;
@@ -100,7 +102,7 @@ std::string Argument_Parser::get_arg_or(const std::string& opt_name, const std::
    return i->second;
 }
 
-size_t Argument_Parser::get_arg_sz(const std::string& opt_name) const {
+inline size_t Argument_Parser::get_arg_sz(const std::string& opt_name) const {
    const std::string s = get_arg(opt_name);
 
    try {
@@ -110,7 +112,17 @@ size_t Argument_Parser::get_arg_sz(const std::string& opt_name) const {
    }
 }
 
-std::vector<std::string> Argument_Parser::get_arg_list(const std::string& what) const {
+inline size_t Argument_Parser::get_arg_hex_sz_or(const std::string& opt_name, const std::string& otherwise) const {
+   const std::string s = get_arg_or(opt_name, otherwise);
+
+   try {
+      return static_cast<size_t>(std::stoul(s, nullptr, 16));
+   } catch(std::exception&) {
+      throw CLI_Usage_Error("Invalid hex integer value '" + s + "' for option " + opt_name);
+   }
+}
+
+inline std::vector<std::string> Argument_Parser::get_arg_list(const std::string& what) const {
    if(what == m_spec_rest) {
       return m_user_rest;
    }
@@ -118,10 +130,10 @@ std::vector<std::string> Argument_Parser::get_arg_list(const std::string& what) 
    return split_on(get_arg(what), ',');
 }
 
-void Argument_Parser::parse_args(const std::vector<std::string>& params) {
+inline void Argument_Parser::parse_args(const std::vector<std::string>& params) {
    std::vector<std::string> args;
    for(const auto& param : params) {
-      if(param.find("--") == 0) {
+      if(param.starts_with("--")) {
          // option
          const auto eq = param.find('=');
 
@@ -197,9 +209,9 @@ void Argument_Parser::parse_args(const std::vector<std::string>& params) {
    }
 }
 
-Argument_Parser::Argument_Parser(const std::string& spec,
-                                 const std::vector<std::string>& extra_flags,
-                                 const std::vector<std::string>& extra_opts) {
+inline Argument_Parser::Argument_Parser(const std::string& spec,
+                                        const std::vector<std::string>& extra_flags,
+                                        const std::vector<std::string>& extra_opts) {
    class CLI_Error_Invalid_Spec final : public CLI_Error {
       public:
          explicit CLI_Error_Invalid_Spec(const std::string& bad_spec) :
@@ -239,8 +251,8 @@ Argument_Parser::Argument_Parser(const std::string& spec,
          }
       } else {
          // named argument
-         if(!m_spec_rest.empty())  // rest arg wasn't last
-         {
+         if(!m_spec_rest.empty()) {
+            // rest arg wasn't last
             throw CLI_Error_Invalid_Spec(spec);
          }
 

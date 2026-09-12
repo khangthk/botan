@@ -7,9 +7,29 @@
 #include <botan/internal/mem_pool.h>
 
 #include <botan/mem_ops.h>
+#include <botan/internal/target_info.h>
 #include <algorithm>
+#include <exception>
+#include <optional>
 
-#if defined(BOTAN_MEM_POOL_USE_MMU_PROTECTIONS)
+#if defined(BOTAN_HAS_VALGRIND) || defined(BOTAN_ENABLE_DEBUG_ASSERTS)
+   /**
+    * @brief Prohibits access to unused memory pages in Botan's memory pool
+    *
+    * If BOTAN_MEM_POOL_USE_MMU_PROTECTIONS is defined, the Memory_Pool
+    * class used for mlock'ed memory will use OS calls to set page
+    * permissions so as to prohibit access to pages on the free list, then
+    * enable read/write access when the page is set to be used. This will
+    * turn (some) use after free bugs into a crash.
+    *
+    * The additional syscalls have a substantial performance impact, which
+    * is why this option is not enabled by default. It is used when built for
+    * running in valgrind or debug assertions are enabled.
+    */
+   #define BOTAN_MEM_POOL_USE_MMU_PROTECTIONS
+#endif
+
+#if defined(BOTAN_MEM_POOL_USE_MMU_PROTECTIONS) && defined(BOTAN_HAS_OS_UTILS)
    #include <botan/internal/os_utils.h>
 #endif
 
@@ -90,8 +110,8 @@ namespace Botan {
 namespace {
 
 size_t choose_bucket(size_t n) {
-   const size_t MINIMUM_ALLOCATION = 16;
-   const size_t MAXIMUM_ALLOCATION = 256;
+   constexpr size_t MINIMUM_ALLOCATION = 16;
+   constexpr size_t MAXIMUM_ALLOCATION = 256;
 
    if(n < MINIMUM_ALLOCATION || n > MAXIMUM_ALLOCATION) {
       return 0;
@@ -99,7 +119,7 @@ size_t choose_bucket(size_t n) {
 
    // Need to tune these
 
-   const size_t buckets[] = {
+   constexpr size_t buckets[] = {
       16,
       24,
       32,
@@ -115,7 +135,7 @@ size_t choose_bucket(size_t n) {
       0,
    };
 
-   for(size_t i = 0; buckets[i]; ++i) {
+   for(size_t i = 0; buckets[i] != 0; ++i) {
       if(n <= buckets[i]) {
          return buckets[i];
       }
@@ -153,19 +173,16 @@ class BitMap final {
    public:
       explicit BitMap(size_t bits) : m_len(bits) {
          m_bits.resize((bits + BITMASK_BITS - 1) / BITMASK_BITS);
-         // MSVC warns if the cast isn't there, clang-tidy warns that the cast is pointless
-         m_main_mask = static_cast<bitmask_type>(~0);  // NOLINT(bugprone-misplaced-widening-cast)
-         m_last_mask = m_main_mask;
 
          if(bits % BITMASK_BITS != 0) {
             m_last_mask = (static_cast<bitmask_type>(1) << (bits % BITMASK_BITS)) - 1;
          }
       }
 
-      bool find_free(size_t* bit);
+      std::optional<size_t> find_free();
 
       void free(size_t bit) {
-         BOTAN_ASSERT_NOMSG(bit <= m_len);
+         BOTAN_ASSERT_NOMSG(bit < m_len);
          const size_t w = bit / BITMASK_BITS;
          BOTAN_ASSERT_NOMSG(w < m_bits.size());
          const bitmask_type mask = static_cast<bitmask_type>(1) << (bit % BITMASK_BITS);
@@ -192,12 +209,13 @@ class BitMap final {
       static const size_t BITMASK_BITS = sizeof(bitmask_type) * 8;
 
       size_t m_len;
-      bitmask_type m_main_mask;
-      bitmask_type m_last_mask;
+      // MSVC warns if the cast isn't there, clang-tidy warns that the cast is pointless
+      bitmask_type m_main_mask = static_cast<bitmask_type>(~0);  // NOLINT(bugprone-misplaced-widening-cast)
+      bitmask_type m_last_mask = static_cast<bitmask_type>(~0);  // NOLINT(bugprone-misplaced-widening-cast)
       std::vector<bitmask_type> m_bits;
 };
 
-bool BitMap::find_free(size_t* bit) {
+std::optional<size_t> BitMap::find_free() {
    for(size_t i = 0; i != m_bits.size(); ++i) {
       const bitmask_type mask = (i == m_bits.size() - 1) ? m_last_mask : m_main_mask;
       if((m_bits[i] & mask) != mask) {
@@ -205,12 +223,11 @@ bool BitMap::find_free(size_t* bit) {
          const bitmask_type bmask = static_cast<bitmask_type>(1) << (free_bit % BITMASK_BITS);
          BOTAN_ASSERT_NOMSG((m_bits[i] & bmask) == 0);
          m_bits[i] |= bmask;
-         *bit = BITMASK_BITS * i + free_bit;
-         return true;
+         return BITMASK_BITS * i + free_bit;
       }
    }
 
-   return false;
+   return {};
 }
 
 }  // namespace
@@ -230,15 +247,15 @@ class Bucket final {
             return nullptr;
          }
 
-         size_t offset;
-         if(!m_bitmap.find_free(&offset)) {
+         auto offset = m_bitmap.find_free();
+         if(!offset) {
             // I just found out I am full
             m_is_full = true;
             return nullptr;
+         } else {
+            BOTAN_ASSERT(*offset * m_item_size < m_page_size, "Offset is in range");
+            return m_range + m_item_size * (*offset);
          }
-
-         BOTAN_ASSERT(offset * m_item_size < m_page_size, "Offset is in range");
-         return m_range + m_item_size * offset;
       }
 
       bool free(void* p) {
@@ -275,10 +292,7 @@ class Bucket final {
 };
 
 Memory_Pool::Memory_Pool(const std::vector<void*>& pages, size_t page_size) : m_page_size(page_size) {
-   m_min_page_ptr = ~static_cast<uintptr_t>(0);
-   m_max_page_ptr = 0;
-
-   for(auto page : pages) {
+   for(auto* page : pages) {
       const uintptr_t p = reinterpret_cast<uintptr_t>(page);
 
       m_min_page_ptr = std::min(p, m_min_page_ptr);
@@ -298,7 +312,7 @@ Memory_Pool::Memory_Pool(const std::vector<void*>& pages, size_t page_size) : m_
    m_max_page_ptr += page_size;
 }
 
-Memory_Pool::~Memory_Pool()  // NOLINT(*-use-equals-default)
+Memory_Pool::~Memory_Pool() noexcept  // NOLINT(*-use-equals-default)
 {
 #if defined(BOTAN_MEM_POOL_USE_MMU_PROTECTIONS)
    for(size_t i = 0; i != m_free_pages.size(); ++i) {
@@ -315,7 +329,7 @@ void* Memory_Pool::allocate(size_t n) {
    const size_t n_bucket = choose_bucket(n);
 
    if(n_bucket > 0) {
-      lock_guard_type<mutex_type> lock(m_mutex);
+      const lock_guard_type<mutex_type> lock(m_mutex);
 
       std::deque<Bucket>& buckets = m_buckets_for[n_bucket];
 
@@ -326,6 +340,7 @@ void* Memory_Pool::allocate(size_t n) {
       recycled.
       */
       for(auto& bucket : buckets) {
+         // NOLINTNEXTLINE(*-const-correctness) bug in clang-tidy
          if(uint8_t* p = bucket.alloc()) {
             return p;
          }
@@ -341,6 +356,7 @@ void* Memory_Pool::allocate(size_t n) {
          OS::page_allow_access(ptr);
 #endif
          buckets.push_front(Bucket(ptr, m_page_size, n_bucket));
+         // NOLINTNEXTLINE(*-const-correctness) bug in clang-tidy
          void* p = buckets[0].alloc();
          BOTAN_ASSERT_NOMSG(p != nullptr);
          return p;
@@ -362,7 +378,7 @@ bool Memory_Pool::deallocate(void* p, size_t len) noexcept {
 
    if(n_bucket != 0) {
       try {
-         lock_guard_type<mutex_type> lock(m_mutex);
+         const lock_guard_type<mutex_type> lock(m_mutex);
 
          std::deque<Bucket>& buckets = m_buckets_for[n_bucket];
 

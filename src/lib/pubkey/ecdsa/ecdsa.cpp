@@ -1,5 +1,5 @@
 /*
-* ECDSA implemenation
+* ECDSA implementation
 * (C) 2007 Manuel Hartl, FlexSecure GmbH
 *     2007 Falko Strenzke, FlexSecure GmbH
 *     2008-2010,2015,2016,2018,2024 Jack Lloyd
@@ -10,6 +10,7 @@
 
 #include <botan/ecdsa.h>
 
+#include <botan/ec_group.h>
 #include <botan/internal/keypair.h>
 #include <botan/internal/pk_ops_impl.h>
 
@@ -21,7 +22,7 @@ namespace Botan {
 
 namespace {
 
-EC_Point recover_ecdsa_public_key(
+EC_AffinePoint recover_ecdsa_public_key(
    const EC_Group& group, const std::vector<uint8_t>& msg, const BigInt& r, const BigInt& s, uint8_t v) {
    if(group.has_cofactor()) {
       throw Invalid_Argument("ECDSA public key recovery only supported for prime order groups");
@@ -38,7 +39,7 @@ EC_Point recover_ecdsa_public_key(
    }
 
    const uint8_t y_odd = v % 2;
-   const uint8_t add_order = v >> 1;
+   const bool add_order = (v >> 1) == 0x01;
    const size_t p_bytes = group.get_p_bytes();
 
    BigInt x = r;
@@ -53,16 +54,16 @@ EC_Point recover_ecdsa_public_key(
       X[0] = 0x02 | y_odd;
       x.serialize_to(std::span{X}.subspan(1));
 
-      if(auto R = EC_AffinePoint::deserialize(group, X)) {
+      if(auto R = EC_AffinePoint::deserialize_compressed(group, X)) {
          // Compute r_inv * (-eG + s*R)
          const auto ne = EC_Scalar::from_bytes_with_trunc(group, msg).negate();
          const auto ss = EC_Scalar::from_bigint(group, s);
 
-         const auto r_inv = EC_Scalar::from_bigint(group, r).invert();
+         const auto r_inv = EC_Scalar::from_bigint(group, r).invert_vartime();
 
-         EC_Group::Mul2Table GR_mul(R.value());
+         const EC_Group::Mul2Table GR_mul(R.value());
          if(auto egsr = GR_mul.mul2_vartime(ne * r_inv, ss * r_inv)) {
-            return egsr->to_legacy_point();
+            return egsr.value();
          }
       }
    }
@@ -76,16 +77,22 @@ ECDSA_PublicKey::ECDSA_PublicKey(
    const EC_Group& group, const std::vector<uint8_t>& msg, const BigInt& r, const BigInt& s, uint8_t v) :
       EC_PublicKey(group, recover_ecdsa_public_key(group, msg, r, s, v)) {}
 
+std::optional<size_t> ECDSA_PublicKey::_signature_element_size_for_DER_encoding() const {
+   return domain().get_order_bytes();
+}
+
 std::unique_ptr<Private_Key> ECDSA_PublicKey::generate_another(RandomNumberGenerator& rng) const {
    return std::make_unique<ECDSA_PrivateKey>(rng, domain());
 }
 
 uint8_t ECDSA_PublicKey::recovery_param(const std::vector<uint8_t>& msg, const BigInt& r, const BigInt& s) const {
+   const auto this_key = this->_public_ec_point().serialize_compressed();
+
    for(uint8_t v = 0; v != 4; ++v) {
       try {
-         EC_Point R = recover_ecdsa_public_key(this->domain(), msg, r, s, v);
+         const auto R = recover_ecdsa_public_key(this->domain(), msg, r, s, v);
 
-         if(R == this->public_point()) {
+         if(R.serialize_compressed() == this_key) {
             return v;
          }
       } catch(Decoding_Error&) {
@@ -97,7 +104,7 @@ uint8_t ECDSA_PublicKey::recovery_param(const std::vector<uint8_t>& msg, const B
 }
 
 std::unique_ptr<Public_Key> ECDSA_PrivateKey::public_key() const {
-   return std::make_unique<ECDSA_PublicKey>(domain(), public_point());
+   return std::make_unique<ECDSA_PublicKey>(domain(), _public_ec_point());
 }
 
 bool ECDSA_PrivateKey::check_key(RandomNumberGenerator& rng, bool strong) const {
@@ -119,15 +126,22 @@ namespace {
 */
 class ECDSA_Signature_Operation final : public PK_Ops::Signature_with_Hash {
    public:
-      ECDSA_Signature_Operation(const ECDSA_PrivateKey& ecdsa, std::string_view padding, RandomNumberGenerator& rng) :
-            PK_Ops::Signature_with_Hash(padding),
+      ECDSA_Signature_Operation(const ECDSA_PrivateKey& ecdsa,
+                                const PK_Signature_Options& options,
+                                RandomNumberGenerator& rng) :
+            PK_Ops::Signature_with_Hash(options),
             m_group(ecdsa.domain()),
             m_x(ecdsa._private_key()),
-            m_b(EC_Scalar::random(m_group, rng)),
-            m_b_inv(m_b.invert()) {
+            m_b(EC_Scalar::random(m_group, rng)) {
 #if defined(BOTAN_HAS_RFC6979_GENERATOR)
-         m_rfc6979 = std::make_unique<RFC6979_Nonce_Generator>(
-            this->rfc6979_hash_function(), m_group.get_order_bits(), ecdsa._private_key());
+         if(options.using_deterministic_signature()) {
+            m_rfc6979 = std::make_unique<RFC6979_Nonce_Generator>(
+               this->rfc6979_hash_function(), m_group.get_order_bits(), ecdsa._private_key());
+         }
+#else
+         if(options.using_deterministic_signature()) {
+            throw Not_Implemented("Deterministic ECDSA signatures require RFC 6979 support");
+         }
 #endif
       }
 
@@ -145,10 +159,7 @@ class ECDSA_Signature_Operation final : public PK_Ops::Signature_with_Hash {
       std::unique_ptr<RFC6979_Nonce_Generator> m_rfc6979;
 #endif
 
-      std::vector<BigInt> m_ws;
-
       EC_Scalar m_b;
-      EC_Scalar m_b_inv;
 };
 
 AlgorithmIdentifier ECDSA_Signature_Operation::algorithm_identifier() const {
@@ -161,25 +172,42 @@ std::vector<uint8_t> ECDSA_Signature_Operation::raw_sign(std::span<const uint8_t
    const auto m = EC_Scalar::from_bytes_with_trunc(m_group, msg);
 
 #if defined(BOTAN_HAS_RFC6979_GENERATOR)
-   const auto k = m_rfc6979->nonce_for(m_group, m);
+   const auto k = m_rfc6979 ? m_rfc6979->nonce_for(m_group, m) : EC_Scalar::random(m_group, rng);
 #else
    const auto k = EC_Scalar::random(m_group, rng);
 #endif
 
-   const auto r = EC_Scalar::gk_x_mod_order(k, rng, m_ws);
-
-   // Blind the inversion of k
-   const auto k_inv = (m_b * k).invert() * m_b;
-
    /*
-   * Blind the input message and compute x*r+m as (x*r*b + m*b)/b
+   * Blind the inputs
+   *
+   * Here we are computing (x*r+m)/k
+   *
+   * Instead have a random b and compute (k*b)^-1
+   *
+   * Then compute (x*r+m) as (x*r*b + m*b)
+   *
+   * Finally (x*r*b + m*b)/(k*b) = (x*r+m)/k
+   *
+   * This effectively blinds both the inversion as well as the various scalar
+   * multiplications. All of these operations should be constant-time anyway but
+   * blinding is very cheap and may help if either the compiler introduces
+   * variable-time behavior, or for the case of EM/power side channel attacks [1].
+   *
+   * [1] But note that such attacks are currently outside of Botan's threat model.
+   *
+   * NOTE: if you change anything here also update ECDSA_Timing_Test
+   * in cli/timing_tests.cpp to use the same formulas
    */
-   m_b.square_self();
-   m_b_inv.square_self();
+   const auto r = EC_Scalar::gk_x_mod_order(k, rng);
+
+   const auto k_inv = (m_b * k).invert();
 
    const auto xr_m = ((m_x * m_b) * r) + (m * m_b);
 
-   const auto s = (k_inv * xr_m) * m_b_inv;
+   const auto s = (k_inv * xr_m);
+
+   // Generate the next blinding value via modular squaring
+   m_b.square_self();
 
    // With overwhelming probability, a bug rather than actual zero r/s
    if(r.is_zero() || s.is_zero()) {
@@ -194,13 +222,25 @@ std::vector<uint8_t> ECDSA_Signature_Operation::raw_sign(std::span<const uint8_t
 */
 class ECDSA_Verification_Operation final : public PK_Ops::Verification_with_Hash {
    public:
-      ECDSA_Verification_Operation(const ECDSA_PublicKey& ecdsa, std::string_view padding) :
-            PK_Ops::Verification_with_Hash(padding), m_group(ecdsa.domain()), m_gy_mul(ecdsa._public_key()) {}
+      ECDSA_Verification_Operation(const ECDSA_PublicKey& ecdsa, const PK_Signature_Options& options) :
+            PK_Ops::Verification_with_Hash(options), m_group(ecdsa.domain()), m_gy_mul(ecdsa._public_ec_point()) {}
 
       ECDSA_Verification_Operation(const ECDSA_PublicKey& ecdsa, const AlgorithmIdentifier& alg_id) :
+            /*
+            * RFC 5758 Section 3.2 is clear that for ECDSA signatures the parameters field is empty
+            *
+            *    When the [ecdsa-with-SHA*] algorithm identifier appears in the algorithm
+            *    field as an AlgorithmIdentifier, the encoding MUST omit the parameters
+            *    field. That is, the AlgorithmIdentifier SHALL be a SEQUENCE of one
+            *    component, the OID [ecdsa-with-SHA*].
+            *
+            * However ECDSA is old enough and widely implemented enough that many non-conformant
+            * implementations which emit X509 signatures using an explicit NULL parameter do exist,
+            * so accept it here.
+            */
             PK_Ops::Verification_with_Hash(alg_id, "ECDSA", true),
             m_group(ecdsa.domain()),
-            m_gy_mul(ecdsa._public_key()) {}
+            m_gy_mul(ecdsa._public_ec_point()) {}
 
       bool verify(std::span<const uint8_t> msg, std::span<const uint8_t> sig) override;
 
@@ -216,7 +256,7 @@ bool ECDSA_Verification_Operation::verify(std::span<const uint8_t> msg, std::spa
       if(r.is_nonzero() && s.is_nonzero()) {
          const auto m = EC_Scalar::from_bytes_with_trunc(m_group, msg);
 
-         const auto w = s.invert();
+         const auto w = s.invert_vartime();
 
          // Check if r == x_coord(g*w*m + y*w*r) % n
          return m_gy_mul.mul2_vartime_x_mod_order_eq(r, w, m, r);
@@ -228,13 +268,12 @@ bool ECDSA_Verification_Operation::verify(std::span<const uint8_t> msg, std::spa
 
 }  // namespace
 
-std::unique_ptr<PK_Ops::Verification> ECDSA_PublicKey::create_verification_op(std::string_view params,
-                                                                              std::string_view provider) const {
-   if(provider == "base" || provider.empty()) {
-      return std::make_unique<ECDSA_Verification_Operation>(*this, params);
+std::unique_ptr<PK_Ops::Verification> ECDSA_PublicKey::_create_verification_op(
+   const PK_Signature_Options& options) const {
+   if(!options.using_provider()) {
+      return std::make_unique<ECDSA_Verification_Operation>(*this, options);
    }
-
-   throw Provider_Not_Found(algo_name(), provider);
+   throw Provider_Not_Found(algo_name(), options.provider().value());
 }
 
 std::unique_ptr<PK_Ops::Verification> ECDSA_PublicKey::create_x509_verification_op(
@@ -246,14 +285,13 @@ std::unique_ptr<PK_Ops::Verification> ECDSA_PublicKey::create_x509_verification_
    throw Provider_Not_Found(algo_name(), provider);
 }
 
-std::unique_ptr<PK_Ops::Signature> ECDSA_PrivateKey::create_signature_op(RandomNumberGenerator& rng,
-                                                                         std::string_view params,
-                                                                         std::string_view provider) const {
-   if(provider == "base" || provider.empty()) {
-      return std::make_unique<ECDSA_Signature_Operation>(*this, params, rng);
+std::unique_ptr<PK_Ops::Signature> ECDSA_PrivateKey::_create_signature_op(RandomNumberGenerator& rng,
+                                                                          const PK_Signature_Options& options) const {
+   if(!options.using_provider()) {
+      return std::make_unique<ECDSA_Signature_Operation>(*this, options, rng);
    }
 
-   throw Provider_Not_Found(algo_name(), provider);
+   throw Provider_Not_Found(algo_name(), options.provider().value());
 }
 
 }  // namespace Botan

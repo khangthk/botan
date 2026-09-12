@@ -24,12 +24,15 @@ class P521Rep final {
       constexpr static std::array<W, N> one() { return std::array<W, N>{1}; }
 
       constexpr static std::array<W, N> redc(const std::array<W, 2 * N>& z) {
-         constexpr W TOP_MASK = static_cast<W>(0x1FF);
+         // Regardless of word size (32 or 64) the top word is 9 bits long
+         constexpr W TOP_BITS = static_cast<W>(0x1FF);
+         // The 23 or 55 bits that should be cleared in the top word
+         constexpr W CLEARED_TOP_BITS = WordInfo<W>::max ^ TOP_BITS;
 
          /*
          * Extract the high part of z (z >> 521)
          */
-         std::array<W, N> t;
+         std::array<W, N> t;  // NOLINT(*-member-init)
 
          for(size_t i = 0; i != N; ++i) {
             t[i] = z[(N - 1) + i] >> 9;
@@ -40,22 +43,49 @@ class P521Rep final {
          }
 
          // Now t += z & (2**521-1)
-         W carry = word8_add2(t.data(), z.data(), static_cast<W>(0));
-
-         if constexpr(WordInfo<W>::bits == 32) {
-            constexpr size_t HN = N / 2;
-            carry = word8_add2(t.data() + HN, z.data() + HN, carry);
+         W carry = 0;
+         for(size_t i = 0; i != N - 1; ++i) {
+            t[i] = word_add(t[i], z[i], &carry);
          }
 
          // Now add the (partial) top words; this can't carry out
          // since both inputs are at most 2**9-1
-         t[N - 1] += (z[N - 1] & TOP_MASK) + carry;
+         t[N - 1] += (z[N - 1] & TOP_BITS) + carry;
 
-         // But might be greater than modulus:
-         std::array<W, N> r;
-         bigint_monty_maybe_sub<N>(r.data(), static_cast<W>(0), t.data(), P.data());
+         /*
+         Since the modulus P is exactly 2**521 - 1 the only way the computed
+         result can be larger than P is if the top word is larger than TOP_BITS
 
-         return r;
+         Since TOP_BITS has the low 9 bits set, we can check if t[N - 1] > TOP_BITS
+         by checking if t[N - 1] >> 9 has any bits set. Doing it this way is
+         faster than a standard comparison since CT::Mask::is_gt requires
+         several bit operations.
+         */
+
+         const W is_over_p521 = ~CT::Mask<W>::is_zero(t[N - 1] >> 9).value();
+
+         /*
+         * Also must detect/handle x == P
+         */
+         const W is_eq_p521 = [&]() {
+            W sum = WordInfo<W>::max;
+            for(size_t i = 0; i != N - 1; ++i) {
+               sum &= t[i];
+            }
+            sum &= (CLEARED_TOP_BITS | t[N - 1]);
+
+            return CT::Mask<W>::is_zero(sum ^ WordInfo<W>::max).value();
+         }();
+
+         const W need_sub = is_over_p521 | is_eq_p521;
+
+         W borrow = 0;
+         for(size_t i = 0; i != N - 1; ++i) {
+            t[i] = word_sub(t[i], need_sub & WordInfo<W>::max, &borrow);
+         }
+         t[N - 1] = word_sub(t[N - 1], need_sub & TOP_BITS, &borrow);
+
+         return t;
       }
 
       constexpr static std::array<W, N> to_rep(const std::array<W, N>& x) { return x; }
@@ -66,6 +96,7 @@ class P521Rep final {
 };
 
 // clang-format off
+
 class Params final : public EllipticCurveParameters<
    "1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
    "1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC",
@@ -81,7 +112,7 @@ class Params final : public EllipticCurveParameters<
 class Curve final : public EllipticCurve<Params, P521Rep> {
    public:
       // Return the square of the inverse of x
-      static FieldElement fe_invert2(const FieldElement& x) {
+      static constexpr FieldElement fe_invert2(const FieldElement& x) {
          // Addition chain from https://eprint.iacr.org/2014/852.pdf page 6
 
          FieldElement r = x.square();
@@ -121,7 +152,13 @@ class Curve final : public EllipticCurve<Params, P521Rep> {
          return r;
       }
 
-      static Scalar scalar_invert(const Scalar& x) {
+      static constexpr FieldElement fe_sqrt(const FieldElement& x) {
+         auto z = x;
+         z.square_n(519);
+         return z;
+      }
+
+      static constexpr Scalar scalar_invert(const Scalar& x) {
          // Generated using https://github.com/mmcloughlin/addchain
 
          auto t2 = x.square();

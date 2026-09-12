@@ -7,40 +7,50 @@
 
 #include <botan/x509_crl.h>
 
+#include <botan/asn1_obj.h>
+#include <botan/asn1_time.h>
 #include <botan/ber_dec.h>
-#include <botan/bigint.h>
 #include <botan/der_enc.h>
 #include <botan/x509_ext.h>
 #include <botan/x509cert.h>
 
 namespace Botan {
 
-struct CRL_Entry_Data {
-      std::vector<uint8_t> m_serial;
+class CRL_Entry_Data final {
+   public:
+      CRL_Entry_Data(const X509_Certificate& cert, CRL_Code why) :
+            m_serial(cert.serial()),
+            m_serial_bits(cert.serial_number()),
+            m_time(X509_Time(std::chrono::system_clock::now())),
+            m_reason(why) {
+         if(why != CRL_Code::Unspecified) {
+            m_extensions.add(std::make_unique<Cert_Extension::CRL_ReasonCode>(why));
+         }
+      }
+
+      CRL_Entry_Data() = default;
+
+      // NOLINTBEGIN(*non-private-member-variables-in-classes)
+      X509_Serial_Number m_serial;
+      std::vector<uint8_t> m_serial_bits;
       X509_Time m_time;
       CRL_Code m_reason = CRL_Code::Unspecified;
       Extensions m_extensions;
+      // NOLINTEND(*non-private-member-variables-in-classes)
 };
 
 /*
 * Create a CRL_Entry
 */
 CRL_Entry::CRL_Entry(const X509_Certificate& cert, CRL_Code why) {
-   m_data = std::make_shared<CRL_Entry_Data>();
-   m_data->m_serial = cert.serial_number();
-   m_data->m_time = X509_Time(std::chrono::system_clock::now());
-   m_data->m_reason = why;
-
-   if(why != CRL_Code::Unspecified) {
-      m_data->m_extensions.add(std::make_unique<Cert_Extension::CRL_ReasonCode>(why));
-   }
+   m_data = std::make_shared<CRL_Entry_Data>(cert, why);
 }
 
 /*
-* Compare two CRL_Entrys for equality
+* Compare two CRL_Entry structs for equality
 */
 bool operator==(const CRL_Entry& a1, const CRL_Entry& a2) {
-   if(a1.serial_number() != a2.serial_number()) {
+   if(a1.serial() != a2.serial()) {
       return false;
    }
    if(a1.expire_time() != a2.expire_time()) {
@@ -53,7 +63,7 @@ bool operator==(const CRL_Entry& a1, const CRL_Entry& a2) {
 }
 
 /*
-* Compare two CRL_Entrys for inequality
+* Compare two CRL_Entry structs for inequality
 */
 bool operator!=(const CRL_Entry& a1, const CRL_Entry& a2) {
    return !(a1 == a2);
@@ -63,32 +73,48 @@ bool operator!=(const CRL_Entry& a1, const CRL_Entry& a2) {
 * DER encode a CRL_Entry
 */
 void CRL_Entry::encode_into(DER_Encoder& der) const {
-   der.start_sequence()
-      .encode(BigInt::from_bytes(serial_number()))
-      .encode(expire_time())
-      .start_sequence()
-      .encode(extensions())
-      .end_cons()
-      .end_cons();
+   der.start_sequence().encode(serial()).encode(expire_time());
+
+   if(extensions().count() > 0) {
+      der.start_sequence().encode(extensions()).end_cons();
+   }
+
+   der.end_cons();
 }
 
 /*
 * Decode a BER encoded CRL_Entry
 */
 void CRL_Entry::decode_from(BER_Decoder& source) {
-   BigInt serial_number_bn;
-
    auto data = std::make_unique<CRL_Entry_Data>();
 
    BER_Decoder entry = source.start_sequence();
 
-   entry.decode(serial_number_bn).decode(data->m_time);
-   data->m_serial = serial_number_bn.serialize();
+   entry.decode(data->m_serial);
+   entry.decode(data->m_time);
+
+   data->m_serial_bits = data->m_serial.magnitude();
 
    if(entry.more_items()) {
-      entry.decode(data->m_extensions);
-      if(auto ext = data->m_extensions.get_extension_object_as<Cert_Extension::CRL_ReasonCode>()) {
-         data->m_reason = ext->get_reason();
+      data->m_extensions.decode_from(entry, Extension_Context::CRL_Entry);
+
+      // TODO(Botan4) start checking that CRLEntry extensions is not empty
+      // Extensions  ::=  SEQUENCE SIZE (1..MAX) OF Extension
+
+      if(const auto* ext = data->m_extensions.get_extension_object_as<Cert_Extension::CRL_ReasonCode>()) {
+         const auto reason = ext->get_reason();
+
+         /*
+         * This reason code only makes sense in the context of delta CRL processing, which
+         * we do not currently support. Seeing it in a regular CRL suggests that something
+         * has gone very wrong (eg we are somehow processing a delta CRL, though that
+         * shouldn't happen since the delta CRL indicator extension should be a critical
+         * extension which we will reject.)
+         */
+         if(reason == CRL_Code::RemoveFromCrl) {
+            throw Decoding_Error("CRL entry ReasonCode extension included invalid RemoveFromCrl");
+         }
+         data->m_reason = reason;
       } else {
          data->m_reason = CRL_Code::Unspecified;
       }
@@ -108,6 +134,10 @@ const CRL_Entry_Data& CRL_Entry::data() const {
 }
 
 const std::vector<uint8_t>& CRL_Entry::serial_number() const {
+   return data().m_serial_bits;
+}
+
+const X509_Serial_Number& CRL_Entry::serial() const {
    return data().m_serial;
 }
 

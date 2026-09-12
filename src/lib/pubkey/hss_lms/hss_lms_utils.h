@@ -25,12 +25,20 @@ namespace Botan {
  * This Key Generation procedure is also used for the seed derivation function of
  * SECRET_METHOD 2 defined in https://github.com/cisco/hash-sigs,
  */
-class PseudorandomKeyGeneration {
+class PseudorandomKeyGeneration final {
    public:
       /**
        * @brief Create a PseudorandomKeyGeneration instance for a fixed @p identifier
        */
-      PseudorandomKeyGeneration(std::span<const uint8_t> identifier);
+      explicit PseudorandomKeyGeneration(std::span<const uint8_t> identifier);
+
+      PseudorandomKeyGeneration(const PseudorandomKeyGeneration&) = delete;
+      PseudorandomKeyGeneration& operator=(const PseudorandomKeyGeneration&) = delete;
+
+      PseudorandomKeyGeneration(PseudorandomKeyGeneration&&) = delete;
+      PseudorandomKeyGeneration& operator=(PseudorandomKeyGeneration&&) = delete;
+
+      ~PseudorandomKeyGeneration() = default;
 
       /**
        * @brief Specify the value for the u32str(q) hash input field

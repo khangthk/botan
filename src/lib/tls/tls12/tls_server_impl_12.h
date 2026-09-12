@@ -10,21 +10,19 @@
 #define BOTAN_TLS_SERVER_IMPL_12_H_
 
 #include <botan/credentials_manager.h>
-#include <botan/tls_policy.h>
 #include <botan/internal/tls_channel_impl_12.h>
 #include <vector>
 
 namespace Botan::TLS {
 
+class Policy;
 class Server_Handshake_State;
 
 /**
 * SSL/TLS Server 1.2 implementation
 */
-class Server_Impl_12 : public Channel_Impl_12 {
+class Server_Impl_12 final : public Channel_Impl_12 {
    public:
-      typedef std::function<std::string(std::vector<std::string>)> next_protocol_fn;
-
       /**
       * Server initialization
       *
@@ -46,15 +44,43 @@ class Server_Impl_12 : public Channel_Impl_12 {
       *        be preallocated for the read and write buffers. Smaller
       *        values just mean reallocations and copies are more likely.
       */
-      explicit Server_Impl_12(const std::shared_ptr<Callbacks>& callbacks,
-                              const std::shared_ptr<Session_Manager>& session_manager,
-                              const std::shared_ptr<Credentials_Manager>& creds,
-                              const std::shared_ptr<const Policy>& policy,
-                              const std::shared_ptr<RandomNumberGenerator>& rng,
-                              bool is_datagram = false,
-                              size_t reserved_io_buffer_size = TLS::Channel::IO_BUF_DEFAULT_SIZE);
+      static std::shared_ptr<Server_Impl_12> create(const std::shared_ptr<Callbacks>& callbacks,
+                                                    const std::shared_ptr<Session_Manager>& session_manager,
+                                                    const std::shared_ptr<Credentials_Manager>& creds,
+                                                    const std::shared_ptr<const Policy>& policy,
+                                                    const std::shared_ptr<RandomNumberGenerator>& rng,
+                                                    bool is_datagram = false,
+                                                    size_t reserved_io_buffer_size = TLS::Channel::IO_BUF_DEFAULT_SIZE);
 
-      explicit Server_Impl_12(const Channel_Impl::Downgrade_Information& downgrade_info);
+      Server_Impl_12([[maybe_unused]] Private dont_call_me,
+                     const std::shared_ptr<Callbacks>& callbacks,
+                     const std::shared_ptr<Session_Manager>& session_manager,
+                     const std::shared_ptr<Credentials_Manager>& creds,
+                     const std::shared_ptr<const Policy>& policy,
+                     const std::shared_ptr<RandomNumberGenerator>& rng,
+                     bool is_datagram = false,
+                     size_t reserved_io_buffer_size = TLS::Channel::IO_BUF_DEFAULT_SIZE) :
+            Channel_Impl_12(callbacks, session_manager, rng, policy, true, is_datagram, reserved_io_buffer_size),
+            m_creds(creds) {}
+
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
+
+      static std::shared_ptr<Server_Impl_12> create_for_downgrade(
+         const Channel_Impl::Downgrade_Information& downgrade_info) {
+         return std::make_shared<Server_Impl_12>(Private{}, downgrade_info);
+      }
+
+      Server_Impl_12([[maybe_unused]] Private dont_call_me, const Channel_Impl::Downgrade_Information& downgrade_info) :
+            Channel_Impl_12(downgrade_info.callbacks,
+                            downgrade_info.session_manager,
+                            downgrade_info.rng,
+                            downgrade_info.policy,
+                            true /* is_server*/,
+                            false /* TLS 1.3 does not support DTLS yet */,
+                            downgrade_info.io_buffer_size),
+            m_creds(downgrade_info.creds) {}
+
+#endif
 
    private:
       /**
@@ -65,18 +91,14 @@ class Server_Impl_12 : public Channel_Impl_12 {
       */
       std::string application_protocol() const override { return m_next_protocol; }
 
-      std::vector<X509_Certificate> get_peer_cert_chain(const Handshake_State& state) const override;
-
       void initiate_handshake(Handshake_State& state, bool force_full_renegotiation) override;
 
-      void process_handshake_msg(const Handshake_State* active_state,
-                                 Handshake_State& pending_state,
+      void process_handshake_msg(Handshake_State& pending_state,
                                  Handshake_Type type,
                                  const std::vector<uint8_t>& contents,
                                  bool epoch0_restart) override;
 
-      void process_client_hello_msg(const Handshake_State* active_state,
-                                    Server_Handshake_State& pending_state,
+      void process_client_hello_msg(Server_Handshake_State& pending_state,
                                     const std::vector<uint8_t>& contents,
                                     bool epoch0_restart);
 

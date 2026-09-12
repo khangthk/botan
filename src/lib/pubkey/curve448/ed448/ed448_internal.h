@@ -9,6 +9,7 @@
 #ifndef BOTAN_ED448_INTERNAL_H_
 #define BOTAN_ED448_INTERNAL_H_
 
+#include <botan/internal/ct_utils.h>
 #include <botan/internal/curve448_gf.h>
 #include <botan/internal/curve448_scalar.h>
 
@@ -22,7 +23,7 @@ constexpr size_t ED448_LEN = 57;
  * The point is represented in projective coordinates (X, Y, Z).
  * All operations are constant time.
  */
-class BOTAN_TEST_API Ed448Point {
+class BOTAN_TEST_API Ed448Point final {
    public:
       /// Decode a point from its 57-byte encoding (RFC 8032 5.2.3)
       static Ed448Point decode(std::span<const uint8_t, ED448_LEN> enc);
@@ -36,6 +37,9 @@ class BOTAN_TEST_API Ed448Point {
       /// Create a point from its coordinates x, y
       Ed448Point(const Gf448Elem& x, const Gf448Elem& y) : m_x(x), m_y(y), m_z(1) {}
 
+      /// Return the identity element
+      static Ed448Point identity() { return Ed448Point(Gf448Elem::zero(), Gf448Elem::one()); }
+
       /// Encode the point to its 57-byte representation (RFC 8032 5.2.2)
       std::array<uint8_t, ED448_LEN> encode() const;
 
@@ -47,6 +51,18 @@ class BOTAN_TEST_API Ed448Point {
 
       /// Scalar multiplication
       Ed448Point scalar_mul(const Scalar448& scalar) const;
+
+      /// Fixed base point scalar multiplication (precomputed table, no doublings)
+      static Ed448Point base_point_mul(const Scalar448& scalar);
+
+      /// Variable-time double scalar multiplication using Shamir's trick: [s1]P + [s2]Q
+      static Ed448Point double_scalar_mul_vartime(const Scalar448& s1,
+                                                  const Ed448Point& p1,
+                                                  const Scalar448& s2,
+                                                  const Ed448Point& p2);
+
+      /// Negate the point
+      Ed448Point negate() const { return Ed448Point(-m_x, m_y, m_z); }
 
       /// Getter for projective coordinate X
       Gf448Elem x_proj() const { return m_x; }
@@ -66,8 +82,8 @@ class BOTAN_TEST_API Ed448Point {
       /// Check if two points are equal (constant time)
       bool operator==(const Ed448Point& other) const;
 
-      /// Assign other to this if cond is true (constant time)
-      void ct_conditional_assign(bool cond, const Ed448Point& other);
+      /// Assign other to this if @p mask is set (constant time)
+      void ct_conditional_assign(CT::Mask<uint64_t> mask, const Ed448Point& other);
 
    private:
       Gf448Elem m_x;
@@ -93,11 +109,11 @@ BOTAN_TEST_API std::array<uint8_t, ED448_LEN> create_pk_from_sk(std::span<const 
  * @param msg the message to sign
  * @return the signature
  */
-BOTAN_TEST_API std::array<uint8_t, 114> sign_message(std::span<const uint8_t, ED448_LEN> sk,
-                                                     std::span<const uint8_t, ED448_LEN> pk,
-                                                     bool f,
-                                                     std::span<const uint8_t> context,
-                                                     std::span<const uint8_t> msg);
+std::array<uint8_t, 114> sign_message(std::span<const uint8_t, ED448_LEN> sk,
+                                      std::span<const uint8_t, ED448_LEN> pk,
+                                      bool f,
+                                      std::span<const uint8_t> context,
+                                      std::span<const uint8_t> msg);
 
 /**
  * @brief Verify a signature(RFC 8032 5.2.7)
@@ -111,11 +127,11 @@ BOTAN_TEST_API std::array<uint8_t, 114> sign_message(std::span<const uint8_t, ED
  * @throw Decoding_Error if the public key or signature is malformed
  * @return true if the signature is valid
  */
-BOTAN_TEST_API bool verify_signature(std::span<const uint8_t, ED448_LEN> pk,
-                                     bool phflag,
-                                     std::span<const uint8_t> context,
-                                     std::span<const uint8_t> sig,
-                                     std::span<const uint8_t> msg);
+bool verify_signature(std::span<const uint8_t, ED448_LEN> pk,
+                      bool phflag,
+                      std::span<const uint8_t> context,
+                      std::span<const uint8_t> sig,
+                      std::span<const uint8_t> msg);
 
 }  // namespace Botan
 

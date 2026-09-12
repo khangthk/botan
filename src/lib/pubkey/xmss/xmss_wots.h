@@ -9,37 +9,31 @@
 #ifndef BOTAN_XMSS_WOTS_H_
 #define BOTAN_XMSS_WOTS_H_
 
-#include <botan/asn1_obj.h>
-#include <botan/exceptn.h>
-#include <botan/pk_keys.h>
-#include <botan/rng.h>
 #include <botan/secmem.h>
 #include <botan/xmss_parameters.h>
-#include <botan/internal/xmss_hash.h>
-#include <map>
-#include <memory>
-#include <string>
+#include <botan/internal/xmss_address.h>
+#include <span>
 #include <vector>
 
 namespace Botan {
 
-class XMSS_Address;
+class XMSS_Hash;
 class XMSS_WOTS_PrivateKey;
 
 typedef std::vector<secure_vector<uint8_t>> wots_keysig_t;
 
 class XMSS_WOTS_Base {
    public:
-      XMSS_WOTS_Base(XMSS_WOTS_Parameters params) : m_params(std::move(params)) {}
+      explicit XMSS_WOTS_Base(XMSS_WOTS_Parameters params) : m_params(params) {}
 
       XMSS_WOTS_Base(XMSS_WOTS_Parameters params, wots_keysig_t key_data) :
-            m_params(std::move(params)), m_key_data(std::move(key_data)) {}
+            m_params(params), m_key_data(std::move(key_data)) {}
 
       const wots_keysig_t& key_data() const { return m_key_data; }
 
    protected:
-      XMSS_WOTS_Parameters m_params;
-      wots_keysig_t m_key_data;
+      XMSS_WOTS_Parameters m_params;  // NOLINT(*non-private-member-variable*)
+      wots_keysig_t m_key_data;       // NOLINT(*non-private-member-variable*)
 };
 
 /**
@@ -48,29 +42,6 @@ class XMSS_WOTS_Base {
  **/
 class XMSS_WOTS_PublicKey : public XMSS_WOTS_Base {
    public:
-      /**
-       * Algorithm 4: "WOTS_genPK"
-       * Initializes a Winternitz One Time Signature+ (WOTS+) Public Key's
-       * key data, with passed-in private key data using the WOTS chaining
-       * function.
-       *
-       * This overload is used in multithreaded scenarios, where it is
-       * required to provide seperate instances of XMSS_Hash to each
-       * thread.
-       *
-       * @param params      The WOTS parameters to use
-       * @param public_seed The public seed for the public key generation
-       * @param private_key The private key to derive the public key from
-       * @param adrs        The address of the key to retrieve.
-       * @param hash        Instance of XMSS_Hash, that may only be used by the
-       *                    thread executing at.
-       **/
-      XMSS_WOTS_PublicKey(XMSS_WOTS_Parameters params,
-                          std::span<const uint8_t> public_seed,
-                          const XMSS_WOTS_PrivateKey& private_key,
-                          XMSS_Address& adrs,
-                          XMSS_Hash& hash);
-
       /**
        * Creates a XMSS_WOTS_PublicKey from a message and signature using
        * Algorithm 6 WOTS_pkFromSig defined in the XMSS standard. This
@@ -88,7 +59,7 @@ class XMSS_WOTS_PublicKey : public XMSS_WOTS_Base {
                           std::span<const uint8_t> public_seed,
                           wots_keysig_t signature,
                           const secure_vector<uint8_t>& msg,
-                          XMSS_Address& adrs,
+                          XMSS_Address adrs,
                           XMSS_Hash& hash);
 };
 
@@ -108,7 +79,7 @@ class XMSS_WOTS_PrivateKey : public XMSS_WOTS_Base {
        * recommendation.
        *
        * This overload is used in multithreaded scenarios, where it is
-       * required to provide seperate instances of XMSS_Hash to each thread.
+       * required to provide separate instances of XMSS_Hash to each thread.
        *
        * @param params       The WOTS parameters to use
        * @param public_seed  The public seed for the private key generation
@@ -146,7 +117,7 @@ class XMSS_WOTS_PrivateKey : public XMSS_WOTS_Base {
        * Generates a signature from a private key and a message.
        *
        * This overload is used in multithreaded scenarios, where it is
-       * required to provide seperate instances of XMSS_Hash to each
+       * required to provide separate instances of XMSS_Hash to each
        * thread.
        *
        * @param msg A message to sign.
@@ -160,9 +131,34 @@ class XMSS_WOTS_PrivateKey : public XMSS_WOTS_Base {
        **/
       wots_keysig_t sign(const secure_vector<uint8_t>& msg,
                          std::span<const uint8_t> public_seed,
-                         XMSS_Address& adrs,
+                         XMSS_Address adrs,
                          XMSS_Hash& hash);
 };
+
+/**
+ * Algorithm 2: Chaining Function, applied to many WOTS+ chains in lock-step.
+ *
+ * For each chain i the hash addresses [from[i], to[i]) are applied to
+ * the i'th n-byte node of nodes, batching the hash calls across all
+ * chains active in each step.
+ *
+ * @param params The WOTS parameters to use
+ * @param[in,out] nodes The chain nodes, transformed in place
+ * @param from Per chain, the first hash address to apply
+ * @param to Per chain, the hash address to stop at (exclusive)
+ * @param[in,out] addrs Per chain, its OTS hash address with the chain
+ *        address set. The hash address and key/mask mode are modified.
+ * @param seed The public seed
+ * @param hash Instance of XMSS_Hash, that may only be used by the thread
+ *        executing xmss_wots_chains.
+ **/
+void xmss_wots_chains(const XMSS_WOTS_Parameters& params,
+                      std::span<uint8_t> nodes,
+                      std::span<const uint8_t> from,
+                      std::span<const uint8_t> to,
+                      std::span<XMSS_Address> addrs,
+                      std::span<const uint8_t> seed,
+                      XMSS_Hash& hash);
 
 }  // namespace Botan
 

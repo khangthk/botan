@@ -9,14 +9,16 @@
 #define BOTAN_DL_PARAM_H_
 
 #include <botan/bigint.h>
+#include <memory>
 #include <string_view>
 
 namespace Botan {
 
+class Barrett_Reduction;
 class Montgomery_Params;
 class DL_Group_Data;
 
-enum class DL_Group_Source {
+enum class DL_Group_Source : uint8_t {
    Builtin,
    RandomlyGenerated,
    ExternalSource,
@@ -25,10 +27,10 @@ enum class DL_Group_Source {
 /**
 * The DL group encoding format variants.
 */
-enum class DL_Group_Format {
-   ANSI_X9_42,
-   ANSI_X9_57,
-   PKCS_3,
+enum class DL_Group_Format : uint8_t {
+   ANSI_X9_42 = 0,
+   ANSI_X9_57 = 1,
+   PKCS_3 = 2,
 
    DSA_PARAMETERS = ANSI_X9_57,
    DH_PARAMETERS = ANSI_X9_42,
@@ -46,16 +48,14 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       /**
       * Determine the prime creation for DL groups.
       */
-      enum PrimeType { Strong, Prime_Subgroup, DSA_Kosherizer };
+      enum PrimeType : uint8_t /* NOLINT(*-use-enum-class) */ { Strong, Prime_Subgroup, DSA_Kosherizer };
 
       using Format = DL_Group_Format;
 
       /**
       * Construct a DL group with uninitialized internal value.
-      * Use this constructor is you wish to set the groups values
-      * from a DER or PEM encoded group.
       */
-      DL_Group() = default;
+      BOTAN_DEPRECATED("Deprecated no replacement") DL_Group() = default;
 
       /**
       * Construct a DL group that is registered in the configuration.
@@ -63,14 +63,28 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       *
       * @warning This constructor also accepts PEM inputs. This behavior is
       * deprecated and will be removed in a future major release. Instead
-      * use DL_Group_from_PEM function
+      * use DL_Group::from_PEM or DL_Group::from_name
       */
-      explicit DL_Group(std::string_view name);
+      BOTAN_DEPRECATED("Use DL_Group::from_name or DL_Group::from_PEM") explicit DL_Group(std::string_view name);
+
+      /**
+      * Construct a DL group that is registered in the configuration.
+      * @param name the name of the group, for example "modp/ietf/3072"
+      * @throws Invalid_Argument if the named group is unknown
+      */
+      static DL_Group from_name(std::string_view name);
 
       /*
       * Read a PEM representation
       */
-      static DL_Group DL_Group_from_PEM(std::string_view pem);
+      static DL_Group from_PEM(std::string_view pem);
+
+      /*
+      * Read a PEM representation
+      */
+      BOTAN_DEPRECATED("Use from_PEM") static DL_Group DL_Group_from_PEM(std::string_view pem) {
+         return DL_Group::from_PEM(pem);
+      }
 
       /**
       * Create a new group randomly.
@@ -112,16 +126,14 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       DL_Group(const BigInt& p, const BigInt& q, const BigInt& g);
 
       /**
-      * Decode a BER-encoded DL group param
+      * Decode a DER-encoded DL group param
       */
-      DL_Group(const uint8_t ber[], size_t ber_len, DL_Group_Format format);
+      DL_Group(const uint8_t der[], size_t der_len, DL_Group_Format format) : DL_Group({der, der_len}, format) {}
 
       /**
-      * Decode a BER-encoded DL group param
+      * Decode a DER-encoded DL group param
       */
-      template <typename Alloc>
-      DL_Group(const std::vector<uint8_t, Alloc>& ber, DL_Group_Format format) :
-            DL_Group(ber.data(), ber.size(), format) {}
+      DL_Group(std::span<const uint8_t> der, DL_Group_Format format);
 
       /**
       * Get the prime p.
@@ -170,7 +182,7 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       *
       * This verifies that 1 < x,y < p and that y=g^x mod p
       */
-      bool verify_element_pair(const BigInt& y, const BigInt& x) const;
+      BOTAN_DEPRECATED("Deprecated no replacement") bool verify_element_pair(const BigInt& y, const BigInt& x) const;
 
       /**
       * Encode this group into a string using PEM encoding.
@@ -246,7 +258,9 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       *
       * @return (g^x) % p
       */
-      BigInt power_g_p(const BigInt& x) const;
+      BOTAN_DEPRECATED("Use version taking bitlength upper bound") inline BigInt power_g_p(const BigInt& x) const {
+         return power_g_p(x, x.bits());
+      }
 
       /**
       * Modular exponentiation
@@ -279,13 +293,10 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       /**
       * Multi-exponentiate
       * Return (g^x * y^z) % p
+      *
+      * @warning this function is variable time and should not be used with secret inputs
       */
       BigInt multi_exponentiate(const BigInt& x, const BigInt& y, const BigInt& z) const;
-
-      /**
-      * Return parameters for Montgomery reduction/exponentiation mod p
-      */
-      std::shared_ptr<const Montgomery_Params> monty_params_p() const;
 
       /**
       * Return the size of p in bits
@@ -339,28 +350,45 @@ class BOTAN_PUBLIC_API(2, 0) DL_Group final {
       size_t estimated_strength() const;
 
       /**
-      * Decode a DER/BER encoded group into this instance.
-      * @param ber a vector containing the DER/BER encoded group
+      * Decode a DER encoded group into this instance.
+      * @param der a vector containing the DER encoded group
       * @param format the format of the encoded group
       *
       * @warning avoid this. Instead use the DL_Group constructor
       */
-      void BER_decode(const std::vector<uint8_t>& ber, DL_Group_Format format);
+      BOTAN_DEPRECATED("Use DL_Group constructor taking DER encoding")
+      void BER_decode(const std::vector<uint8_t>& der, DL_Group_Format format) {
+         *this = DL_Group(der, format);
+      }
 
       DL_Group_Source source() const;
 
       /*
       * For internal use only
+      * TODO(Botan4) Underscore prefix this
       */
       static std::shared_ptr<DL_Group_Data> DL_group_info(std::string_view name);
 
+      /**
+      * Return parameters for Montgomery reduction/exponentiation mod p
+      *
+      * For internal use only
+      */
+      const Montgomery_Params& _monty_params_p() const;
+
+      /*
+      * For internal use only
+      */
+      const Barrett_Reduction& _reducer_mod_p() const;
+
    private:
+      explicit DL_Group(std::shared_ptr<DL_Group_Data> data) : m_data(std::move(data)) {}
+
       static std::shared_ptr<DL_Group_Data> load_DL_group_info(const char* p_str, const char* q_str, const char* g_str);
 
       static std::shared_ptr<DL_Group_Data> load_DL_group_info(const char* p_str, const char* g_str);
 
-      static std::shared_ptr<DL_Group_Data> BER_decode_DL_group(const uint8_t data[],
-                                                                size_t data_len,
+      static std::shared_ptr<DL_Group_Data> DER_decode_DL_group(std::span<const uint8_t> data,
                                                                 DL_Group_Format format,
                                                                 DL_Group_Source source);
 

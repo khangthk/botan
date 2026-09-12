@@ -11,9 +11,10 @@ There is probably no reason for you to run this. Unless you want to.
 Botan is released under the Simplified BSD License (see license.txt)
 """
 
-import optparse # pylint: disable=deprecated-module
-import sys
+import optparse  # pylint: disable=deprecated-module
 import subprocess
+import sys
+
 
 def get_module_list(configure_py):
     configure = subprocess.Popen([configure_py, '--list-modules'], stdout=subprocess.PIPE)
@@ -25,6 +26,12 @@ def get_module_list(configure_py):
 
     modules = [s.decode('ascii') for s in stdout.split()]
     modules.remove('tpm') # can't test
+    modules.remove('jitter_rng')
+    modules.remove('esdm_rng')
+    modules.remove('tpm2')
+    modules.remove('tpm2_crypto_backend')
+    modules.remove('tpm2_ecc')
+    modules.remove('tpm2_rsa')
     modules.remove('base') # can't remove
     return modules
 
@@ -55,7 +62,7 @@ def try_to_run(cmdline):
     return not failed
 
 def run_test_build(configure_py, modules, include, jobs, run_tests):
-    config = [configure_py, '--without-documentation']
+    config = [configure_py, '--without-documentation', '--compiler-cache=ccache', '--maintainer-mode']
 
     if include:
         config.append('--minimized')
@@ -101,8 +108,8 @@ def main(args):
     configure_py = './configure.py'
     modules = get_module_list(configure_py)
 
-    cant_disable = ['block', 'hash', 'hex', 'mac', 'modes', 'rng', 'stream', 'utils', 'cpuid', 'entropy']
-    always_include = ['thread_utils', 'sha2_64']#, 'sha2_64', 'aes']
+    cant_disable = ['block', 'hash', 'hex', 'mac', 'modes', 'rng', 'stream', 'utils', 'cpuid']
+    always_include = ['thread_utils', 'sha2_64']
 
     fails = 0
     failed = []

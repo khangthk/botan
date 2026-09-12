@@ -7,6 +7,7 @@
 
 #include <botan/bigint.h>
 
+#include <botan/exceptn.h>
 #include <botan/internal/bit_ops.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/loadstor.h>
@@ -16,26 +17,17 @@
 namespace Botan {
 
 BigInt::BigInt(uint64_t n) {
-#if BOTAN_MP_WORD_BITS == 64
-   m_data.set_word_at(0, n);
-#else
-   m_data.set_word_at(1, static_cast<word>(n >> 32));
-   m_data.set_word_at(0, static_cast<word>(n));
-#endif
+   if constexpr(sizeof(word) == 8) {
+      m_data.set_word_at(0, static_cast<word>(n));
+   } else {
+      m_data.set_word_at(1, static_cast<word>(n >> 32));
+      m_data.set_word_at(0, static_cast<word>(n));
+   }
 }
 
 //static
 BigInt BigInt::from_u64(uint64_t n) {
-   BigInt bn;
-
-#if BOTAN_MP_WORD_BITS == 64
-   bn.set_word_at(0, n);
-#else
-   bn.set_word_at(1, static_cast<word>(n >> 32));
-   bn.set_word_at(0, static_cast<word>(n));
-#endif
-
-   return bn;
+   return BigInt(n);
 }
 
 //static
@@ -50,7 +42,7 @@ BigInt BigInt::from_s32(int32_t n) {
    if(n >= 0) {
       return BigInt::from_u64(static_cast<uint64_t>(n));
    } else {
-      return -BigInt::from_u64(static_cast<uint64_t>(-n));
+      return -BigInt::from_u64(static_cast<uint64_t>(-static_cast<int64_t>(n)));
    }
 }
 
@@ -61,35 +53,30 @@ BigInt BigInt::with_capacity(size_t size) {
    return bn;
 }
 
-/*
-* Construct a BigInt from a string
-*/
-BigInt::BigInt(std::string_view str) {
-   Base base = Decimal;
-   size_t markers = 0;
+BigInt BigInt::from_string(std::string_view str) {
+   size_t prefix_bytes = 0;
    bool negative = false;
+   size_t radix = 10;
 
    if(!str.empty() && str[0] == '-') {
-      markers += 1;
+      prefix_bytes += 1;
       negative = true;
    }
 
-   if(str.length() > markers + 2 && str[markers] == '0' && str[markers + 1] == 'x') {
-      markers += 2;
-      base = Hexadecimal;
+   if(str.length() > prefix_bytes + 2 && str[prefix_bytes] == '0' && str[prefix_bytes + 1] == 'x') {
+      prefix_bytes += 2;
+      radix = 16;
    }
 
-   *this = decode(cast_char_ptr_to_uint8(str.data()) + markers, str.length() - markers, base);
+   BigInt r = BigInt::from_radix_digits(str.substr(prefix_bytes), radix);
 
    if(negative) {
-      set_sign(Negative);
+      r.set_sign(Negative);
    } else {
-      set_sign(Positive);
+      r.set_sign(Positive);
    }
-}
 
-BigInt BigInt::from_string(std::string_view str) {
-   return BigInt(str);
+   return r;
 }
 
 BigInt BigInt::from_bytes(std::span<const uint8_t> input) {
@@ -132,7 +119,7 @@ uint8_t BigInt::byte_at(size_t n) const {
 }
 
 int32_t BigInt::cmp_word(word other) const {
-   if(is_negative()) {
+   if(signum() < 0) {
       return -1;  // other is positive ...
    }
 
@@ -149,15 +136,15 @@ int32_t BigInt::cmp_word(word other) const {
 */
 int32_t BigInt::cmp(const BigInt& other, bool check_signs) const {
    if(check_signs) {
-      if(other.is_positive() && this->is_negative()) {
+      if(other.signum() >= 0 && this->signum() < 0) {
          return -1;
       }
 
-      if(other.is_negative() && this->is_positive()) {
+      if(other.signum() < 0 && this->signum() >= 0) {
          return 1;
       }
 
-      if(other.is_negative() && this->is_negative()) {
+      if(other.signum() < 0 && this->signum() < 0) {
          return (-bigint_cmp(this->_data(), this->size(), other._data(), other.size()));
       }
    }
@@ -170,23 +157,23 @@ bool BigInt::is_equal(const BigInt& other) const {
       return false;
    }
 
-   return bigint_ct_is_eq(this->_data(), this->sig_words(), other._data(), other.sig_words()).as_bool();
+   return bigint_ct_is_eq(this->_data(), this->size(), other._data(), other.size()).as_bool();
 }
 
 bool BigInt::is_less_than(const BigInt& other) const {
-   if(this->is_negative() && other.is_positive()) {
+   if(this->signum() < 0 && other.signum() >= 0) {
       return true;
    }
 
-   if(this->is_positive() && other.is_negative()) {
+   if(this->signum() >= 0 && other.signum() < 0) {
       return false;
    }
 
-   if(other.is_negative() && this->is_negative()) {
-      return bigint_ct_is_lt(other._data(), other.sig_words(), this->_data(), this->sig_words()).as_bool();
+   if(other.signum() < 0 && this->signum() < 0) {
+      return bigint_ct_is_lt(other._data(), other.size(), this->_data(), this->size()).as_bool();
    }
 
-   return bigint_ct_is_lt(this->_data(), this->sig_words(), other._data(), other.sig_words()).as_bool();
+   return bigint_ct_is_lt(this->_data(), this->size(), other._data(), other.size()).as_bool();
 }
 
 void BigInt::encode_words(word out[], size_t size) const {
@@ -198,6 +185,30 @@ void BigInt::encode_words(word out[], size_t size) const {
 
    clear_mem(out, size);
    copy_mem(out, _data(), words);
+}
+
+void BigInt::Data::set_to_zero() {
+   m_reg.resize(m_reg.capacity());
+   clear_mem(m_reg.data(), m_reg.size());
+   m_sig_words = 0;
+}
+
+void BigInt::Data::mask_bits(size_t n) {
+   if(n == 0) {
+      return set_to_zero();
+   }
+
+   const size_t top_word = n / WordInfo<word>::bits;
+
+   if(top_word < size()) {
+      const word mask = (static_cast<word>(1) << (n % WordInfo<word>::bits)) - 1;
+      const size_t len = size() - (top_word + 1);
+      if(len > 0) {
+         clear_mem(&m_reg[top_word + 1], len);
+      }
+      m_reg[top_word] &= mask;
+      invalidate_sig_words();
+   }
 }
 
 size_t BigInt::Data::calc_sig_words() const {
@@ -231,8 +242,8 @@ uint32_t BigInt::get_substring(size_t offset, size_t length) const {
 
    const uint32_t mask = 0xFFFFFFFF >> (32 - length);
 
-   const size_t word_offset = offset / BOTAN_MP_WORD_BITS;
-   const size_t wshift = (offset % BOTAN_MP_WORD_BITS);
+   const size_t word_offset = offset / WordInfo<word>::bits;
+   const size_t wshift = (offset % WordInfo<word>::bits);
 
    /*
    * The substring is contained within one or at most two words. The
@@ -241,11 +252,11 @@ uint32_t BigInt::get_substring(size_t offset, size_t length) const {
    */
    const word w0 = word_at(word_offset);
 
-   if(wshift == 0 || (offset + length) / BOTAN_MP_WORD_BITS == word_offset) {
+   if(wshift == 0 || (offset + length) / WordInfo<word>::bits == word_offset) {
       return static_cast<uint32_t>(w0 >> wshift) & mask;
    } else {
       const word w1 = word_at(word_offset + 1);
-      return static_cast<uint32_t>((w0 >> wshift) | (w1 << (BOTAN_MP_WORD_BITS - wshift))) & mask;
+      return static_cast<uint32_t>((w0 >> wshift) | (w1 << (WordInfo<word>::bits - wshift))) & mask;
    }
 }
 
@@ -253,7 +264,7 @@ uint32_t BigInt::get_substring(size_t offset, size_t length) const {
 * Convert this number to a uint32_t, if possible
 */
 uint32_t BigInt::to_u32bit() const {
-   if(is_negative()) {
+   if(signum() < 0) {
       throw Encoding_Error("BigInt::to_u32bit: Number is negative");
    }
    if(bits() > 32) {
@@ -271,10 +282,10 @@ uint32_t BigInt::to_u32bit() const {
 * Clear bit number n
 */
 void BigInt::clear_bit(size_t n) {
-   const size_t which = n / BOTAN_MP_WORD_BITS;
+   const size_t which = n / WordInfo<word>::bits;
 
    if(which < size()) {
-      const word mask = ~(static_cast<word>(1) << (n % BOTAN_MP_WORD_BITS));
+      const word mask = ~(static_cast<word>(1) << (n % WordInfo<word>::bits));
       m_data.set_word_at(which, word_at(which) & mask);
    }
 }
@@ -289,7 +300,7 @@ size_t BigInt::top_bits_free() const {
    const word top_word = word_at(words - 1);
    const size_t bits_used = high_bit(CT::value_barrier(top_word));
    CT::unpoison(bits_used);
-   return BOTAN_MP_WORD_BITS - bits_used;
+   return WordInfo<word>::bits - bits_used;
 }
 
 size_t BigInt::bits() const {
@@ -299,8 +310,8 @@ size_t BigInt::bits() const {
       return 0;
    }
 
-   const size_t full_words = (words - 1) * BOTAN_MP_WORD_BITS;
-   const size_t top_bits = BOTAN_MP_WORD_BITS - top_bits_free();
+   const size_t full_words = (words - 1) * WordInfo<word>::bits;
+   const size_t top_bits = WordInfo<word>::bits - top_bits_free();
 
    return full_words + top_bits;
 }
@@ -315,7 +326,7 @@ BigInt BigInt::operator-() const {
 }
 
 size_t BigInt::reduce_below(const BigInt& p, secure_vector<word>& ws) {
-   if(p.is_negative() || this->is_negative()) {
+   if(p.signum() < 0 || this->signum() < 0) {
       throw Invalid_Argument("BigInt::reduce_below both values must be positive");
    }
 
@@ -334,8 +345,8 @@ size_t BigInt::reduce_below(const BigInt& p, secure_vector<word>& ws) {
    size_t reductions = 0;
 
    for(;;) {
-      word borrow = bigint_sub3(ws.data(), _data(), p_words + 1, p._data(), p_words);
-      if(borrow) {
+      const word borrow = bigint_sub3(ws.data(), _data(), p_words + 1, p._data(), p_words);
+      if(borrow > 0) {
          break;
       }
 
@@ -347,7 +358,7 @@ size_t BigInt::reduce_below(const BigInt& p, secure_vector<word>& ws) {
 }
 
 void BigInt::ct_reduce_below(const BigInt& mod, secure_vector<word>& ws, size_t bound) {
-   if(mod.is_negative() || this->is_negative()) {
+   if(mod.signum() < 0 || this->signum() < 0) {
       throw Invalid_Argument("BigInt::ct_reduce_below both values must be positive");
    }
 
@@ -362,7 +373,7 @@ void BigInt::ct_reduce_below(const BigInt& mod, secure_vector<word>& ws, size_t 
    clear_mem(ws.data(), sz);
 
    for(size_t i = 0; i != bound; ++i) {
-      word borrow = bigint_sub3(ws.data(), _data(), sz, mod._data(), mod_words);
+      const word borrow = bigint_sub3(ws.data(), _data(), sz, mod._data(), mod_words);
 
       CT::Mask<word>::is_zero(borrow).select_n(mutable_data(), ws.data(), _data(), sz);
    }
@@ -435,29 +446,32 @@ void BigInt::assign_from_bytes(std::span<const uint8_t> bytes) {
 }
 
 void BigInt::ct_cond_add(bool predicate, const BigInt& value) {
-   if(this->is_negative() || value.is_negative()) {
+   if(this->signum() < 0 || value.signum() < 0) {
       throw Invalid_Argument("BigInt::ct_cond_add requires both values to be positive");
    }
-   this->grow_to(1 + value.sig_words());
+   const size_t v_words = value.sig_words();
 
-   bigint_cnd_add(static_cast<word>(predicate), this->mutable_data(), this->size(), value._data(), value.sig_words());
+   // The carry can propagate through every existing word of *this, so the
+   // output needs one slot above whichever input is wider.
+   this->grow_to(std::max(this->size(), v_words) + 1);
+
+   const auto mask = CT::Mask<word>::expand(static_cast<word>(predicate)).value();
+
+   word carry = 0;
+
+   word* x = this->mutable_data();
+   const word* y = value._data();
+
+   for(size_t i = 0; i != v_words; ++i) {
+      x[i] = word_add(x[i], y[i] & mask, &carry);
+   }
+
+   for(size_t i = v_words; i != size(); ++i) {
+      x[i] = word_add(x[i], static_cast<word>(0), &carry);
+   }
 }
 
 void BigInt::ct_shift_left(size_t shift) {
-   auto shl_bit = [](const BigInt& a, BigInt& result) {
-      BOTAN_DEBUG_ASSERT(a.size() + 1 == result.size());
-      bigint_shl2(result.mutable_data(), a._data(), a.size(), 1);
-      // shl2 may have shifted a bit into the next word, which must be dropped
-      clear_mem(result.mutable_data() + result.size() - 1, 1);
-   };
-
-   auto shl_word = [](const BigInt& a, BigInt& result) {
-      // the most significant word is not copied, aka. shifted out
-      bigint_shl2(result.mutable_data(), a._data(), a.size() - 1 /* ignore msw */, BOTAN_MP_WORD_BITS);
-      // we left-shifted by a full word, the least significant word must be zero'ed
-      clear_mem(result.mutable_data(), 1);
-   };
-
    BOTAN_ASSERT_NOMSG(size() > 0);
 
    constexpr size_t bits_in_word = sizeof(word) * 8;
@@ -465,15 +479,33 @@ void BigInt::ct_shift_left(size_t shift) {
    const size_t bit_shift = shift & ((1 << ceil_log2(bits_in_word)) - 1);  // shift % bits_in_word
    const size_t iterations = std::max(size(), bits_in_word) - 1;           // uint64_t i; i << 64 is undefined behaviour
 
+   const size_t n = size();
+
+   // Workspace 1 word larger to catch overflow from bigint_shl2
+   secure_vector<word> ws(n + 1);
+
    // In every iteration, shift one bit and one word to the left and use the
    // shift results only when they are within the shift range.
-   BigInt tmp;
-   tmp.resize(size() + 1 /* to hold the shifted-out word */);
    for(size_t i = 0; i < iterations; ++i) {
-      shl_bit(*this, tmp);
-      ct_cond_assign(i < bit_shift, tmp);
-      shl_word(*this, tmp);
-      ct_cond_assign(i < word_shift, tmp);
+      // Shift left by 1 bit, dropping overflow
+      bigint_shl2(ws.data(), n + 1, _data(), n, 1);
+      ws[n] = 0;
+
+      // Conditionally assign the bit-shift result
+      const auto bmask = CT::Mask<word>::expand_bool(i < bit_shift);
+      for(size_t j = 0; j != n; ++j) {
+         m_data.set_word_at(j, bmask.select(ws[j], word_at(j)));
+      }
+
+      // Shift left by 1 word, dropping the most significant word
+      bigint_shl2(ws.data(), n + 1, _data(), n - 1 /* ignore msw */, WordInfo<word>::bits);
+      ws[0] = 0;
+
+      // Conditionally assign the word-shift result
+      const auto wmask = CT::Mask<word>::expand_bool(i < word_shift);
+      for(size_t j = 0; j != n; ++j) {
+         m_data.set_word_at(j, wmask.select(ws[j], word_at(j)));
+      }
    }
 }
 
@@ -488,7 +520,7 @@ void BigInt::ct_cond_swap(bool predicate, BigInt& other) {
 void BigInt::cond_flip_sign(bool predicate) {
    // This code is assuming Negative == 0, Positive == 1
 
-   const auto mask = CT::Mask<uint8_t>::expand(predicate);
+   const auto mask = CT::Mask<uint8_t>::expand_bool(predicate);
 
    const uint8_t current_sign = static_cast<uint8_t>(sign());
 
@@ -501,13 +533,13 @@ void BigInt::ct_cond_assign(bool predicate, const BigInt& other) {
    const size_t t_words = size();
    const size_t o_words = other.size();
 
-   if(o_words < t_words) {
+   if(t_words < o_words) {
       grow_to(o_words);
    }
 
    const size_t r_words = std::max(t_words, o_words);
 
-   const auto mask = CT::Mask<word>::expand(predicate);
+   const auto mask = CT::Mask<word>::expand_bool(predicate);
 
    for(size_t i = 0; i != r_words; ++i) {
       const word o_word = other.word_at(i);
@@ -515,11 +547,10 @@ void BigInt::ct_cond_assign(bool predicate, const BigInt& other) {
       this->set_word_at(i, mask.select(o_word, t_word));
    }
 
-   const bool different_sign = sign() != other.sign();
-   cond_flip_sign(predicate && different_sign);
+   const auto same_sign = CT::Mask<word>::is_equal(sign(), other.sign()).as_choice();
+   cond_flip_sign((mask.as_choice() && !same_sign).as_bool());
 }
 
-#if defined(BOTAN_CT_POISON_ENABLED)
 void BigInt::_const_time_poison() const {
    CT::poison(m_data.const_data(), m_data.size());
 }
@@ -527,6 +558,5 @@ void BigInt::_const_time_poison() const {
 void BigInt::_const_time_unpoison() const {
    CT::unpoison(m_data.const_data(), m_data.size());
 }
-#endif
 
 }  // namespace Botan

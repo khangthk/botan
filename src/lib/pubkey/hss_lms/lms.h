@@ -19,6 +19,8 @@
 
 namespace Botan {
 
+class BufferSlicer;
+
 /**
  * @brief Enum of available LMS algorithm types.
  *
@@ -27,7 +29,7 @@ namespace Botan {
  * introduced in RFC 8554 Section 3.2. and their format specified in
  * Section 3.3.
  */
-enum class LMS_Algorithm_Type : uint32_t {
+enum class LMS_Algorithm_Type : uint32_t /* NOLINT(*-enum-size) */ {
    // --- RFC 8554 ---
    RESERVED = 0x00,
 
@@ -86,7 +88,7 @@ using LMS_Signature_Bytes = Strong<std::vector<uint8_t>, struct LMS_Signature_By
  *
  * See RFC 8554 Section 5.1.
  */
-class BOTAN_TEST_API LMS_Params {
+class LMS_Params final {
    public:
       /**
        * @brief Create the LMS parameters from a known algorithm type.
@@ -104,7 +106,7 @@ class BOTAN_TEST_API LMS_Params {
       static LMS_Params create_or_throw(std::string_view hash_name, uint8_t h);
 
       /**
-       * @brief Retuns the LMS algorithm type.
+       * @brief Returns the LMS algorithm type.
        */
       LMS_Algorithm_Type algorithm_type() const { return m_algorithm_type; }
 
@@ -126,7 +128,7 @@ class BOTAN_TEST_API LMS_Params {
       /**
        * @brief Construct a new hash instance for the LMS instance.
        */
-      std::unique_ptr<HashFunction> hash() const { return HashFunction::create_or_throw(hash_name()); }
+      std::unique_ptr<HashFunction> hash() const;
 
    private:
       /**
@@ -187,7 +189,7 @@ class LMS_PublicKey;
  * Contains the secret seed used for OTS key derivation
  * as described in RFC 8554 Appendix A.
  */
-class BOTAN_TEST_API LMS_PrivateKey : public LMS_Instance {
+class BOTAN_TEST_API LMS_PrivateKey final : public LMS_Instance {
    public:
       /**
        * @brief Construct storing the LMS instance data and the secret seed
@@ -222,7 +224,7 @@ class LMS_Signature;
  * Format according to RFC 8554:
  * u32str(type) || u32str(otstype) || I || T[1]
  */
-class BOTAN_TEST_API LMS_PublicKey : public LMS_Instance {
+class BOTAN_TEST_API LMS_PublicKey final : public LMS_Instance {
    public:
       /**
        * @brief Parse a public LMS key.
@@ -241,7 +243,7 @@ class BOTAN_TEST_API LMS_PublicKey : public LMS_Instance {
       /**
        * @brief Construct a new public key from a given LMS private key (RFC 8554 5.3).
        */
-      LMS_PublicKey(const LMS_PrivateKey& sk);
+      explicit LMS_PublicKey(const LMS_PrivateKey& sk);
 
       /**
        * @brief Bytes of the full lms public key according to 8554 5.3
@@ -290,7 +292,7 @@ class BOTAN_TEST_API LMS_PublicKey : public LMS_Instance {
  *
  * Contains a method for secure signature parsing.
  */
-class BOTAN_TEST_API LMS_Signature {
+class BOTAN_TEST_API LMS_Signature final {
    public:
       /**
        * @brief Parse the bytes of a lms signature into a LMS Signature object

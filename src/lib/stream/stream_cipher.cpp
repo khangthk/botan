@@ -75,7 +75,7 @@ std::unique_ptr<StreamCipher> StreamCipher::create(std::string_view algo_spec, s
       if(provider.empty() || provider == "base") {
          auto cipher = BlockCipher::create(req.arg(0));
          if(cipher) {
-            size_t ctr_size = req.arg_as_integer(1, cipher->block_size());
+            const size_t ctr_size = req.arg_as_integer(1, cipher->block_size());
             return std::make_unique<CTR_BE>(std::move(cipher), ctr_size);
          }
       }
@@ -128,6 +128,11 @@ std::unique_ptr<StreamCipher> StreamCipher::create_or_throw(std::string_view alg
 
 std::vector<std::string> StreamCipher::providers(std::string_view algo_spec) {
    return probe_providers_of<StreamCipher>(algo_spec);
+}
+
+void StreamCipher::cipher(std::span<const uint8_t> in, std::span<uint8_t> out) {
+   BOTAN_ARG_CHECK(in.size() <= out.size(), "Output buffer of stream cipher must be at least as long as input buffer");
+   cipher_bytes(in.data(), out.data(), in.size());
 }
 
 size_t StreamCipher::default_iv_length() const {

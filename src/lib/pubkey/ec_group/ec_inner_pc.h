@@ -32,11 +32,15 @@ class EC_Scalar_Data_PC final : public EC_Scalar_Data {
 
       void assign(const EC_Scalar_Data& y) override;
 
+      void zeroize() override;
+
       void square_self() override;
 
       std::unique_ptr<EC_Scalar_Data> negate() const override;
 
       std::unique_ptr<EC_Scalar_Data> invert() const override;
+
+      std::unique_ptr<EC_Scalar_Data> invert_vartime() const override;
 
       std::unique_ptr<EC_Scalar_Data> add(const EC_Scalar_Data& other) const override;
 
@@ -56,8 +60,6 @@ class EC_Scalar_Data_PC final : public EC_Scalar_Data {
 class EC_AffinePoint_Data_PC final : public EC_AffinePoint_Data {
    public:
       EC_AffinePoint_Data_PC(std::shared_ptr<const EC_Group_Data> group, PCurve::PrimeOrderCurve::AffinePoint pt);
-
-      EC_AffinePoint_Data_PC(std::shared_ptr<const EC_Group_Data> group, std::span<const uint8_t> pt);
 
       static const EC_AffinePoint_Data_PC& checked_ref(const EC_AffinePoint_Data& data);
 
@@ -79,13 +81,15 @@ class EC_AffinePoint_Data_PC final : public EC_AffinePoint_Data {
 
       void serialize_uncompressed_to(std::span<uint8_t> bytes) const override;
 
-      std::unique_ptr<EC_AffinePoint_Data> mul(const EC_Scalar_Data& scalar,
-                                               RandomNumberGenerator& rng,
-                                               std::vector<BigInt>& ws) const override;
+      std::unique_ptr<EC_AffinePoint_Data> mul(const EC_Scalar_Data& scalar, RandomNumberGenerator& rng) const override;
+
+      secure_vector<uint8_t> mul_x_only(const EC_Scalar_Data& scalar, RandomNumberGenerator& rng) const override;
 
       const PCurve::PrimeOrderCurve::AffinePoint& value() const { return m_pt; }
 
+#if defined(BOTAN_HAS_LEGACY_EC_POINT)
       EC_Point to_legacy_point() const override;
+#endif
 
    private:
       std::shared_ptr<const EC_Group_Data> m_group;
@@ -95,7 +99,7 @@ class EC_AffinePoint_Data_PC final : public EC_AffinePoint_Data {
 
 class EC_Mul2Table_Data_PC final : public EC_Mul2Table_Data {
    public:
-      EC_Mul2Table_Data_PC(const EC_AffinePoint_Data& g, const EC_AffinePoint_Data& h);
+      explicit EC_Mul2Table_Data_PC(const EC_AffinePoint_Data& q);
 
       std::unique_ptr<EC_AffinePoint_Data> mul2_vartime(const EC_Scalar_Data& x,
                                                         const EC_Scalar_Data& y) const override;

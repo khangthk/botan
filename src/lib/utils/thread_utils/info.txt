@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 THREAD_UTILS -> 20190922
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "Thread Utilities"
@@ -16,3 +16,7 @@ thread_pool.h
 <os_features>
 threads
 </os_features>
+
+<requires>
+os_utils
+</requires>

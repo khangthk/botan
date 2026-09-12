@@ -61,10 +61,7 @@ class Secp224r1Rep final {
 
          BOTAN_DEBUG_ASSERT(S <= 2);
 
-         const auto correction = p224_mul_mod_224(S);
-         W borrow = bigint_sub2(r.data(), N, correction.data(), N);
-
-         bigint_cnd_add(borrow, r.data(), N, P.data(), N);
+         solinas_correct_redc<N>(r, P, p224_mul_mod_224(S));
 
          return r;
       }
@@ -102,6 +99,7 @@ class Secp224r1Rep final {
 };
 
 // clang-format off
+
 class Params final : public EllipticCurveParameters<
    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000001",
    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFE",
@@ -116,7 +114,7 @@ class Params final : public EllipticCurveParameters<
 class Curve final : public EllipticCurve<Params, Secp224r1Rep> {
    public:
       // Return the square of the inverse of x
-      static FieldElement fe_invert2(const FieldElement& x) {
+      static constexpr FieldElement fe_invert2(const FieldElement& x) {
          auto z = x.square();
          z *= x;
          z = z.square();
@@ -150,7 +148,7 @@ class Curve final : public EllipticCurve<Params, Secp224r1Rep> {
          return z.square();
       }
 
-      static Scalar scalar_invert(const Scalar& x) {
+      static constexpr Scalar scalar_invert(const Scalar& x) {
          // Generated using https://github.com/mmcloughlin/addchain
          auto t6 = x.square();
          auto z = t6.square();

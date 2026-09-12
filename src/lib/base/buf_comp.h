@@ -9,7 +9,6 @@
 #define BOTAN_BUFFERED_COMPUTATION_H_
 
 #include <botan/concepts.h>
-#include <botan/mem_ops.h>
 #include <botan/secmem.h>
 #include <span>
 #include <string_view>
@@ -20,9 +19,10 @@ namespace Botan {
 * This class represents any kind of computation which uses an internal
 * state, such as hash functions or MACs
 */
-class BOTAN_PUBLIC_API(2, 0) Buffered_Computation {
+class BOTAN_PUBLIC_API(2, 0) Buffered_Computation /* NOLINT(*special-member-functions) */ {
    public:
       /**
+      * Return the output length of this function
       * @return length of the output of this function in bytes
       */
       virtual size_t output_length() const = 0;
@@ -40,12 +40,40 @@ class BOTAN_PUBLIC_API(2, 0) Buffered_Computation {
       */
       void update(std::span<const uint8_t> in) { add_data(in); }
 
+      /**
+      * Add new input to process, encoded as a big-endian integer
+      * @param val the value to process
+      */
       void update_be(uint16_t val);
+
+      /**
+      * Add new input to process, encoded as a big-endian integer
+      * @param val the value to process
+      */
       void update_be(uint32_t val);
+
+      /**
+      * Add new input to process, encoded as a big-endian integer
+      * @param val the value to process
+      */
       void update_be(uint64_t val);
 
+      /**
+      * Add new input to process, encoded as a little-endian integer
+      * @param val the value to process
+      */
       void update_le(uint16_t val);
+
+      /**
+      * Add new input to process, encoded as a little-endian integer
+      * @param val the value to process
+      */
       void update_le(uint32_t val);
+
+      /**
+      * Add new input to process, encoded as a little-endian integer
+      * @param val the value to process
+      */
       void update_le(uint64_t val);
 
       /**
@@ -53,7 +81,7 @@ class BOTAN_PUBLIC_API(2, 0) Buffered_Computation {
       * @param str the input to process as a std::string_view. Will be interpreted
       * as a byte array based on the strings encoding.
       */
-      void update(std::string_view str) { add_data({cast_char_ptr_to_uint8(str.data()), str.size()}); }
+      void update(std::string_view str);
 
       /**
       * Process a single byte.
@@ -62,16 +90,14 @@ class BOTAN_PUBLIC_API(2, 0) Buffered_Computation {
       void update(uint8_t in) { add_data({&in, 1}); }
 
       /**
-      * Complete the computation and retrieve the
-      * final result.
-      * @param out The byte array to be filled with the result.
-      * Must be of length output_length()
+      * Complete the computation and retrieve the final result.
+      * @param out The byte array to be filled with the result, which
+      * must be of length output_length()
       */
       void final(uint8_t out[]) { final_result({out, output_length()}); }
 
       /**
-      * Complete the computation and retrieve the
-      * final result as a container of your choice.
+      * Complete the computation and retrieve the final result as a container.
       * @return a contiguous container holding the result
       */
       template <concepts::resizable_byte_buffer T = secure_vector<uint8_t>>
@@ -81,13 +107,22 @@ class BOTAN_PUBLIC_API(2, 0) Buffered_Computation {
          return output;
       }
 
+      /**
+      * Complete the computation and retrieve the final result
+      * @return a std::vector holding the result
+      */
       std::vector<uint8_t> final_stdvec() { return final<std::vector<uint8_t>>(); }
 
-      void final(std::span<uint8_t> out) {
-         BOTAN_ARG_CHECK(out.size() >= output_length(), "provided output buffer has insufficient capacity");
-         final_result(out);
-      }
+      /**
+      * Complete the computation and retrieve the final result
+      * @param out the buffer to write the result to, must be output_length() bytes
+      */
+      void final(std::span<uint8_t> out);
 
+      /**
+      * Complete the computation and retrieve the final result
+      * @param out a container which is resized to hold the result
+      */
       template <concepts::resizable_byte_buffer T>
       void final(T& out) {
          out.resize(output_length());

@@ -8,8 +8,9 @@
 #include <botan/internal/comb4p.h>
 
 #include <botan/exceptn.h>
+#include <botan/mem_ops.h>
+#include <botan/internal/buffer_stuffer.h>
 #include <botan/internal/fmt.h>
-#include <botan/internal/stl_util.h>
 
 namespace Botan {
 
@@ -50,6 +51,11 @@ Comb4P::Comb4P(std::unique_ptr<HashFunction> h1, std::unique_ptr<HashFunction> h
 
 std::string Comb4P::name() const {
    return fmt("Comb4P({},{})", m_hash1->name(), m_hash2->name());
+}
+
+size_t Comb4P::security_level() const {
+   // Comb4P is collision resistant as long as either hash is
+   return std::max(m_hash1->security_level(), m_hash2->security_level());
 }
 
 std::unique_ptr<HashFunction> Comb4P::new_object() const {

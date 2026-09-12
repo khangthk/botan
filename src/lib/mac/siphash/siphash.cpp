@@ -7,17 +7,21 @@
 
 #include <botan/internal/siphash.h>
 
+#include <botan/exceptn.h>
+#include <botan/internal/buffer_slicer.h>
 #include <botan/internal/fmt.h>
 #include <botan/internal/loadstor.h>
 #include <botan/internal/rotate.h>
-#include <botan/internal/stl_util.h>
 
 namespace Botan {
 
 namespace {
 
 void SipRounds(uint64_t M, secure_vector<uint64_t>& V, size_t r) {
-   uint64_t V0 = V[0], V1 = V[1], V2 = V[2], V3 = V[3];
+   uint64_t V0 = V[0];
+   uint64_t V1 = V[1];
+   uint64_t V2 = V[2];
+   uint64_t V3 = V[3];
 
    V3 ^= M;
    for(size_t i = 0; i != r; ++i) {
@@ -47,6 +51,11 @@ void SipRounds(uint64_t M, secure_vector<uint64_t>& V, size_t r) {
 
 }  // namespace
 
+SipHash::SipHash(size_t c, size_t d) : m_C(c), m_D(d) {
+   BOTAN_ARG_CHECK(m_C > 0 && m_C <= 64, "SipHash C parameter out of range");
+   BOTAN_ARG_CHECK(m_D > 0 && m_D <= 64, "SipHash D parameter out of range");
+}
+
 void SipHash::add_data(std::span<const uint8_t> input) {
    assert_key_material_set();
 
@@ -55,7 +64,7 @@ void SipHash::add_data(std::span<const uint8_t> input) {
 
    BufferSlicer in(input);
 
-   if(m_mbuf_pos) {
+   if(m_mbuf_pos > 0) {
       while(!in.empty() && m_mbuf_pos != 8) {
          m_mbuf = (m_mbuf >> 8) | (static_cast<uint64_t>(in.take_byte()) << 56);
          ++m_mbuf_pos;
@@ -96,6 +105,20 @@ void SipHash::final_result(std::span<uint8_t> mac) {
 
    store_le(X, mac.data());
 
+   reset_msg();
+}
+
+void SipHash::start_msg(std::span<const uint8_t> nonce) {
+   if(!nonce.empty()) {
+      throw Invalid_IV_Length(name(), nonce.size());
+   }
+   assert_key_material_set();
+
+   reset_msg();
+}
+
+void SipHash::reset_msg() {
+   m_V.resize(4);
    m_V[0] = m_K[0] ^ 0x736F6D6570736575;
    m_V[1] = m_K[1] ^ 0x646F72616E646F6D;
    m_V[2] = m_K[0] ^ 0x6C7967656E657261;
@@ -118,10 +141,7 @@ void SipHash::key_schedule(std::span<const uint8_t> key) {
    m_K[1] = K1;
 
    m_V.resize(4);
-   m_V[0] = m_K[0] ^ 0x736F6D6570736575;
-   m_V[1] = m_K[1] ^ 0x646F72616E646F6D;
-   m_V[2] = m_K[0] ^ 0x6C7967656E657261;
-   m_V[3] = m_K[1] ^ 0x7465646279746573;
+   reset_msg();
 }
 
 void SipHash::clear() {

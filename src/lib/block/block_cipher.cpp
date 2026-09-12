@@ -7,8 +7,11 @@
 
 #include <botan/block_cipher.h>
 
+#include <botan/assert.h>
 #include <botan/exceptn.h>
 #include <botan/internal/scan_name.h>
+#include <memory>
+#include <utility>
 
 #if defined(BOTAN_HAS_AES)
    #include <botan/internal/aes.h>
@@ -51,6 +54,8 @@
 #endif
 
 #if defined(BOTAN_HAS_LION)
+   #include <botan/hash.h>
+   #include <botan/stream_cipher.h>
    #include <botan/internal/lion.h>
 #endif
 

@@ -1,6 +1,6 @@
-<defines>
+<internal_defines>
 SHACAL2_ARMV8 -> 20201221
-</defines>
+</internal_defines>
 
 <module_info>
 name -> "SHACAL-2 ARMv8"
@@ -8,7 +8,7 @@ brief -> "SHACAL-2 using ARMv8 crypto instructions"
 </module_info>
 
 <requires>
-shacal2
+cpuid
 </requires>
 
 <isa>

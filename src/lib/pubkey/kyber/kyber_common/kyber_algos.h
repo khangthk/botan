@@ -15,11 +15,8 @@
 #ifndef BOTAN_KYBER_ALGOS_H_
 #define BOTAN_KYBER_ALGOS_H_
 
-#include <botan/xof.h>
-#include <botan/internal/fmt.h>
 #include <botan/internal/kyber_symmetric_primitives.h>
 #include <botan/internal/kyber_types.h>
-#include <botan/internal/loadstor.h>
 
 namespace Botan::Kyber_Algos {
 
@@ -30,6 +27,8 @@ KyberPolyVecNTT decode_polynomial_vector(std::span<const uint8_t> a, const Kyber
 KyberPoly polynomial_from_message(StrongSpan<const KyberMessage> msg);
 
 KyberMessage polynomial_to_message(const KyberPoly& p);
+
+KyberInternalKeypair expand_keypair(KyberPrivateKeySeed seed, KyberConstants mode);
 
 void compress_ciphertext(StrongSpan<KyberCompressedCiphertext> out,
                          const KyberPolyVec& u,
@@ -55,7 +54,7 @@ T encode_polynomial_vector(const KyberPolyVecNTT& vec, const KyberConstants& mod
 /**
  * Allows sampling multiple polynomials from a single seed via a XOF.
  *
- * Used in Algorithms 12 (K-PKE.KeyGen) and 13 (K-PKE.Encrypt), and takes care
+ * Used in Algorithms 13 (K-PKE.KeyGen) and 14 (K-PKE.Encrypt), and takes care
  * of the continuous nonce value internally.
  */
 template <typename SeedT>
@@ -92,7 +91,12 @@ class PolynomialSampler {
       }
 
    private:
-      KyberSamplingRandomness prf(size_t bytes) { return m_mode.symmetric_primitives().PRF(m_seed, m_nonce++, bytes); }
+      KyberSamplingRandomness prf(size_t bytes) {
+         const auto& sym = m_mode.symmetric_primitives();
+         auto seed_span = m_seed.get();
+         sym.setup_PRF(m_prf_xof, seed_span, m_nonce++);
+         return m_prf_xof->output<KyberSamplingRandomness>(bytes);
+      }
 
       void sample_poly_cbd(KyberPoly& poly, KyberConstants::KyberEta eta) {
          const auto randomness = [&] {
@@ -113,6 +117,7 @@ class PolynomialSampler {
       StrongSpan<const SeedT> m_seed;
       const KyberConstants& m_mode;
       uint8_t m_nonce;
+      std::unique_ptr<Botan::XOF> m_prf_xof;
 };
 
 template <typename T>

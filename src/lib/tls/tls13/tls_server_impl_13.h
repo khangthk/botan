@@ -10,7 +10,6 @@
 #define BOTAN_TLS_SERVER_IMPL_13_H_
 
 #include <botan/internal/tls_channel_impl_13.h>
-#include <botan/internal/tls_cipher_state.h>
 #include <botan/internal/tls_handshake_state_13.h>
 #include <botan/internal/tls_handshake_transitions.h>
 
@@ -19,13 +18,22 @@ namespace Botan::TLS {
 /**
 * SSL/TLS Server 1.3 implementation
 */
-class Server_Impl_13 : public Channel_Impl_13 {
+class Server_Impl_13 final : public Channel_Impl_13 {
    public:
-      explicit Server_Impl_13(const std::shared_ptr<Callbacks>& callbacks,
-                              const std::shared_ptr<Session_Manager>& session_manager,
-                              const std::shared_ptr<Credentials_Manager>& credentials_manager,
-                              const std::shared_ptr<const Policy>& policy,
-                              const std::shared_ptr<RandomNumberGenerator>& rng);
+      static std::shared_ptr<Server_Impl_13> create(const std::shared_ptr<Callbacks>& callbacks,
+                                                    const std::shared_ptr<Session_Manager>& session_manager,
+                                                    const std::shared_ptr<Credentials_Manager>& credentials_manager,
+                                                    const std::shared_ptr<const Policy>& policy,
+                                                    const std::shared_ptr<RandomNumberGenerator>& rng);
+
+      Server_Impl_13([[maybe_unused]] Private dont_call_me,
+                     const std::shared_ptr<Callbacks>& callbacks,
+                     const std::shared_ptr<Session_Manager>& session_manager,
+                     const std::shared_ptr<Credentials_Manager>& credentials_manager,
+                     const std::shared_ptr<const Policy>& policy,
+                     const std::shared_ptr<RandomNumberGenerator>& rng) :
+            Channel_Impl_13(callbacks, session_manager, credentials_manager, rng, policy, true /* is_server */),
+            m_handshake(std::make_unique<Pending_Handshake>()) {}
 
       std::string application_protocol() const override;
       std::vector<X509_Certificate> peer_cert_chain() const override;
@@ -43,7 +51,7 @@ class Server_Impl_13 : public Channel_Impl_13 {
       void process_dummy_change_cipher_spec() override;
 
       using Channel_Impl_13::handle;
-      void handle(const Client_Hello_12& client_hello_msg);
+      void handle(const Client_Hello_12_Shim& client_hello_msg);
       void handle(const Client_Hello_13& client_hello_msg);
       void handle(const Certificate_13& certificate_msg);
       void handle(const Certificate_Verify_13& certificate_verify_msg);
@@ -52,17 +60,22 @@ class Server_Impl_13 : public Channel_Impl_13 {
       void handle_reply_to_client_hello(Server_Hello_13 server_hello);
       void handle_reply_to_client_hello(Hello_Retry_Request hello_retry_request);
 
-      void maybe_handle_compatibility_mode();
+      void maybe_handle_compatibility_mode(Compat_Mode_Situation situation) override;
       void maybe_log_secret(std::string_view label, std::span<const uint8_t> secret) const override;
 
+#if defined(BOTAN_HAS_TLS_DOWNGRADE_SUPPORT)
       void downgrade();
+#endif
 
    private:
-      Server_Handshake_State_13 m_handshake_state;
-      Handshake_Transitions m_transitions;
+      struct Pending_Handshake {
+            Server_Handshake_State_13 state;
+            Handshake_Transitions transitions;
+            std::optional<Session> resumed_session;
+            std::optional<std::string> psk_identity;
+      };
 
-      std::optional<Session> m_resumed_session;
-      std::optional<std::string> m_psk_identity;
+      std::unique_ptr<Pending_Handshake> m_handshake;
 };
 
 }  // namespace Botan::TLS

@@ -11,10 +11,15 @@
 
 #include <botan/p11.h>
 
-#include <botan/mem_ops.h>
+#include <cstring>
 #include <memory>
-#include <string>
-#include <utility>
+#include <string_view>
+
+namespace Botan {
+
+class PK_Signature_Options;
+
+}  // namespace Botan
 
 namespace Botan::PKCS11 {
 
@@ -23,7 +28,7 @@ namespace Botan::PKCS11 {
 * for RSA (encryption/decryption, signature/verification)
 * and EC (ECDSA signature/verification, ECDH key derivation).
 */
-class MechanismWrapper final {
+class BOTAN_PUBLIC_API(3, 7) MechanismWrapper final {
    public:
       /// @param mechanism_type the CK_MECHANISM_TYPE for the `mechanism` field of the CK_MECHANISM struct
       explicit MechanismWrapper(MechanismType mechanism_type);
@@ -36,10 +41,10 @@ class MechanismWrapper final {
 
       /**
       * Creates the CK_MECHANISM data for RSA signature/verification
-      * @param padding supported paddings are Raw (X.509), EMSA3 (PKCS#1 v1.5), EMSA4 (PKCS#1 PSS),
-      * EMSA2 (ANSI X9.31) and ISO9796 (ISO/IEC 9796)
+      * @param options supported paddings are Raw (X.509), PKCS1v15 (PKCS#1 v1.5), PSS (PKCS#1 PSS),
+      * X9.31 (ANSI X9.31) and ISO9796 (ISO/IEC 9796)
       */
-      static MechanismWrapper create_rsa_sign_mechanism(std::string_view padding);
+      static MechanismWrapper create_rsa_sign_mechanism(const PK_Signature_Options& options);
 
       /**
       * Creates the CK_MECHANISM data for ECDSA signature/verification
@@ -64,7 +69,7 @@ class MechanismWrapper final {
       */
       inline void set_ecdh_salt(const uint8_t salt[], size_t salt_len) {
          m_parameters->ecdh_params.pSharedData = const_cast<uint8_t*>(salt);
-         m_parameters->ecdh_params.ulSharedDataLen = static_cast<Ulong>(salt_len);
+         m_parameters->ecdh_params.ulSharedDataLen = checked_ulong_cast(salt_len);
       }
 
       /**
@@ -74,7 +79,7 @@ class MechanismWrapper final {
       */
       inline void set_ecdh_other_key(const uint8_t other_key[], size_t other_key_len) {
          m_parameters->ecdh_params.pPublicData = const_cast<uint8_t*>(other_key);
-         m_parameters->ecdh_params.ulPublicDataLen = static_cast<Ulong>(other_key_len);
+         m_parameters->ecdh_params.ulPublicDataLen = checked_ulong_cast(other_key_len);
       }
 
       /// @return a pointer to the CK_MECHANISM struct that can be passed to the cryptoki functions
@@ -85,9 +90,15 @@ class MechanismWrapper final {
       /// @return the size of the padding in bytes (for encryption/decryption)
       inline size_t padding_size() const { return m_padding_size; }
 
+      /// @return the KDF type for an ECDH mechanism
+      inline KeyDerivation ecdh_kdf() const { return static_cast<KeyDerivation>(m_parameters->ecdh_params.kdf); }
+
       /// Holds the mechanism parameters for OAEP, PSS and ECDH
+      ///
+      /// TODO(Botan4) use a std::variant here
+      /// TODO(Botan4) make this union decl private
       union MechanismParameters {
-            MechanismParameters() { clear_mem(this, 1); }
+            MechanismParameters() /* NOLINT(*-member-init) */ { std::memset(this, 0, sizeof(MechanismParameters)); }
 
             RsaPkcsOaepParams oaep_params;
             RsaPkcsPssParams pss_params;

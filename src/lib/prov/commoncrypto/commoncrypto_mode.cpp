@@ -7,6 +7,7 @@
 
 #include <botan/internal/commoncrypto.h>
 
+#include <botan/block_cipher.h>
 #include <botan/cipher_mode.h>
 #include <botan/mem_ops.h>
 #include <botan/internal/commoncrypto_utils.h>
@@ -67,11 +68,12 @@ CommonCrypto_Cipher_Mode::~CommonCrypto_Cipher_Mode() {
 }
 
 void CommonCrypto_Cipher_Mode::start_msg(const uint8_t nonce[], size_t nonce_len) {
-   assert_key_material_set();
-
    if(!valid_nonce_length(nonce_len)) {
       throw Invalid_IV_Length(name(), nonce_len);
    }
+
+   assert_key_material_set();
+
    if(nonce_len) {
       CCCryptorStatus status = CCCryptorReset(m_cipher, nonce);
       if(status != kCCSuccess) {
@@ -130,7 +132,7 @@ void CommonCrypto_Cipher_Mode::finish_msg(secure_vector<uint8_t>& buffer, size_t
    if(m_opts.padding != ccNoPadding || buffer.size() < new_len) {
       buffer.resize(new_len);
    }
-   copy_mem(buffer.data() - offset + written, out.data(), outl);
+   copy_mem(buffer.data() + offset + written, out.data(), outl);
    written += outl;
 }
 
@@ -139,7 +141,7 @@ size_t CommonCrypto_Cipher_Mode::update_granularity() const {
 }
 
 size_t CommonCrypto_Cipher_Mode::ideal_granularity() const {
-   return m_opts.block_size * BOTAN_BLOCK_CIPHER_PAR_MULT;
+   return m_opts.block_size * BlockCipher::ParallelismMult;
 }
 
 size_t CommonCrypto_Cipher_Mode::minimum_final_size() const {

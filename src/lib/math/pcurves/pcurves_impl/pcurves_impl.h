@@ -1,5 +1,5 @@
 /*
-* (C) 2024 Jack Lloyd
+* (C) 2024,2025,2026 Jack Lloyd
 *
 * Botan is released under the Simplified BSD License (see license.txt)
 */
@@ -8,20 +8,74 @@
 #define BOTAN_PCURVES_IMPL_H_
 
 #include <botan/rng.h>
+#include <botan/internal/buffer_stuffer.h>
 #include <botan/internal/ct_utils.h>
 #include <botan/internal/loadstor.h>
+#include <botan/internal/mem_utils.h>
+#include <botan/internal/pcurves_algos.h>
+#include <botan/internal/pcurves_mul.h>
 #include <botan/internal/pcurves_util.h>
-#include <botan/internal/stl_util.h>
+#include <concepts>
 #include <vector>
-
-#if defined(BOTAN_HAS_XMD)
-   #include <botan/internal/xmd.h>
-#endif
 
 namespace Botan {
 
-namespace {
+/*
+ * @brief Helper class to pass literal strings to C++ templates
+ *
+ * This is a generic utility so it may make sense to move this into utils
+ * if someday such functionality is useful outside of pcurves.
+ */
+template <size_t N>
+class StringLiteral final {
+   public:
+      // NOLINTNEXTLINE(*-explicit-conversions)
+      consteval StringLiteral(const char (&str)[N]) : value() {
+         for(size_t i = 0; i != N; ++i) {
+            value[i] = str[i];
+         }
+      }
 
+      // NOLINTNEXTLINE(*non-private-member-variable*)
+      char value[N];
+};
+
+/*
+This file implements a system for compile-time instantiation of elliptic curve arithmetic.
+
+All computations including point multiplication are implemented to be constant time,
+with the exception of any function which includes "vartime" or equivalent in its
+name. Randomization techniques (scalar blinding, point rerandomization) are also
+used, largely to guard against situations where a compiler inserts a conditional jump
+where not expected.
+
+A specific elliptic curve is created by creating a set of EllipticCurveParameters,
+which are templatized over the relevant constants (p, a, b, etc) and then
+passing that set of parameters to an EllipticCurve template.
+
+For a simple example of how these are used see pcurves_brainpool256r1.cpp
+
+The system also includes various hooks which allow for specialized representations of
+field elements (for curves where a modular reduction technique faster than Montgomery
+is available) and to provide pre-computed addition chains for field and scalar
+inversions. See pcurves_secp256r1.cpp or pcurves_secp256k1.cpp for examples with all
+the bells and whistles.
+*/
+
+/**
+* Montomgomery Representation of Integers
+*
+* Integers modulo a prime (IntMod, see below) use some representation that
+* allows for fast arithmetic.
+*
+* The default representation used is Montgomery arithmetic. Curves with
+* specialized fields (eg Mersenne primes, Solinas primes, or Crandall primes)
+* provide a different type as the FieldRep parameter to the EllipticCurve
+* template.
+*
+* Since the curve parameters are public and known at compile time, we can
+* similarly compute the Montgomery parameters at compile time.
+*/
 template <typename Params>
 class MontgomeryRep final {
    public:
@@ -39,8 +93,14 @@ class MontgomeryRep final {
       static constexpr auto R2 = mul_mod(R1, R1, P);
       static constexpr auto R3 = mul_mod(R1, R2, P);
 
+      /**
+      * Return the constant one, pre-converted into Montgomery form
+      */
       constexpr static std::array<W, N> one() { return R1; }
 
+      /**
+      * Modular reduction
+      */
       constexpr static std::array<W, N> redc(const std::array<W, 2 * N>& z) {
          if constexpr(P_dash == 1) {
             return monty_redc_pdash1(z, P);
@@ -49,19 +109,31 @@ class MontgomeryRep final {
          }
       }
 
+      /**
+      * Convert an integer into Montgomery representation
+      */
       constexpr static std::array<W, N> to_rep(const std::array<W, N>& x) {
-         std::array<W, 2 * N> z;
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          comba_mul<N>(z.data(), x.data(), R2.data());
          return Self::redc(z);
       }
 
+      /**
+      * Wide reduction modulo the prime
+      *
+      * Modular reduces an input of up to twice the length of the modulus, and
+      * converts it into Montgomery form.
+      */
       constexpr static std::array<W, N> wide_to_rep(const std::array<W, 2 * N>& x) {
          auto redc_x = Self::redc(x);
-         std::array<W, 2 * N> z;
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          comba_mul<N>(z.data(), redc_x.data(), R3.data());
          return Self::redc(z);
       }
 
+      /**
+      * Convert an integer out of Montgomery representation
+      */
       constexpr static std::array<W, N> from_rep(const std::array<W, N>& z) {
          std::array<W, 2 * N> ze = {};
          copy_mem(std::span{ze}.template first<N>(), z);
@@ -69,6 +141,24 @@ class MontgomeryRep final {
       }
 };
 
+/**
+* Integers Modulo (a Prime)
+*
+* This is used to store and manipulate integers modulo the field (for the affine
+* x/y or Jacobian x/y/z coordinates) and group order (for scalar arithmetic).
+*
+* This class is parameterized by Rep which handles the modular reduction step,
+* as well (if required) any conversions into or out of the inner
+* representation. This is primarily for Montgomery arithmetic; specialized
+* reduction methods instead keep the integer in the "standard" form.
+*
+* _Most_ of the code in this class does work for arbitrary moduli. However
+* at least div2 and invert make assumptions that the modulus is prime.
+*
+* Any function that does not contain "vartime" or equivalent in the name is
+* written such that it does not leak information about its arguments via control
+* flow or memory access patterns.
+*/
 template <typename Rep>
 class IntMod final {
    private:
@@ -93,16 +183,30 @@ class IntMod final {
       IntMod(Self&& other) = default;
       IntMod& operator=(const Self& other) = default;
       IntMod& operator=(Self&& other) = default;
+      ~IntMod() = default;
 
+      /**
+      * Return integer zero
+      *
+      * Note this assumes that the representation of zero is an all zero
+      * sequence of words. This is true for both Montgomery and standard
+      * representations.
+      */
       static constexpr Self zero() { return Self(std::array<W, N>{0}); }
 
+      /**
+      * Return integer one
+      */
       static constexpr Self one() { return Self(Rep::one()); }
 
-      static constexpr Self from_word(W x) {
-         std::array<W, 1> v{x};
-         return Self::from_words(v);
-      }
-
+      /**
+      * Consume an array of words and convert it to an IntMod
+      *
+      * This handles the Montgomery conversion, if required.
+      *
+      * Note that this function assumes that `w` represents an integer that is
+      * less than the modulus.
+      */
       template <size_t L>
       static constexpr Self from_words(std::array<W, L> w) {
          if constexpr(L == N) {
@@ -115,29 +219,86 @@ class IntMod final {
          }
       }
 
+      /**
+      * Check in constant time if this is equal to zero
+      */
       constexpr CT::Choice is_zero() const { return CT::all_zeros(m_val.data(), m_val.size()).as_choice(); }
 
+      /**
+      * Check in constant time if this not equal to zero
+      */
       constexpr CT::Choice is_nonzero() const { return !is_zero(); }
 
+      /**
+      * Check in constant time if this equal to one
+      */
       constexpr CT::Choice is_one() const { return (*this == Self::one()); }
 
+      /**
+      * Check in constant time if this is an even integer
+      */
       constexpr CT::Choice is_even() const {
          auto v = Rep::from_rep(m_val);
          return !CT::Choice::from_int(v[0] & 0x01);
       }
 
-      friend constexpr Self operator+(const Self& a, const Self& b) {
-         std::array<W, N> t;
-         W carry = bigint_add<W, N>(t, a.value(), b.value());
+      /**
+      * Return either this or -this depending on which is even
+      */
+      constexpr Self correct_sign(CT::Choice even) const {
+         const auto flip = (even != this->is_even());
+         return Self::choose(flip, this->negate(), *this);
+      }
 
-         std::array<W, N> r;
+      /**
+      * Return x or y depending on if choice is set or not
+      */
+      static constexpr Self choose(CT::Choice choice, const Self& x, const Self& y) {
+         auto r = y;
+         r.conditional_assign(choice, x);
+         return r;
+      }
+
+      /**
+      * Modular addition; return c = a + b
+      */
+      friend constexpr BOTAN_FORCE_INLINE Self operator+(const Self& a, const Self& b) {
+         std::array<W, N> t;  // NOLINT(*-member-init)
+
+         W carry = 0;
+         for(size_t i = 0; i != N; ++i) {
+            t[i] = word_add(a.m_val[i], b.m_val[i], &carry);
+         }
+
+         std::array<W, N> r;  // NOLINT(*-member-init)
          bigint_monty_maybe_sub<N>(r.data(), carry, t.data(), P.data());
          return Self(r);
       }
 
-      friend constexpr Self operator-(const Self& a, const Self& b) { return a + b.negate(); }
+      /**
+      * Modular subtraction; return c = a - b
+      */
+      friend constexpr BOTAN_FORCE_INLINE Self operator-(const Self& a, const Self& b) {
+         std::array<W, N> r;  // NOLINT(*-member-init)
+         W carry = 0;
+         for(size_t i = 0; i != N; ++i) {
+            r[i] = word_sub(a.m_val[i], b.m_val[i], &carry);
+         }
 
-      /// Return (*this) divided by 2
+         const auto mask = CT::Mask<W>::expand(carry).value();
+
+         carry = 0;
+
+         for(size_t i = 0; i != N; ++i) {
+            r[i] = word_add(r[i], P[i] & mask, &carry);
+         }
+
+         return Self(r);
+      }
+
+      /**
+      * Return the value of this divided by 2
+      */
       Self div2() const {
          // The inverse of 2 modulo P is (P/2)+1; this avoids a constexpr time
          // general inversion, which some compilers can't handle
@@ -146,112 +307,191 @@ class IntMod final {
          // We could multiply by INV_2 but there is a better way ...
 
          std::array<W, N> t = value();
-         W borrow = shift_right<1>(t);
+         const W borrow = shift_right<1>(t);
 
          // If value was odd, add (P/2)+1
-         bigint_cnd_add(borrow, t.data(), N, INV_2.data(), N);
+         const auto mask = CT::Mask<W>::expand(borrow).value();
+
+         W carry = 0;
+
+         for(size_t i = 0; i != N; ++i) {
+            t[i] = word_add(t[i], INV_2[i] & mask, &carry);
+         }
 
          return Self(t);
       }
 
       /// Return (*this) multiplied by 2
-      Self mul2() const {
+      constexpr BOTAN_FORCE_INLINE Self mul2() const {
          std::array<W, N> t = value();
-         W carry = shift_left<1>(t);
+         const W carry = shift_left<1>(t);
 
-         std::array<W, N> r;
+         std::array<W, N> r;  // NOLINT(*-member-init)
          bigint_monty_maybe_sub<N>(r.data(), carry, t.data(), P.data());
          return Self(r);
       }
 
       /// Return (*this) multiplied by 3
-      constexpr Self mul3() const { return mul2() + (*this); }
+      constexpr inline Self mul3() const { return mul2() + (*this); }
 
       /// Return (*this) multiplied by 4
-      constexpr Self mul4() const { return mul2().mul2(); }
+      constexpr inline Self mul4() const { return mul2().mul2(); }
 
       /// Return (*this) multiplied by 8
-      constexpr Self mul8() const { return mul2().mul2().mul2(); }
+      constexpr inline Self mul8() const { return mul2().mul2().mul2(); }
 
-      friend constexpr Self operator*(const Self& a, const Self& b) {
-         std::array<W, 2 * N> z;
+      /**
+      * Modular multiplication; return c = a * b
+      */
+      friend constexpr BOTAN_FORCE_INLINE Self operator*(const Self& a, const Self& b) {
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          comba_mul<N>(z.data(), a.data(), b.data());
          return Self(Rep::redc(z));
       }
 
-      constexpr Self& operator*=(const Self& other) {
-         std::array<W, 2 * N> z;
+      /**
+      * Modular multiplication; set this to this * other
+      */
+      constexpr BOTAN_FORCE_INLINE Self& operator*=(const Self& other) {
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          comba_mul<N>(z.data(), data(), other.data());
          m_val = Rep::redc(z);
          return (*this);
       }
 
-      // if cond is true, sets x to nx
-      static constexpr void conditional_assign(Self& x, CT::Choice cond, const Self& nx) {
-         const W mask = CT::Mask<W>::from_choice(cond).value();
+      /**
+      * Conditional assignment
+      *
+      * If `cond` is true, sets *this to `nx`
+      */
+      constexpr void conditional_assign(CT::Choice cond, const Self& nx) {
+         const W mask = cond.into_bitmask<W>();
 
          for(size_t i = 0; i != N; ++i) {
-            x.m_val[i] = choose(mask, nx.m_val[i], x.m_val[i]);
+            m_val[i] = Botan::choose(mask, nx.m_val[i], m_val[i]);
          }
       }
 
-      // if cond is true, sets x to nx, y to ny
+      /**
+      * Conditional assignment
+      *
+      * If `cond` is true, sets `x` to `nx` and `y` to `ny`
+      */
       static constexpr void conditional_assign(Self& x, Self& y, CT::Choice cond, const Self& nx, const Self& ny) {
-         const W mask = CT::Mask<W>::from_choice(cond).value();
+         const W mask = cond.into_bitmask<W>();
 
          for(size_t i = 0; i != N; ++i) {
-            x.m_val[i] = choose(mask, nx.m_val[i], x.m_val[i]);
-            y.m_val[i] = choose(mask, ny.m_val[i], y.m_val[i]);
+            x.m_val[i] = Botan::choose(mask, nx.m_val[i], x.m_val[i]);
+            y.m_val[i] = Botan::choose(mask, ny.m_val[i], y.m_val[i]);
          }
       }
 
-      // if cond is true, sets x to nx, y to ny, z to nz
+      /**
+      * Conditional assignment
+      *
+      * If `cond` is true, sets `x` to `nx`, `y` to `ny`, and `z` to `nz`
+      */
       static constexpr void conditional_assign(
          Self& x, Self& y, Self& z, CT::Choice cond, const Self& nx, const Self& ny, const Self& nz) {
-         const W mask = CT::Mask<W>::from_choice(cond).value();
+         const W mask = cond.into_bitmask<W>();
 
          for(size_t i = 0; i != N; ++i) {
-            x.m_val[i] = choose(mask, nx.m_val[i], x.m_val[i]);
-            y.m_val[i] = choose(mask, ny.m_val[i], y.m_val[i]);
-            z.m_val[i] = choose(mask, nz.m_val[i], z.m_val[i]);
+            x.m_val[i] = Botan::choose(mask, nx.m_val[i], x.m_val[i]);
+            y.m_val[i] = Botan::choose(mask, ny.m_val[i], y.m_val[i]);
+            z.m_val[i] = Botan::choose(mask, nz.m_val[i], z.m_val[i]);
          }
       }
 
-      constexpr Self square() const {
-         std::array<W, 2 * N> z;
+      /**
+      * Conditional swap
+      *
+      * If `cond` is true, swaps the values of `x` and `y`
+      */
+      static constexpr void conditional_swap(CT::Choice cond, Self& x, Self& y) {
+         const W mask = cond.into_bitmask<W>();
+
+         for(size_t i = 0; i != N; ++i) {
+            auto nx = Botan::choose(mask, y.m_val[i], x.m_val[i]);
+            auto ny = Botan::choose(mask, x.m_val[i], y.m_val[i]);
+            x.m_val[i] = nx;
+            y.m_val[i] = ny;
+         }
+      }
+
+      /**
+      * Modular squaring
+      *
+      * Returns the square of this after modular reduction
+      */
+      constexpr BOTAN_FORCE_INLINE Self square() const {
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          comba_sqr<N>(z.data(), this->data());
          return Self(Rep::redc(z));
       }
 
+      /**
+      * Repeated modular squaring
+      *
+      * Returns the nth square of this
+      *
+      * (Alternate view, returns this raised to the 2^nth power)
+      */
       constexpr void square_n(size_t n) {
-         std::array<W, 2 * N> z;
+         std::array<W, 2 * N> z;  // NOLINT(*-member-init)
          for(size_t i = 0; i != n; ++i) {
             comba_sqr<N>(z.data(), this->data());
             m_val = Rep::redc(z);
          }
       }
 
-      // Negation modulo p
+      /**
+      * Modular negation
+      *
+      * Returns the additive inverse of (*this)
+      */
       constexpr Self negate() const {
-         auto x_is_zero = CT::all_zeros(this->data(), N);
+         const W x_is_zero = ~CT::all_zeros(this->data(), N).value();
 
-         std::array<W, N> r;
-         bigint_sub3(r.data(), P.data(), N, this->data(), N);
-         x_is_zero.if_set_zero_out(r.data(), N);
+         std::array<W, N> r;  // NOLINT(*-member-init)
+         W carry = 0;
+         for(size_t i = 0; i != N; ++i) {
+            r[i] = word_sub(P[i] & x_is_zero, m_val[i], &carry);
+         }
+
          return Self(r);
       }
 
+      /**
+      * Modular Exponentiation (Variable Time)
+      *
+      * This function is variable time with respect to the exponent. It should
+      * only be used when exp is not secret. In the current code, `exp` is
+      * always a compile-time constant.
+      *
+      * This function should not leak any information about *this, since the
+      * value being operated on may be a secret.
+      *
+      * TODO: this interface should be changed so that the exponent is always a
+      * compile-time constant; this should allow some interesting optimizations.
+      */
       constexpr Self pow_vartime(const std::array<W, N>& exp) const {
          constexpr size_t WindowBits = (Self::BITS <= 256) ? 4 : 5;
          constexpr size_t WindowElements = (1 << WindowBits) - 1;
 
          constexpr size_t Windows = (Self::BITS + WindowBits - 1) / WindowBits;
 
+         /*
+         A simple fixed width window modular multiplication.
+
+         TODO: investigate using sliding window here
+         */
+
          std::array<Self, WindowElements> tbl;
 
          tbl[0] = (*this);
 
          for(size_t i = 1; i != WindowElements; ++i) {
+            // Conditional ok: table indexes are public here
             if(i % 2 == 1) {
                tbl[i] = tbl[i / 2].square();
             } else {
@@ -263,6 +503,7 @@ class IntMod final {
 
          const size_t w0 = read_window_bits<WindowBits>(std::span{exp}, (Windows - 1) * WindowBits);
 
+         // Conditional ok: this function is variable time
          if(w0 > 0) {
             r = tbl[w0 - 1];
          }
@@ -272,6 +513,7 @@ class IntMod final {
 
             const size_t w = read_window_bits<WindowBits>(std::span{exp}, (Windows - i - 1) * WindowBits);
 
+            // Conditional ok: this function is variable time
             if(w > 0) {
                r *= tbl[w - 1];
             }
@@ -286,19 +528,149 @@ class IntMod final {
       * If the modulus is prime the only value that has no modular inverse is 0.
       *
       * This uses Fermat's little theorem, and so assumes that p is prime
+      *
+      * Since P is public, P-2 is as well, thus using a variable time modular
+      * exponentiation routine is safe.
+      *
+      * This function is only used if the curve does not provide an addition
+      * chain for specific inversions (see for example pcurves_secp256r1.cpp)
       */
       constexpr Self invert() const { return pow_vartime(Self::P_MINUS_2); }
 
       /**
-      * Return the modular square root if it exists
+      * Helper for variable time BEEA
+      *
+      * Note this function assumes that its arguments are in the standard
+      * domain, not the Montgomery domain. invert_vartime converts its argument
+      * out of Montgomery, and then back to Montgomery when returning the result.
       */
-      constexpr std::pair<Self, CT::Choice> sqrt() const {
+      static constexpr void _invert_vartime_div2_helper(Self& a, Self& x) {
+         constexpr auto INV_2 = p_div_2_plus_1(Rep::P);
+
+         // Conditional ok: this function is variable time
+         while((a.m_val[0] & 1) != 1) {
+            shift_right<1>(a.m_val);
+
+            const W borrow = shift_right<1>(x.m_val);
+
+            // Conditional ok: this function is variable time
+            if(borrow) {
+               bigint_add2(x.m_val.data(), N, INV_2.data(), N);
+            }
+         }
+      }
+
+      /**
+      * Returns the modular inverse, or 0 if no modular inverse exists.
+      *
+      * This function assumes that the modulus is prime
+      *
+      * This function does something a bit nasty and converts from the normal
+      * representation (for scalars, Montgomery) into the "standard"
+      * representation. This relies on the fact that we aren't doing any
+      * multiplications within this function, just additions, subtractions,
+      * division by 2, and comparisons.
+      *
+      * The reason is there is no good way to compare integers in the Montgomery
+      * domain; we could convert out for each comparison but this is slower than
+      * just doing a constant-time inversion.
+      *
+      * This is loosely based on the algorithm BoringSSL uses in
+      * BN_mod_inverse_odd, which is a variant of the Binary Extended Euclidean
+      * algorithm. It is optimized somewhat by taking advantage of a couple of
+      * observations.
+      *
+      * In the first two iterations, the control flow is known because `a` is
+      * less than the modulus and not zero, and we know that the modulus is
+      * odd. So we peel out those iterations. This also avoids having to
+      * initialize `a` with the modulus, because we instead set it directly to
+      * what the first loop iteration would have updated it to. This ensures
+      * that all values are always less than or equal to the modulus.
+      *
+      * Then we take advantage of the fact that in each iteration of the loop,
+      * at the end we update either b/x or a/y, but never both.  In the next
+      * iteration of the loop, we attempt to modify b/x or a/y depending on the
+      * low zero bits of b or a. But if a or b were not updated in the previous
+      * iteration than they will still be odd, and nothing will happen. Instead
+      * update just the pair we need to update, right after writing to b/x or
+      * a/y resp.
+      */
+      constexpr Self invert_vartime() const {
+         // Conditional ok: this function is variable time
+         if(this->is_zero().as_bool()) {
+            return Self::zero();
+         }
+
+         auto x = Self(std::array<W, N>{1});  // 1 in standard domain
+         auto b = Self(this->to_words());     // *this in standard domain
+
+         // First loop iteration
+         Self::_invert_vartime_div2_helper(b, x);
+
+         auto a = b.negate();
+         // y += x but y is zero at the outset
+         auto y = x;
+
+         // First half of second loop iteration
+         Self::_invert_vartime_div2_helper(a, y);
+
+         for(;;) {
+            // Conditional ok: this function is variable time
+            if(a.m_val == b.m_val) {
+               // At this point it should be that a == b == 1
+               auto r = y.negate();
+
+               // Convert back to Montgomery if required
+               r.m_val = Rep::to_rep(r.m_val);
+               return r;
+            }
+
+            auto nx = x + y;
+
+            /*
+            * Otherwise either b > a or a > b
+            *
+            * If b > a we want to set b to b - a
+            * Otherwise we want to set a to a - b
+            *
+            * Compute r = b - a and check if it underflowed
+            * If it did not then we are in the b > a path
+            */
+            std::array<W, N> r;  // NOLINT(*-member-init)
+            const word carry = bigint_sub3(r.data(), b.data(), N, a.data(), N);
+
+            // Conditional ok: this function is variable time
+            if(carry == 0) {
+               // b > a
+               b.m_val = r;
+               x = nx;
+               Self::_invert_vartime_div2_helper(b, x);
+            } else {
+               // We know this can't underflow because a > b
+               bigint_sub3(r.data(), a.data(), N, b.data(), N);
+               a.m_val = r;
+               y = nx;
+               Self::_invert_vartime_div2_helper(a, y);
+            }
+         }
+      }
+
+      /**
+      * Return the modular square root if it exists
+      *
+      * The CT::Option will be unset if the square root does not exist
+      */
+      constexpr CT::Option<Self> sqrt() const {
          if constexpr(Self::P_MOD_4 == 3) {
+            // The easy case for square root is when p == 3 (mod 4)
+
             constexpr auto P_PLUS_1_OVER_4 = p_plus_1_over_4(P);
             auto z = pow_vartime(P_PLUS_1_OVER_4);
+
+            // Zero out the return value if it would otherwise be incorrect
             const CT::Choice correct = (z.square() == *this);
-            Self::conditional_assign(z, !correct, Self::zero());
-            return {z, correct};
+            z.conditional_assign(!correct, Self::zero());
+            return CT::Option<Self>(z, correct);
          } else {
             // Shanks-Tonelli, following I.4 in RFC 9380
 
@@ -327,29 +699,43 @@ class IntMod final {
 
             for(size_t i = C1_C2.first; i >= 2; i--) {
                b.square_n(i - 2);
-               const auto e = b.is_one();
-               Self::conditional_assign(z, !e, z * c);
+               const CT::Choice e = b.is_one();
+               z.conditional_assign(!e, z * c);
                c.square_n(1);
-               Self::conditional_assign(t, !e, t * c);
+               t.conditional_assign(!e, t * c);
                b = t;
             }
 
+            // Zero out the return value if it would otherwise be incorrect
             const CT::Choice correct = (z.square() == *this);
-            Self::conditional_assign(z, !correct, Self::zero());
-            return {z, correct};
+            z.conditional_assign(!correct, Self::zero());
+            return CT::Option<Self>(z, correct);
          }
       }
 
+      /**
+      * Constant time integer equality test
+      *
+      * Since both this and other are in Montgomery representation (if applicable),
+      * we can always compare the words directly, without having to convert out.
+      */
       constexpr CT::Choice operator==(const Self& other) const {
          return CT::is_equal(this->data(), other.data(), N).as_choice();
       }
 
-      constexpr CT::Choice operator!=(const Self& other) const {
-         return CT::is_not_equal(this->data(), other.data(), N).as_choice();
-      }
+      /**
+      * Constant time integer inequality test
+      */
+      constexpr CT::Choice operator!=(const Self& other) const { return !(*this == other); }
 
+      /**
+      * Convert the integer to standard representation and return the sequence of words
+      */
       constexpr std::array<W, Self::N> to_words() const { return Rep::from_rep(m_val); }
 
+      /**
+      * Serialize the integer to a bytestring
+      */
       constexpr void serialize_to(std::span<uint8_t, Self::BYTES> bytes) const {
          auto v = Rep::from_rep(m_val);
          std::reverse(v.begin(), v.end());
@@ -364,6 +750,11 @@ class IntMod final {
          }
       }
 
+      /**
+      * Store the raw words to an array
+      *
+      * See pcurves_wrap.h for why/where this is used
+      */
       template <size_t L>
       std::array<W, L> stash_value() const {
          static_assert(L >= N);
@@ -374,6 +765,11 @@ class IntMod final {
          return stash;
       }
 
+      /**
+      * Restore the value previously stashed
+      *
+      * See pcurves_wrap.h for why/where this is used
+      */
       template <size_t L>
       static Self from_stash(const std::array<W, L>& stash) {
          static_assert(L >= N);
@@ -384,25 +780,38 @@ class IntMod final {
          return Self(val);
       }
 
-      // Returns nullopt if the input is an encoding greater than or equal P
+      /**
+      * Deserialize an integer from a bytestring
+      *
+      * Returns nullopt if the input is an encoding greater than or equal P
+      *
+      * This function also requires that the bytestring be exactly of the expected
+      * length; short bytestrings, or a long bytestring with leading zero bytes, are
+      * also rejected.
+      */
       static std::optional<Self> deserialize(std::span<const uint8_t> bytes) {
-         // We could allow either short inputs or longer zero padded
-         // inputs here, however it seems best to avoid non-canonical
-         // representations unless required
+         // Conditional ok: input length is public
          if(bytes.size() != Self::BYTES) {
             return {};
          }
 
          const auto words = bytes_to_words<W, N, BYTES>(bytes.first<Self::BYTES>());
 
+         // Conditional acceptable: std::optional is implicitly not constant time
          if(!bigint_ct_is_lt(words.data(), N, P.data(), N).as_bool()) {
             return {};
          }
 
+         // Safe because we checked above that words is an integer < P
          return Self::from_words(words);
       }
 
-      // Reduces large input modulo the order
+      /**
+      * Modular reduce a larger input
+      *
+      * This takes a bytestring that is at most twice the length of the modulus, and
+      * modular reduces it.
+      */
       template <size_t L>
       static constexpr Self from_wide_bytes(std::span<const uint8_t, L> bytes) {
          static_assert(8 * L <= 2 * Self::BITS);
@@ -411,20 +820,38 @@ class IntMod final {
          return Self(Rep::wide_to_rep(bytes_to_words<W, 2 * N, 2 * BYTES>(std::span{padded_bytes})));
       }
 
-      // Reduces large input modulo the order
+      /**
+      * Modular reduce a larger input
+      *
+      * This takes a bytestring that is at most twice the length of the modulus, and
+      * modular reduces it.
+      */
       static constexpr std::optional<Self> from_wide_bytes_varlen(std::span<const uint8_t> bytes) {
-         if(8 * bytes.size() > 2 * Self::BITS) {
+         // Conditional ok: input length is public
+         if(bytes.size() > 2 * Self::BYTES) {
             return {};
          }
-         std::array<uint8_t, 2 * BYTES> padded_bytes = {};
+
+         std::array<uint8_t, 2 * Self::BYTES> padded_bytes = {};
          copy_mem(std::span{padded_bytes}.last(bytes.size()), bytes);
          return Self(Rep::wide_to_rep(bytes_to_words<W, 2 * N, 2 * BYTES>(std::span{padded_bytes})));
       }
 
+      /**
+      * Return a random integer value in [1,p)
+      *
+      * This uses rejection sampling. This could have alternatively been implemented
+      * by oversampling the random number generator and then performing a wide
+      * reduction. The main reason that approach is avoided here is because it makes
+      * testing ECDSA-style known answer tests more difficult.
+      *
+      * This function avoids returning zero since in almost all contexts where a
+      * random integer is desired we want a random integer in Z_p*
+      */
       static Self random(RandomNumberGenerator& rng) {
          constexpr size_t MAX_ATTEMPTS = 1000;
 
-         std::array<uint8_t, Self::BYTES> buf;
+         std::array<uint8_t, Self::BYTES> buf{};
 
          for(size_t i = 0; i != MAX_ATTEMPTS; ++i) {
             rng.randomize(buf);
@@ -436,6 +863,7 @@ class IntMod final {
                buf[0] &= mask;
             }
 
+            // Conditionals ok: rejection sampling reveals only values we didn't use
             if(auto s = Self::deserialize(buf)) {
                if(s.value().is_nonzero().as_bool()) {
                   return s.value();
@@ -446,8 +874,13 @@ class IntMod final {
          throw Internal_Error("Failed to generate random Scalar within bounded number of attempts");
       }
 
+      /**
+      * Create a small compile time constant
+      *
+      * Notice this function is consteval, and so can only be called at compile time
+      */
       static consteval Self constant(int8_t x) {
-         std::array<W, 1> v;
+         std::array<W, 1> v{};
          v[0] = (x >= 0) ? x : -x;
          auto s = Self::from_words(v);
          return (x >= 0) ? s : s.negate();
@@ -467,25 +900,30 @@ class IntMod final {
       std::array<W, N> m_val;
 };
 
-template <typename FieldElement, typename Params>
-class AffineCurvePoint {
+/**
+* Affine Curve Point
+*
+* This contains a pair of integers (x,y) which satisfy the curve equation
+*/
+template <typename FieldElement>
+class AffineCurvePoint final {
    public:
-      // We can't pass a FieldElement directly because FieldElement is
-      // not "structural" due to having private members, so instead
-      // recreate it here from the words.
-      static constexpr FieldElement A = FieldElement::from_words(Params::AW);
-      static constexpr FieldElement B = FieldElement::from_words(Params::BW);
-
       static constexpr size_t BYTES = 1 + 2 * FieldElement::BYTES;
-      static constexpr size_t COMPRESSED_BYTES = 1 + FieldElement::BYTES;
 
-      using Self = AffineCurvePoint<FieldElement, Params>;
+      using Self = AffineCurvePoint<FieldElement>;
 
+      // Note this constructor does not check the validity of the x/y pair
+      // This must be verified prior to this constructor being called
       constexpr AffineCurvePoint(const FieldElement& x, const FieldElement& y) : m_x(x), m_y(y) {}
 
       constexpr AffineCurvePoint() : m_x(FieldElement::zero()), m_y(FieldElement::zero()) {}
 
       static constexpr Self identity() { return Self(FieldElement::zero(), FieldElement::zero()); }
+
+      // Helper for ct_select of pcurves_generic
+      static constexpr Self identity(const Self& /*unused*/) {
+         return Self(FieldElement::zero(), FieldElement::zero());
+      }
 
       constexpr CT::Choice is_identity() const { return x().is_zero() && y().is_zero(); }
 
@@ -493,9 +931,13 @@ class AffineCurvePoint {
       AffineCurvePoint(Self&& other) = default;
       AffineCurvePoint& operator=(const Self& other) = default;
       AffineCurvePoint& operator=(Self&& other) = default;
+      ~AffineCurvePoint() = default;
 
       constexpr Self negate() const { return Self(x(), y().negate()); }
 
+      /**
+      * Serialize the point in uncompressed format
+      */
       constexpr void serialize_to(std::span<uint8_t, Self::BYTES> bytes) const {
          BOTAN_STATE_CHECK(this->is_identity().as_bool() == false);
          BufferStuffer pack(bytes);
@@ -505,28 +947,13 @@ class AffineCurvePoint {
          BOTAN_DEBUG_ASSERT(pack.full());
       }
 
-      constexpr void serialize_compressed_to(std::span<uint8_t, Self::COMPRESSED_BYTES> bytes) const {
-         BOTAN_STATE_CHECK(this->is_identity().as_bool() == false);
-         const uint8_t hdr = CT::Mask<uint8_t>::from_choice(y().is_even()).select(0x02, 0x03);
-
-         BufferStuffer pack(bytes);
-         pack.append(hdr);
-         x().serialize_to(pack.next<FieldElement::BYTES>());
-         BOTAN_DEBUG_ASSERT(pack.full());
-      }
-
-      constexpr void serialize_x_to(std::span<uint8_t, FieldElement::BYTES> bytes) const {
-         BOTAN_STATE_CHECK(this->is_identity().as_bool() == false);
-         x().serialize_to(bytes);
-      }
-
       /**
       * If idx is zero then return the identity element. Otherwise return pts[idx - 1]
       *
       * Returns the identity element also if idx is out of range
       */
       static constexpr auto ct_select(std::span<const Self> pts, size_t idx) {
-         auto result = Self::identity();
+         auto result = Self::identity(pts[0]);
 
          // Intentionally wrapping; set to maximum size_t if idx == 0
          const size_t idx1 = static_cast<size_t>(idx - 1);
@@ -538,61 +965,19 @@ class AffineCurvePoint {
          return result;
       }
 
-      static constexpr FieldElement x3_ax_b(const FieldElement& x) { return (x.square() + Self::A) * x + Self::B; }
-
-      static std::optional<Self> deserialize(std::span<const uint8_t> bytes) {
-         if(bytes.size() == Self::BYTES) {
-            if(bytes[0] == 0x04) {
-               auto x = FieldElement::deserialize(bytes.subspan(1, FieldElement::BYTES));
-               auto y = FieldElement::deserialize(bytes.subspan(1 + FieldElement::BYTES, FieldElement::BYTES));
-
-               if(x && y) {
-                  const auto lhs = (*y).square();
-                  const auto rhs = Self::x3_ax_b(*x);
-                  if((lhs == rhs).as_bool()) {
-                     return Self(*x, *y);
-                  }
-               }
-            } else if(bytes[0] == 0x06 || bytes[0] == 0x07) {
-               // Deprecated "hybrid" encoding
-               const CT::Choice y_is_even = CT::Mask<uint8_t>::is_equal(bytes[0], 0x06).as_choice();
-               auto x = FieldElement::deserialize(bytes.subspan(1, FieldElement::BYTES));
-               auto y = FieldElement::deserialize(bytes.subspan(1 + FieldElement::BYTES, FieldElement::BYTES));
-
-               if(x && y && (y_is_even == y->is_even()).as_bool()) {
-                  const auto lhs = (*y).square();
-                  const auto rhs = Self::x3_ax_b(*x);
-                  if((lhs == rhs).as_bool()) {
-                     return Self(*x, *y);
-                  }
-               }
-            }
-         } else if(bytes.size() == Self::COMPRESSED_BYTES) {
-            if(bytes[0] == 0x02 || bytes[0] == 0x03) {
-               const CT::Choice y_is_even = CT::Mask<uint8_t>::is_equal(bytes[0], 0x02).as_choice();
-
-               if(auto x = FieldElement::deserialize(bytes.subspan(1, FieldElement::BYTES))) {
-                  auto [y, is_square] = x3_ax_b(*x).sqrt();
-
-                  if(is_square.as_bool()) {
-                     const auto flip_y = y_is_even != y.is_even();
-                     FieldElement::conditional_assign(y, flip_y, y.negate());
-                     return Self(*x, y);
-                  }
-               }
-            }
-         } else if(bytes.size() == 1 && bytes[0] == 0x00) {
-            // See SEC1 section 2.3.4
-            return Self::identity();
-         }
-
-         return {};
-      }
-
+      /**
+      * Return the affine x coordinate
+      */
       constexpr const FieldElement& x() const { return m_x; }
 
+      /**
+      * Return the affine y coordinate
+      */
       constexpr const FieldElement& y() const { return m_y; }
 
+      /**
+      * Conditional assignment of an affine point
+      */
       constexpr void conditional_assign(CT::Choice cond, const Self& pt) {
          FieldElement::conditional_assign(m_x, m_y, cond, pt.x(), pt.y());
       }
@@ -606,8 +991,13 @@ class AffineCurvePoint {
       FieldElement m_y;
 };
 
+/**
+* Projective curve point
+*
+* This uses Jacobian coordinates
+*/
 template <typename FieldElement, typename Params>
-class ProjectiveCurvePoint {
+class ProjectiveCurvePoint final {
    public:
       // We can't pass a FieldElement directly because FieldElement is
       // not "structural" due to having private members, so instead
@@ -618,24 +1008,50 @@ class ProjectiveCurvePoint {
       static constexpr bool A_is_minus_3 = (A == FieldElement::constant(-3)).as_bool();
 
       using Self = ProjectiveCurvePoint<FieldElement, Params>;
-      using AffinePoint = AffineCurvePoint<FieldElement, Params>;
+      using AffinePoint = AffineCurvePoint<FieldElement>;
 
+      /**
+      * Convert a point from affine to projective form
+      */
       static constexpr Self from_affine(const AffinePoint& pt) {
-         if(pt.is_identity().as_bool()) {
-            return Self::identity();
-         } else {
-            return ProjectiveCurvePoint(pt.x(), pt.y());
-         }
+         /*
+         * If the point is the identity element (x=0, y=0) then instead of
+         * creating (x, y, 1) = (0, 0, 1) we want our projective identity
+         * encoding of (0, 1, 0)
+         *
+         * Which we can achieve by a conditional swap of y and z if the
+         * affine point is the identity.
+         */
+
+         auto x = pt.x();
+         auto y = pt.y();
+         auto z = FieldElement::one();
+
+         FieldElement::conditional_swap(pt.is_identity(), y, z);
+
+         return ProjectiveCurvePoint(x, y, z);
       }
 
+      /**
+      * Return the identity element
+      */
       static constexpr Self identity() { return Self(FieldElement::zero(), FieldElement::one(), FieldElement::zero()); }
 
+      /**
+      * Default constructor: the identity element
+      */
       constexpr ProjectiveCurvePoint() :
             m_x(FieldElement::zero()), m_y(FieldElement::one()), m_z(FieldElement::zero()) {}
 
+      /**
+      * Affine constructor: take x/y coordinates
+      */
       constexpr ProjectiveCurvePoint(const FieldElement& x, const FieldElement& y) :
             m_x(x), m_y(y), m_z(FieldElement::one()) {}
 
+      /**
+      * Projective constructor: take x/y/z coordinates
+      */
       constexpr ProjectiveCurvePoint(const FieldElement& x, const FieldElement& y, const FieldElement& z) :
             m_x(x), m_y(y), m_z(z) {}
 
@@ -643,6 +1059,7 @@ class ProjectiveCurvePoint {
       ProjectiveCurvePoint(Self&& other) = default;
       ProjectiveCurvePoint& operator=(const Self& other) = default;
       ProjectiveCurvePoint& operator=(Self&& other) = default;
+      ~ProjectiveCurvePoint() = default;
 
       friend constexpr Self operator+(const Self& a, const Self& b) { return Self::add(a, b); }
 
@@ -668,235 +1085,90 @@ class ProjectiveCurvePoint {
          FieldElement::conditional_assign(m_x, m_y, m_z, cond, pt.x(), pt.y(), pt.z());
       }
 
+      /**
+      * Mixed (projective + affine) point addition
+      */
       constexpr static Self add_mixed(const Self& a, const AffinePoint& b) {
-         const auto a_is_identity = a.is_identity();
-         const auto b_is_identity = b.is_identity();
-         if((a_is_identity && b_is_identity).as_bool()) {
-            return Self::identity();
-         }
-
-         /*
-         https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#addition-add-1998-cmo-2
-
-         Cost: 8M + 3S + 6add + 1*2
-         */
-
-         const auto Z1Z1 = a.z().square();
-         const auto U2 = b.x() * Z1Z1;
-         const auto S2 = b.y() * a.z() * Z1Z1;
-         const auto H = U2 - a.x();
-         const auto r = S2 - a.y();
-
-         // If r == H == 0 then we are in the doubling case
-         // For a == -b we compute the correct result because
-         // H will be zero, leading to Z3 being zero also
-         if((r.is_zero() && H.is_zero()).as_bool()) {
-            return a.dbl();
-         }
-
-         const auto HH = H.square();
-         const auto HHH = H * HH;
-         const auto V = a.x() * HH;
-         const auto t2 = r.square();
-         const auto t3 = V + V;
-         const auto t4 = t2 - HHH;
-         auto X3 = t4 - t3;
-         const auto t5 = V - X3;
-         const auto t6 = a.y() * HHH;
-         const auto t7 = r * t5;
-         auto Y3 = t7 - t6;
-         auto Z3 = a.z() * H;
-
-         // if a is identity then return b
-         FieldElement::conditional_assign(X3, Y3, Z3, a_is_identity, b.x(), b.y(), FieldElement::one());
-
-         // if b is identity then return a
-         FieldElement::conditional_assign(X3, Y3, Z3, b_is_identity, a.x(), a.y(), a.z());
-
-         return Self(X3, Y3, Z3);
+         return point_add_mixed<Self, AffinePoint, FieldElement>(a, b, FieldElement::one());
       }
 
-      constexpr static Self add(const Self& a, const Self& b) {
-         const auto a_is_identity = a.is_identity();
-         const auto b_is_identity = b.is_identity();
-
-         if((a_is_identity && b_is_identity).as_bool()) {
-            return Self::identity();
-         }
-
-         /*
-         https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#addition-add-1998-cmo-2
-
-         Cost: 12M + 4S + 6add + 1*2
-         */
-
-         const auto Z1Z1 = a.z().square();
-         const auto Z2Z2 = b.z().square();
-         const auto U1 = a.x() * Z2Z2;
-         const auto U2 = b.x() * Z1Z1;
-         const auto S1 = a.y() * b.z() * Z2Z2;
-         const auto S2 = b.y() * a.z() * Z1Z1;
-         const auto H = U2 - U1;
-         const auto r = S2 - S1;
-
-         // If a == -b then H == 0 && r != 0, in which case
-         // at the end we'll set z = a.z * b.z * H = 0, resulting
-         // in the correct output (point at infinity)
-         if((r.is_zero() && H.is_zero()).as_bool()) {
-            return a.dbl();
-         }
-
-         const auto HH = H.square();
-         const auto HHH = H * HH;
-         const auto V = U1 * HH;
-         const auto t2 = r.square();
-         const auto t3 = V + V;
-         const auto t4 = t2 - HHH;
-         auto X3 = t4 - t3;
-         const auto t5 = V - X3;
-         const auto t6 = S1 * HHH;
-         const auto t7 = r * t5;
-         auto Y3 = t7 - t6;
-         const auto t8 = b.z() * H;
-         auto Z3 = a.z() * t8;
-
-         // if a is identity then return b
-         FieldElement::conditional_assign(X3, Y3, Z3, a_is_identity, b.x(), b.y(), b.z());
-
-         // if b is identity then return a
-         FieldElement::conditional_assign(X3, Y3, Z3, b_is_identity, a.x(), a.y(), a.z());
-
-         return Self(X3, Y3, Z3);
+      // Either add or subtract based on the CT::Choice
+      constexpr static Self add_or_sub(const Self& a, const AffinePoint& b, CT::Choice sub) {
+         return point_add_or_sub_mixed<Self, AffinePoint, FieldElement>(a, b, sub, FieldElement::one());
       }
 
+      /**
+      * Projective point addition
+      */
+      constexpr static Self add(const Self& a, const Self& b) { return point_add<Self, FieldElement>(a, b); }
+
+      /**
+      * Iterated point doubling
+      */
       constexpr Self dbl_n(size_t n) const {
-         /*
-         Repeated doubling using an adaptation of Algorithm 3.23 in
-         "Guide To Elliptic Curve Cryptography" (Hankerson, Menezes, Vanstone)
-
-         Curiously the book gives the algorithm only for A == -3, but
-         the largest gains come from applying it to the generic A case,
-         where it saves 2 squarings per iteration.
-
-         For A == 0
-           Pay 1*2 + 1half to save n*(1*4 + 1*8)
-
-         For A == -3:
-           Pay 2S + 1*2 + 1half to save n*(1A + 1*4 + 1*8) + 1M
-
-         For generic A:
-           Pay 2S + 1*2 + 1half to save n*(2S + 1*4 + 1*8)
-         */
-
-         if constexpr(Self::A_is_zero) {
-            auto nx = x();
-            auto ny = y().mul2();
-            auto nz = z();
-
-            while(n > 0) {
-               const auto ny2 = ny.square();
-               const auto ny4 = ny2.square();
-               const auto t1 = nx.square().mul3();
-               const auto t2 = nx * ny2;
-               nx = t1.square() - t2.mul2();
-               nz *= ny;
-               ny = t1 * (t2 - nx).mul2() - ny4;
-               n--;
-            }
-            return Self(nx, ny.div2(), nz);
-         } else {
-            auto nx = x();
-            auto ny = y().mul2();
-            auto nz = z();
-            auto w = nz.square().square();
-
-            if constexpr(!Self::A_is_minus_3) {
-               w *= A;
-            }
-
-            while(n > 0) {
-               const auto ny2 = ny.square();
-               const auto ny4 = ny2.square();
-               FieldElement t1;
-               if constexpr(Self::A_is_minus_3) {
-                  t1 = (nx.square() - w).mul3();
-               } else {
-                  t1 = nx.square().mul3() + w;
-               }
-               const auto t2 = nx * ny2;
-               nx = t1.square() - t2.mul2();
-               nz *= ny;
-               ny = t1 * (t2 - nx).mul2() - ny4;
-               n--;
-               if(n > 0) {
-                  w *= ny4;
-               }
-            }
-            return Self(nx, ny.div2(), nz);
-         }
-      }
-
-      constexpr Self dbl() const {
-         /*
-         Using https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian.html#doubling-dbl-1998-cmo-2
-
-         Cost (generic A): 4M + 6S + 4A + 2*2 + 1*3 + 1*4 + 1*8
-         Cost (A == -3):   4M + 4S + 5A + 2*2 + 1*3 + 1*4 + 1*8
-         Cost (A == 0):    3M + 4S + 3A + 2*2 + 1*3 + 1*4 + 1*8
-         */
-
-         FieldElement m = FieldElement::zero();
-
          if constexpr(Self::A_is_minus_3) {
-            /*
-            if a == -3 then
-            3*x^2 + a*z^4 == 3*x^2 - 3*z^4 == 3*(x^2-z^4) == 3*(x-z^2)*(x+z^2)
-
-            Cost: 1M + 1S + 2A + 1*3
-            */
-            const auto z2 = z().square();
-            m = (x() - z2).mul3() * (x() + z2);
+            return dbl_n_a_minus_3(*this, n);
          } else if constexpr(Self::A_is_zero) {
-            // If a == 0 then 3*x^2 + a*z^4 == 3*x^2
-            // Cost: 1S + 1*3
-            m = x().square().mul3();
+            return dbl_n_a_zero(*this, n);
          } else {
-            // Cost: 1M + 3S + 1A + 1*3
-            const auto z2 = z().square();
-            m = x().square().mul3() + A * z2.square();
+            return dbl_n_generic(*this, A, n);
          }
-
-         // Remaining cost: 3M + 3S + 3A + 2*2 + 1*4 + 1*8
-         const auto y2 = y().square();
-         const auto s = x().mul4() * y2;
-         const auto nx = m.square() - s.mul2();
-         const auto ny = m * (s - nx) - y2.square().mul8();
-         const auto nz = y().mul2() * z();
-
-         return Self(nx, ny, nz);
       }
 
+      /**
+      * Point doubling
+      */
+      constexpr Self dbl() const {
+         if constexpr(Self::A_is_minus_3) {
+            return dbl_a_minus_3(*this);
+         } else if constexpr(Self::A_is_zero) {
+            return dbl_a_zero(*this);
+         } else {
+            return dbl_generic(*this, A);
+         }
+      }
+
+      /**
+      * Point negation
+      */
       constexpr Self negate() const { return Self(x(), y().negate(), z()); }
 
+      /**
+      * Randomize the point representation
+      *
+      * Projective coordinates are redundant; if (x,y,z) is a projective
+      * point then so is (x*r^2,y*r^3,z*r) for any non-zero r.
+      */
       void randomize_rep(RandomNumberGenerator& rng) {
-         if(!rng.is_seeded()) {
-            return;
+         // In certain contexts we may be called with a Null_RNG; in that case the
+         // caller is accepting that randomization will not occur
+
+         // Conditional ok: caller's RNG state (seeded vs not) is presumed public
+         if(rng.is_seeded()) {
+            auto r = FieldElement::random(rng);
+
+            auto r2 = r.square();
+            auto r3 = r2 * r;
+
+            m_x *= r2;
+            m_y *= r3;
+            m_z *= r;
          }
-
-         auto r = FieldElement::random(rng);
-
-         auto r2 = r.square();
-         auto r3 = r2 * r;
-
-         m_x *= r2;
-         m_y *= r3;
-         m_z *= r;
       }
 
+      /**
+      * Return the projective x coordinate
+      */
       constexpr const FieldElement& x() const { return m_x; }
 
+      /**
+      * Return the projective y coordinate
+      */
       constexpr const FieldElement& y() const { return m_y; }
 
+      /**
+      * Return the projective z coordinate
+      */
       constexpr const FieldElement& z() const { return m_z; }
 
       constexpr void _const_time_poison() const { CT::poison_all(m_x, m_y, m_z); }
@@ -909,6 +1181,12 @@ class ProjectiveCurvePoint {
       FieldElement m_z;
 };
 
+/**
+* Elliptic Curve Parameters
+*
+* These are constructed using compile time strings which contain the relevant values
+* (P, A, B, the group order, and the group generator x/y coordinates)
+*/
 template <StringLiteral PS,
           StringLiteral AS,
           StringLiteral BS,
@@ -930,6 +1208,9 @@ class EllipticCurveParameters {
       static constexpr int8_t Z = ZI;
 };
 
+/**
+* This exists solely as a hack which somewhat reduces symbol lengths
+*/
 template <WordType WI, size_t NI, std::array<WI, NI> PI>
 struct IntParams {
    public:
@@ -938,10 +1219,17 @@ struct IntParams {
       static constexpr auto P = PI;
 };
 
+/**
+* Elliptic Curve
+*
+* Takes as input a set of parameters, and instantiates the elliptic curve
+*/
 template <typename Params, template <typename FieldParamsT> typename FieldRep = MontgomeryRep>
 class EllipticCurve {
    public:
       typedef typename Params::W W;
+
+      typedef W WordType;
 
       static constexpr auto PW = Params::PW;
       static constexpr auto NW = Params::NW;
@@ -950,15 +1238,17 @@ class EllipticCurve {
       // Simplifying assumption
       static_assert(PW.size() == NW.size());
 
-      class ScalarParams final : public IntParams<W, NW.size(), NW> {};
+      static constexpr size_t Words = PW.size();
+
+      class ScalarParams final : public IntParams<W, Words, NW> {};
 
       using Scalar = IntMod<MontgomeryRep<ScalarParams>>;
 
-      class FieldParams final : public IntParams<W, PW.size(), PW> {};
+      class FieldParams final : public IntParams<W, Words, PW> {};
 
       using FieldElement = IntMod<FieldRep<FieldParams>>;
 
-      using AffinePoint = AffineCurvePoint<FieldElement, Params>;
+      using AffinePoint = AffineCurvePoint<FieldElement>;
       using ProjectivePoint = ProjectiveCurvePoint<FieldElement, Params>;
 
       static constexpr size_t OrderBits = Scalar::BITS;
@@ -966,6 +1256,8 @@ class EllipticCurve {
 
       static constexpr FieldElement A = FieldElement::from_words(Params::AW);
       static constexpr FieldElement B = FieldElement::from_words(Params::BW);
+
+      static_assert(B.is_nonzero().as_bool(), "B must be non-zero");
 
       static constexpr AffinePoint G =
          AffinePoint(FieldElement::from_words(Params::GXW), FieldElement::from_words(Params::GYW));
@@ -975,66 +1267,67 @@ class EllipticCurve {
       static constexpr bool ValidForSswuHash =
          (Params::Z != 0 && A.is_nonzero().as_bool() && B.is_nonzero().as_bool() && FieldElement::P_MOD_4 == 3);
 
-      static constexpr bool OrderIsLessThanField = bigint_cmp(NW.data(), NW.size(), PW.data(), PW.size()) == -1;
-};
+      static constexpr bool OrderIsLessThanField = bigint_cmp(NW.data(), Words, PW.data(), Words) == -1;
 
-template <typename C>
-concept curve_supports_fe_invert2 = requires(const typename C::FieldElement& fe) {
-   { C::fe_invert2(fe) } -> std::same_as<typename C::FieldElement>;
+      /**
+      * Return (x^3 + A*x + B) mod p
+      */
+      static constexpr FieldElement x3_ax_b(const FieldElement& x) { return (x.square() + A) * x + B; }
 };
 
 /**
 * Blinded Scalar
 *
-* This randomizes the scalar representation by computing s + n*k
+* This randomizes the scalar representation by computing s + n*k,
 * where n is the group order and k is a random value
+*
+* Note that the field arithmetic and point multiplication algorithms
+* implemented in this file are already constant time; blinding is used here as
+* an additional precaution to guard against compilers introducing conditional
+* jumps where not expected.
+*
+* If the provided RNG is not seeded, blinding is skipped and the scalar
+* is used directly. This allows blinding to be disabled at runtime.
 */
 template <typename C, size_t WindowBits>
 class BlindedScalarBits final {
    private:
       typedef typename C::W W;
 
-      static constexpr bool BlindingEnabled = true;
+      static constexpr size_t BlindingBits = scalar_blinding_bits(C::OrderBits);
 
-      // For blinding use 1/4 the order, rounded up to the next word
-      static constexpr size_t BlindingBits =
-         ((C::OrderBits / 4 + WordInfo<W>::bits - 1) / WordInfo<W>::bits) * WordInfo<W>::bits;
-
-      static_assert(BlindingBits % WordInfo<W>::bits == 0);
       static_assert(BlindingBits < C::Scalar::BITS);
 
    public:
-      static constexpr size_t Bits = C::Scalar::BITS + (BlindingEnabled ? BlindingBits : 0);
-      static constexpr size_t Bytes = (Bits + 7) / 8;
+      // Maximum number of bits (used for table sizing)
+      static constexpr size_t Bits = C::Scalar::BITS + BlindingBits;
+
+      size_t bits() const { return m_bits; }
 
       BlindedScalarBits(const typename C::Scalar& scalar, RandomNumberGenerator& rng) {
-         if constexpr(BlindingEnabled) {
-            constexpr size_t mask_words = BlindingBits / WordInfo<W>::bits;
-            constexpr size_t mask_bytes = mask_words * WordInfo<W>::bytes;
+         if(BlindingBits > 0 && rng.is_seeded()) {
+            constexpr size_t MaskWords = (BlindingBits + WordInfo<W>::bits - 1) / WordInfo<W>::bits;
+            constexpr size_t MaskBytes = MaskWords * WordInfo<W>::bytes;
 
-            constexpr size_t n_words = C::NW.size();
+            constexpr size_t n_words = C::Words;
 
-            uint8_t maskb[mask_bytes] = {0};
-            if(rng.is_seeded()) {
-               rng.randomize(maskb, mask_bytes);
-            } else {
-               // If we don't have an RNG we don't have many good options. We
-               // could just omit the blinding entirely, but this changes the
-               // size of the blinded scalar, which we're expecting otherwise is
-               // knowable at compile time. So generate a mask by XORing the
-               // bytes of the scalar together. At worst, it's equivalent to
-               // omitting the blinding entirely.
-
-               std::array<uint8_t, C::Scalar::BYTES> sbytes;
-               scalar.serialize_to(sbytes);
-               for(size_t i = 0; i != sbytes.size(); ++i) {
-                  maskb[i % mask_bytes] ^= sbytes[i];
-               }
-            }
+            uint8_t maskb[MaskBytes + (BlindingBits == 0 ? 1 : 0)] = {0};
+            rng.randomize(maskb, MaskBytes);
 
             W mask[n_words] = {0};
-            load_le(mask, maskb, mask_words);
-            mask[mask_words - 1] |= WordInfo<W>::top_bit;
+            load_le(mask, maskb, MaskWords);
+
+            // Mask to exactly BlindingBits
+            constexpr size_t ExcessBits = MaskWords * WordInfo<W>::bits - BlindingBits;
+            if constexpr(ExcessBits > 0) {
+               constexpr W ExcessMask = (static_cast<W>(1) << (WordInfo<W>::bits - ExcessBits)) - 1;
+               mask[MaskWords - 1] &= ExcessMask;
+            }
+
+            // Set top and bottom bits of mask
+            constexpr size_t TopMaskBit = (BlindingBits - 1) % WordInfo<W>::bits;
+            mask[(BlindingBits - 1) / WordInfo<W>::bits] |= static_cast<W>(1) << TopMaskBit;
+            mask[0] |= 1;
 
             W mask_n[2 * n_words] = {0};
 
@@ -1042,14 +1335,16 @@ class BlindedScalarBits final {
 
             // Compute masked scalar s + k*n
             comba_mul<n_words>(mask_n, mask, C::NW.data());
-            bigint_add2_nc(mask_n, 2 * n_words, sw.data(), sw.size());
+            bigint_add2(mask_n, 2 * n_words, sw.data(), sw.size());
 
             std::reverse(mask_n, mask_n + 2 * n_words);
             m_bytes = store_be<std::vector<uint8_t>>(mask_n);
+            m_bits = C::Scalar::BITS + BlindingBits;
          } else {
-            static_assert(Bytes == C::Scalar::BYTES);
-            m_bytes.resize(Bytes);
-            scalar.serialize_to(std::span{m_bytes}.template first<Bytes>());
+            // No RNG available, skip blinding
+            m_bytes.resize(C::Scalar::BYTES);
+            scalar.serialize_to(std::span{m_bytes}.template first<C::Scalar::BYTES>());
+            m_bits = C::Scalar::BITS;
          }
 
          CT::poison(m_bytes.data(), m_bytes.size());
@@ -1061,13 +1356,18 @@ class BlindedScalarBits final {
       }
 
       ~BlindedScalarBits() {
-         secure_scrub_memory(m_bytes.data(), m_bytes.size());
+         secure_zeroize_buffer(m_bytes.data(), m_bytes.size());
          CT::unpoison(m_bytes.data(), m_bytes.size());
       }
 
+      BlindedScalarBits(const BlindedScalarBits& other) = delete;
+      BlindedScalarBits(BlindedScalarBits&& other) = delete;
+      BlindedScalarBits& operator=(const BlindedScalarBits& other) = delete;
+      BlindedScalarBits& operator=(BlindedScalarBits&& other) = delete;
+
    private:
-      // TODO this could be a fixed size array
       std::vector<uint8_t> m_bytes;
+      size_t m_bits;
 };
 
 template <typename C, size_t WindowBits>
@@ -1075,7 +1375,7 @@ class UnblindedScalarBits final {
    public:
       static constexpr size_t Bits = C::Scalar::BITS;
 
-      UnblindedScalarBits(const typename C::Scalar& scalar) { scalar.serialize_to(std::span{m_bytes}); }
+      explicit UnblindedScalarBits(const typename C::Scalar& scalar) { scalar.serialize_to(std::span{m_bytes}); }
 
       size_t get_window(size_t offset) const {
          // Extract a WindowBits sized window out of s, depending on offset.
@@ -1086,148 +1386,6 @@ class UnblindedScalarBits final {
       std::array<uint8_t, C::Scalar::BYTES> m_bytes;
 };
 
-template <typename C>
-inline auto invert_field_element(const typename C::FieldElement& fe) {
-   if constexpr(curve_supports_fe_invert2<C>) {
-      return C::fe_invert2(fe) * fe;
-   } else {
-      return fe.invert();
-   }
-}
-
-/// Convert a projective point into affine
-template <typename C>
-auto to_affine(const typename C::ProjectivePoint& pt) {
-   // Not strictly required right? - default should work as long
-   // as (0,0) is identity and invert returns 0 on 0
-   if(pt.is_identity().as_bool()) {
-      return C::AffinePoint::identity();
-   }
-
-   if constexpr(curve_supports_fe_invert2<C>) {
-      const auto z2_inv = C::fe_invert2(pt.z());
-      const auto z3_inv = z2_inv.square() * pt.z();
-      return typename C::AffinePoint(pt.x() * z2_inv, pt.y() * z3_inv);
-   } else {
-      const auto z_inv = invert_field_element<C>(pt.z());
-      const auto z2_inv = z_inv.square();
-      const auto z3_inv = z_inv * z2_inv;
-      return typename C::AffinePoint(pt.x() * z2_inv, pt.y() * z3_inv);
-   }
-}
-
-/// Convert a projective point into affine and return x coordinate only
-template <typename C>
-auto to_affine_x(const typename C::ProjectivePoint& pt) {
-   if constexpr(curve_supports_fe_invert2<C>) {
-      return pt.x() * C::fe_invert2(pt.z());
-   } else {
-      return to_affine<C>(pt).x();
-   }
-}
-
-/**
-* Batch projective->affine conversion
-*/
-template <typename C>
-auto to_affine_batch(std::span<const typename C::ProjectivePoint> projective) {
-   typedef typename C::AffinePoint AffinePoint;
-   typedef typename C::FieldElement FieldElement;
-
-   const size_t N = projective.size();
-   std::vector<AffinePoint> affine(N, AffinePoint::identity());
-
-   bool any_identity = false;
-   for(size_t i = 0; i != N; ++i) {
-      if(projective[i].is_identity().as_bool()) {
-         any_identity = true;
-         // If any of the elements are the identity we fall back to
-         // performing the conversion without a batch
-         break;
-      }
-   }
-
-   if(N <= 2 || any_identity) {
-      // If there are identity elements, using the batch inversion gets
-      // tricky. It can be done, but this should be a rare situation so
-      // just punt to the serial conversion if it occurs
-      for(size_t i = 0; i != N; ++i) {
-         affine[i] = to_affine<C>(projective[i]);
-      }
-   } else {
-      std::vector<FieldElement> c(N);
-
-      /*
-      Batch projective->affine using Montgomery's trick
-
-      See Algorithm 2.26 in "Guide to Elliptic Curve Cryptography"
-      (Hankerson, Menezes, Vanstone)
-      */
-
-      c[0] = projective[0].z();
-      for(size_t i = 1; i != N; ++i) {
-         c[i] = c[i - 1] * projective[i].z();
-      }
-
-      auto s_inv = invert_field_element<C>(c[N - 1]);
-
-      for(size_t i = N - 1; i > 0; --i) {
-         const auto& p = projective[i];
-
-         const auto z_inv = s_inv * c[i - 1];
-         const auto z2_inv = z_inv.square();
-         const auto z3_inv = z_inv * z2_inv;
-
-         s_inv = s_inv * p.z();
-
-         affine[i] = AffinePoint(p.x() * z2_inv, p.y() * z3_inv);
-      }
-
-      const auto z2_inv = s_inv.square();
-      const auto z3_inv = s_inv * z2_inv;
-      affine[0] = AffinePoint(projective[0].x() * z2_inv, projective[0].y() * z3_inv);
-   }
-
-   return affine;
-}
-
-/**
-* Base point precomputation table
-*
-* This algorithm works by precomputing a set of points such that
-* the online phase of the point multiplication can be effected by
-* a sequence of point additions.
-*
-* The tables, even for W = 1, are large and costly to precompute, so
-* this is only used for the base point.
-*
-* The online phase of the algorithm uess `ceil(SB/W)` additions,
-* and no point doublings. The table is of size
-* `ceil(SB + W - 1)/W * ((1 << W) - 1)`
-* where SB is the bit length of the (blinded) scalar.
-*
-* Each window of the scalar is associated with a window in the table.
-* The table windows are unique to that offset within the scalar.
-*
-* The simplest version to understand is when W = 1. There the table
-* consists of [P, 2*P, 4*P, ..., 2^N*P] where N is the bit length of
-* the group order. The online phase consists of conditionally adding
-* table[i] depending on if bit i of the scalar is set or not.
-*
-* When W = 2, the scalar is examined 2 bits at a time, and the table
-* for a window index `I` is [(2^I)*P, (2^(I+1))*P, (2^I+2^(I+1))*P].
-*
-* This extends similarly for larger W
-*
-* At a certain point, the side channel silent table lookup becomes the
-* dominating cost
-*
-* For all W, each window in the table has an implicit element of
-* the identity element which is used if the scalar bits were all zero.
-* This is omitted to save space; AffinePoint::ct_select is designed
-* to assist in this by returning the identity element if its index
-* argument is zero, or otherwise it returns table[idx - 1]
-*/
 template <typename C, size_t W>
 class PrecomputedBaseMulTable final {
    public:
@@ -1238,73 +1396,17 @@ class PrecomputedBaseMulTable final {
       static constexpr size_t WindowBits = W;
       static_assert(WindowBits >= 1 && WindowBits <= 8);
 
-      using BlindedScalar = BlindedScalarBits<C, WindowBits>;
+      // W+1 bit extraction windows for Booth recoding overlap
+      using BlindedScalar = BlindedScalarBits<C, WindowBits + 1>;
 
-      static constexpr size_t Windows = (BlindedScalar::Bits + WindowBits - 1) / WindowBits;
-
-      static_assert(Windows > 1);
-
-      // 2^W elements, less the identity element
-      static constexpr size_t WindowElements = (1 << WindowBits) - 1;
-
-      static constexpr size_t TableSize = Windows * WindowElements;
-
-      PrecomputedBaseMulTable(const AffinePoint& p) : m_table{} {
-         std::vector<ProjectivePoint> table;
-         table.reserve(TableSize);
-
-         auto accum = ProjectivePoint::from_affine(p);
-
-         for(size_t i = 0; i != TableSize; i += WindowElements) {
-            table.push_back(accum);
-
-            for(size_t j = 1; j != WindowElements; ++j) {
-               if(j % 2 == 1) {
-                  table.emplace_back(table[i + j / 2].dbl());
-               } else {
-                  table.emplace_back(table[i + j - 1] + table[i]);
-               }
-            }
-
-            accum = table[i + (WindowElements / 2)].dbl();
-         }
-
-         m_table = to_affine_batch<C>(table);
-      }
+      // +1 for Booth carry: if the top window's sign bit is set, the
+      // carry propagates into an extra window
+      explicit PrecomputedBaseMulTable(const AffinePoint& p) :
+            m_table(basemul_booth_setup<C, WindowBits>(p, BlindedScalar::Bits + 1)) {}
 
       ProjectivePoint mul(const Scalar& s, RandomNumberGenerator& rng) const {
-         const BlindedScalar bits(s, rng);
-
-         // TODO: C++23 - use std::mdspan to access m_table
-         auto table = std::span{m_table};
-
-         auto accum = [&]() {
-            const size_t w_0 = bits.get_window(0);
-            const auto tbl_0 = table.first(WindowElements);
-            auto pt = ProjectivePoint::from_affine(AffinePoint::ct_select(tbl_0, w_0));
-            CT::poison(pt);
-            pt.randomize_rep(rng);
-            return pt;
-         }();
-
-         for(size_t i = 1; i != Windows; ++i) {
-            const size_t w_i = bits.get_window(WindowBits * i);
-            const auto tbl_i = table.subspan(WindowElements * i, WindowElements);
-
-            /*
-            None of these additions can be doublings, because in each iteration, the
-            discrete logarithms of the points we're selecting out of the table are
-            larger than the largest possible dlog of accum.
-            */
-            accum += AffinePoint::ct_select(tbl_i, w_i);
-
-            if(i <= 3) {
-               accum.randomize_rep(rng);
-            }
-         }
-
-         CT::unpoison(accum);
-         return accum;
+         const BlindedScalar scalar(s, rng);
+         return basemul_booth_exec<C, WindowBits>(m_table, scalar, rng);
       }
 
    private:
@@ -1335,73 +1437,11 @@ class WindowedMulTable final {
       // 2^W elements, less the identity element
       static constexpr size_t TableSize = (1 << WindowBits) - 1;
 
-      WindowedMulTable(const AffinePoint& p) : m_table{} {
-         std::vector<ProjectivePoint> table;
-         table.reserve(TableSize);
-
-         table.push_back(ProjectivePoint::from_affine(p));
-         for(size_t i = 1; i != TableSize; ++i) {
-            if(i % 2 == 1) {
-               table.push_back(table[i / 2].dbl());
-            } else {
-               table.push_back(table[i - 1] + table[0]);
-            }
-         }
-
-         m_table = to_affine_batch<C>(table);
-      }
+      explicit WindowedMulTable(const AffinePoint& p) : m_table(varpoint_setup<C, TableSize>(p)) {}
 
       ProjectivePoint mul(const Scalar& s, RandomNumberGenerator& rng) const {
          const BlindedScalar bits(s, rng);
-
-         auto accum = [&]() {
-            const size_t w_0 = bits.get_window((Windows - 1) * WindowBits);
-            // Guaranteed because we set the high bit of the randomizer
-            BOTAN_DEBUG_ASSERT(w_0 != 0);
-            auto pt = ProjectivePoint::from_affine(AffinePoint::ct_select(m_table, w_0));
-            CT::poison(pt);
-            pt.randomize_rep(rng);
-            return pt;
-         }();
-
-         for(size_t i = 1; i != Windows; ++i) {
-            accum = accum.dbl_n(WindowBits);
-            const size_t w_i = bits.get_window((Windows - i - 1) * WindowBits);
-
-            /*
-            This point addition cannot be a doubling (except once)
-
-            Consider the sequence of points that are operated on, and specifically
-            their discrete logarithms. We start out at the point at infinity
-            (dlog 0) and then add the initial window which is precisely P*w_0
-
-            We then perform WindowBits doublings, so accum's dlog at the point
-            of the addition in the first iteration of the loop (when i == 1) is
-            at least 2^W * w_0.
-
-            Since we know w_0 > 0, then in every iteration of the loop, accums
-            dlog will always be greater than the dlog of the table element we
-            just looked up (something between 0 and 2^W-1), and thus the
-            addition into accum cannot be a doubling.
-
-            However due to blinding this argument fails, since we perform
-            multiplications using a scalar that is larger than the group
-            order. In this case it's possible that the dlog of accum becomes
-            `order + x` (or, effectively, `x`) and `x` is smaller than 2^W.
-            In this case, a doubling may occur. Future iterations of the loop
-            cannot be doublings by the same argument above. Since the blinding
-            factor is always less than the group order (substantially so),
-            it is not possible for the dlog of accum to overflow a second time.
-            */
-            accum += AffinePoint::ct_select(m_table, w_i);
-
-            if(i <= 3) {
-               accum.randomize_rep(rng);
-            }
-         }
-
-         CT::unpoison(accum);
-         return accum;
+         return varpoint_exec<C, WindowBits>(m_table, bits, rng);
       }
 
    private:
@@ -1409,25 +1449,91 @@ class WindowedMulTable final {
 };
 
 /**
-* Effect 2-ary multiplication ie x*G + y*H
-*
-* This is done using a windowed variant of what is usually called
-* Shamir's trick.
-*
-* The W = 1 case is simple; we precompute an extra point GH = G + H,
-* and then examine 1 bit in each of x and y. If one or the other bits
-* are set then add G or H resp. If both bits are set, add GH.
-*
-* The example below is a precomputed table for W=2. The flattened table
-* begins at (x_i,y_i) = (1,0), i.e. the identity element is omitted.
-* The indices in each cell refer to the cell's location in m_table.
-*
-*  x->           0          1          2         3
-*       0  |/ (ident) |0  x     |1  2x      |2  3x     |
-*       1  |3    y    |4  x+y   |5  2x+y    |6  3x+y   |
-*  y =  2  |7    2y   |8  x+2y  |9  2(x+y)  |10 3x+2y  |
-*       3  |11   3y   |12 x+3y  |13 2x+3y   |14 3x+3y  |
+* Precomputed point multiplication table with Booth
 */
+template <typename C, size_t W>
+class WindowedBoothMulTable final {
+   public:
+      typedef typename C::Scalar Scalar;
+      typedef typename C::AffinePoint AffinePoint;
+      typedef typename C::ProjectivePoint ProjectivePoint;
+
+      static constexpr size_t TableBits = W;
+      static_assert(TableBits >= 1 && TableBits <= 7);
+
+      static constexpr size_t WindowBits = TableBits + 1;
+
+      using BlindedScalar = BlindedScalarBits<C, WindowBits + 1>;
+
+      static constexpr size_t compute_full_windows(size_t sb, size_t wb) {
+         if(sb % wb == 0) {
+            return (sb - 1) / wb;
+         } else {
+            return sb / wb;
+         }
+      }
+
+      static constexpr size_t compute_initial_shift(size_t sb, size_t wb) {
+         if(sb % wb == 0) {
+            return wb;
+         } else {
+            return sb - (sb / wb) * wb;
+         }
+      }
+
+      // 2^W elements [1*P, 2*P, ..., 2^W*P]
+      static constexpr size_t TableSize = 1 << TableBits;
+
+      explicit WindowedBoothMulTable(const AffinePoint& p) : m_table(varpoint_setup<C, TableSize>(p)) {}
+
+      ProjectivePoint mul(const Scalar& s, RandomNumberGenerator& rng) const {
+         const BlindedScalar bits(s, rng);
+
+         const size_t scalar_bits = bits.bits();
+         const size_t full_windows = compute_full_windows(scalar_bits + 1, WindowBits);
+         const size_t initial_shift = compute_initial_shift(scalar_bits + 1, WindowBits);
+
+         BOTAN_DEBUG_ASSERT(full_windows * WindowBits + initial_shift == scalar_bits + 1);
+         BOTAN_DEBUG_ASSERT(initial_shift > 0);
+
+         auto accum = ProjectivePoint::identity();
+         CT::poison(accum);
+
+         for(size_t i = 0; i != full_windows; ++i) {
+            const size_t idx = scalar_bits - initial_shift - WindowBits * i;
+
+            const size_t w_i = bits.get_window(idx);
+            const auto [tidx, tneg] = booth_recode<WindowBits>(w_i);
+
+            // Conditional ok: loop iteration count is public
+            if(i == 0) {
+               accum = ProjectivePoint::from_affine(m_table.ct_select(tidx));
+               accum.conditional_assign(tneg, accum.negate());
+            } else {
+               accum = ProjectivePoint::add_or_sub(accum, m_table.ct_select(tidx), tneg);
+            }
+
+            accum = accum.dbl_n(WindowBits);
+
+            // Conditional ok: loop iteration count is public
+            if(i <= 3) {
+               accum.randomize_rep(rng);
+            }
+         }
+
+         // final window (note one bit shorter than previous reads)
+         const size_t w_l = bits.get_window(0) & ((1 << WindowBits) - 1);
+         const auto [tidx, tneg] = booth_recode<WindowBits>(w_l << 1);
+         accum = ProjectivePoint::add_or_sub(accum, m_table.ct_select(tidx), tneg);
+
+         CT::unpoison(accum);
+         return accum;
+      }
+
+   private:
+      AffinePointTable<C> m_table;
+};
+
 template <typename C, size_t W>
 class WindowedMul2Table final {
    public:
@@ -1438,60 +1544,37 @@ class WindowedMul2Table final {
       typedef typename C::AffinePoint AffinePoint;
       typedef typename C::ProjectivePoint ProjectivePoint;
 
+      WindowedMul2Table(const AffinePoint& p, const AffinePoint& q) : m_table(mul2_setup<C, W>(p, q)) {}
+
+      /**
+      * Constant time 2-ary multiplication
+      */
+      ProjectivePoint mul2(const Scalar& s1, const Scalar& s2, RandomNumberGenerator& rng) const {
+         using BlindedScalar = BlindedScalarBits<C, W>;
+         const BlindedScalar bits1(s1, rng);
+         const BlindedScalar bits2(s2, rng);
+
+         return mul2_exec<C, W>(m_table, bits1, bits2, rng);
+      }
+
+   private:
+      AffinePointTable<C> m_table;
+};
+
+template <typename C, size_t W>
+class VartimeMul2Table final {
+   public:
+      // We look at W bits of each scalar per iteration
+      static_assert(W >= 1 && W <= 4);
+
       static constexpr size_t WindowBits = W;
 
-      static constexpr size_t Windows = (Scalar::BITS + WindowBits - 1) / WindowBits;
+      using Scalar = typename C::Scalar;
+      using AffinePoint = typename C::AffinePoint;
+      using ProjectivePoint = typename C::ProjectivePoint;
 
-      static constexpr size_t WindowSize = (1 << WindowBits);
-
-      // 2^(2*W) elements, less the identity element
-      static constexpr size_t TableSize = (1 << (2 * WindowBits)) - 1;
-
-      WindowedMul2Table(const AffinePoint& x, const AffinePoint& y) {
-         std::vector<ProjectivePoint> table;
-         table.reserve(TableSize);
-
-         for(size_t i = 0; i != TableSize; ++i) {
-            const size_t t_i = (i + 1);
-            const size_t x_i = t_i % WindowSize;
-            const size_t y_i = (t_i >> WindowBits) % WindowSize;
-
-            // Returns x_i * x + y_i * y
-            auto next_tbl_e = [&]() {
-               if(x_i % 2 == 0 && y_i % 2 == 0) {
-                  // Where possible using doubling (eg indices 1, 7, 9 in
-                  // the table above)
-                  return table[(t_i / 2) - 1].dbl();
-               } else if(x_i > 0 && y_i > 0) {
-                  // A combination of x and y
-                  return table[x_i - 1] + table[(y_i << WindowBits) - 1];
-               } else if(x_i > 0 && y_i == 0) {
-                  // A multiple of x without a y component
-                  if(x_i == 1) {
-                     // Just x
-                     return ProjectivePoint::from_affine(x);
-                  } else {
-                     // x * x_{i-1}
-                     return x + table[x_i - 1 - 1];
-                  }
-               } else if(x_i == 0 && y_i > 0) {
-                  if(y_i == 1) {
-                     // Just y
-                     return ProjectivePoint::from_affine(y);
-                  } else {
-                     // y * y_{i-1}
-                     return y + table[((y_i - 1) << WindowBits) - 1];
-                  }
-               } else {
-                  BOTAN_ASSERT_UNREACHABLE();
-               }
-            };
-
-            table.emplace_back(next_tbl_e());
-         }
-
-         m_table = to_affine_batch<C>(table);
-      }
+      VartimeMul2Table(const AffinePoint& p, const AffinePoint& q) :
+            m_table(to_affine_batch<C, true>(mul2_setup<C, W>(p, q))) {}
 
       /**
       * Variable time 2-ary multiplication
@@ -1500,29 +1583,48 @@ class WindowedMul2Table final {
       * of an elliptic curve signature. Since in this case the inputs are all
       * public, there is no problem with variable time computation.
       *
-      * It may be useful to offer a constant time (+blinded) variant of this in
-      * the future for handling secret inputs, for example when computing
-      * Pedersen commitments
-      *
-      * TODO for variable time computation we could make use of a wNAF
-      * representation instead
+      * TODO in the future we could use joint sparse form here.
       */
       ProjectivePoint mul2_vartime(const Scalar& s1, const Scalar& s2) const {
+         constexpr size_t Windows = (Scalar::BITS + WindowBits - 1) / WindowBits;
+
          const UnblindedScalarBits<C, W> bits1(s1);
          const UnblindedScalarBits<C, W> bits2(s2);
 
-         auto accum = ProjectivePoint::identity();
+         const bool s1_is_zero = s1.is_zero().as_bool();
+         const bool s2_is_zero = s2.is_zero().as_bool();
 
-         for(size_t i = 0; i != Windows; ++i) {
-            if(i > 0) {
-               accum = accum.dbl_n(WindowBits);
+         // Conditional ok: this function is variable time
+         if(s1_is_zero && s2_is_zero) {
+            return ProjectivePoint::identity();
+         }
+
+         auto [w_0, first_nonempty_window] = [&]() {
+            for(size_t i = 0; i != Windows; ++i) {
+               const size_t w_1 = bits1.get_window((Windows - i - 1) * WindowBits);
+               const size_t w_2 = bits2.get_window((Windows - i - 1) * WindowBits);
+               const size_t window = w_1 + (w_2 << WindowBits);
+               // Conditional ok: this function is variable time
+               if(window > 0) {
+                  return std::make_pair(window, i);
+               }
             }
+            // We checked for s1 == s2 == 0 above, so we must see a window eventually
+            BOTAN_ASSERT_UNREACHABLE();
+         }();
+
+         BOTAN_ASSERT_NOMSG(w_0 > 0);
+         auto accum = ProjectivePoint::from_affine(m_table[w_0 - 1]);
+
+         for(size_t i = first_nonempty_window + 1; i < Windows; ++i) {
+            accum = accum.dbl_n(WindowBits);
 
             const size_t w_1 = bits1.get_window((Windows - i - 1) * WindowBits);
             const size_t w_2 = bits2.get_window((Windows - i - 1) * WindowBits);
 
             const size_t window = w_1 + (w_2 << WindowBits);
 
+            // Conditional ok: this function is variable time
             if(window > 0) {
                accum += m_table[window - 1];
             }
@@ -1535,26 +1637,40 @@ class WindowedMul2Table final {
       std::vector<AffinePoint> m_table;
 };
 
-// SSWU constant C1 - (B / (Z * A))
+/**
+* SSWU constant C2 - (B / (Z * A))
+*
+* See RFC 9380 section 6.6.2
+*/
 template <typename C>
 const auto& SSWU_C2()
    requires C::ValidForSswuHash
 {
-   // This could use a variable time inversion
+   // TODO(Botan4) Make this a constexpr once compilers have caught up
    static const typename C::FieldElement C2 = C::B * invert_field_element<C>(C::SSWU_Z * C::A);
    return C2;
 }
 
-// SSWU constant C1 - (-B / A)
+/**
+* SSWU constant C1 - (-B / A)
+*
+* See RFC 9380 section 6.6.2
+*/
 template <typename C>
 const auto& SSWU_C1()
    requires C::ValidForSswuHash
 {
+   // TODO(Botan4) Make this a constexpr
    // We derive it from C2 to avoid a second inversion
    static const typename C::FieldElement C1 = (SSWU_C2<C>() * C::SSWU_Z).negate();
    return C1;
 }
 
+/**
+* Map to curve (SSWU)
+*
+* See RFC 9380 ("Hashing to Elliptic Curves") section 6.6.2
+*/
 template <typename C>
 inline auto map_to_curve_sswu(const typename C::FieldElement& u) -> typename C::AffinePoint {
    CT::poison(u);
@@ -1562,59 +1678,58 @@ inline auto map_to_curve_sswu(const typename C::FieldElement& u) -> typename C::
    const auto z2_u4 = z_u2.square();
    const auto tv1 = invert_field_element<C>(z2_u4 + z_u2);
    auto x1 = SSWU_C1<C>() * (C::FieldElement::one() + tv1);
-   C::FieldElement::conditional_assign(x1, tv1.is_zero(), SSWU_C2<C>());
-   const auto gx1 = C::AffinePoint::x3_ax_b(x1);
-
+   x1.conditional_assign(tv1.is_zero(), SSWU_C2<C>());
    const auto x2 = z_u2 * x1;
-   const auto gx2 = C::AffinePoint::x3_ax_b(x2);
 
-   // Will be zero if gx1 is not a square
-   const auto [gx1_sqrt, gx1_is_square] = gx1.sqrt();
-
-   auto x = x2;
    // By design one of gx1 and gx2 must be a quadratic residue
-   auto y = gx2.sqrt().first;
+   const CT::Option<typename C::FieldElement> y1 = sqrt_field_element<C>(C::x3_ax_b(x1));
+   const CT::Option<typename C::FieldElement> y2 = sqrt_field_element<C>(C::x3_ax_b(x2));
 
-   C::FieldElement::conditional_assign(x, y, gx1_is_square, x1, gx1_sqrt);
+   const auto use_y1 = y1.has_value();
 
-   const auto flip_y = y.is_even() != u.is_even();
-   C::FieldElement::conditional_assign(y, flip_y, y.negate());
+   auto x = C::FieldElement::choose(use_y1, x1, x2);
+   auto y = C::FieldElement::choose(use_y1, y1.value_or(C::FieldElement::zero()), y2.value_or(C::FieldElement::zero()));
 
-   auto pt = typename C::AffinePoint(x, y);
+   auto pt = typename C::AffinePoint(x, y.correct_sign(u.is_even()));
 
    CT::unpoison(pt);
    return pt;
 }
 
-template <typename C, bool RO>
-inline auto hash_to_curve_sswu(std::string_view hash, std::span<const uint8_t> pw, std::span<const uint8_t> dst) {
-   static_assert(C::ValidForSswuHash);
-#if defined(BOTAN_HAS_XMD)
-
+/**
+* Hash to curve (SSWU); RFC 9380
+*
+* This is the Simplified Shallue-van de Woestijne-Ulas (SSWU) map.
+*
+* The parameter expand_message models the function of RFC 9380 and is provided
+* by higher levels. For the curves implemented here it will typically be XMD,
+* but could also be an XOF (expand_message_xof) or a MHF like Argon2.
+*
+* For details see RFC 9380 sections 3, 5.2 and 6.6.2.
+*/
+template <typename C, bool RO, std::invocable<std::span<uint8_t>> ExpandMsg>
+   requires C::ValidForSswuHash
+inline auto hash_to_curve_sswu(const ExpandMsg& expand_message)
+   -> std::conditional_t<RO, typename C::ProjectivePoint, typename C::AffinePoint> {
    constexpr size_t SecurityLevel = (C::OrderBits + 1) / 2;
    constexpr size_t L = (C::PrimeFieldBits + SecurityLevel + 7) / 8;
    constexpr size_t Cnt = RO ? 2 : 1;
 
-   std::array<uint8_t, L * Cnt> xmd;
-   expand_message_xmd(hash, xmd, pw, dst);
+   std::array<uint8_t, L * Cnt> uniform_bytes = {};
+   expand_message(uniform_bytes);
 
    if constexpr(RO) {
-      const auto u0 = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(xmd.data(), L));
-      const auto u1 = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(xmd.data() + L, L));
+      const auto u0 = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(uniform_bytes.data(), L));
+      const auto u1 = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(uniform_bytes.data() + L, L));
 
       auto accum = C::ProjectivePoint::from_affine(map_to_curve_sswu<C>(u0));
       accum += map_to_curve_sswu<C>(u1);
       return accum;
    } else {
-      const auto u = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(xmd.data(), L));
+      const auto u = C::FieldElement::from_wide_bytes(std::span<const uint8_t, L>(uniform_bytes.data(), L));
       return map_to_curve_sswu<C>(u);
    }
-#else
-   throw Not_Implemented("Hash to curve not available due to missing XMD");
-#endif
 }
-
-}  // namespace
 
 }  // namespace Botan
 

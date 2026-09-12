@@ -8,6 +8,7 @@
 
 #include "fuzzers.h"
 
+#include <botan/tls_policy.h>
 #include <botan/internal/tls_handshake_layer_13.h>
 #include <botan/internal/tls_transcript_hash_13.h>
 
@@ -21,15 +22,15 @@ Botan::TLS::Handshake_Layer prepare(std::span<const uint8_t> data) {
 
 }  // namespace
 
-void fuzz(const uint8_t in[], size_t len) {
-   static Botan::TLS::Default_Policy policy;
+void fuzz(std::span<const uint8_t> in) {
+   static const Botan::TLS::Default_Policy policy;
 
    try {
-      auto hl1 = prepare(std::span(in, len));
-      Botan::TLS::Transcript_Hash_State ths("SHA-256");
-      while(hl1.next_message(policy, ths).has_value()) {};
+      auto hl1 = prepare(in);
+      Botan::TLS::Transcript_Hash_State transcript_hash("SHA-256");
+      while(hl1.next_message(policy, transcript_hash).has_value()) {};
 
-      auto hl2 = prepare(std::span(in, len));
+      auto hl2 = prepare(in);
       while(hl2.next_post_handshake_message(policy).has_value()) {};
-   } catch(Botan::Exception& e) {}
+   } catch(const Botan::Exception& e) {}
 }

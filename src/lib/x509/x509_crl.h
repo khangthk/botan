@@ -10,31 +10,45 @@
 
 #include <botan/asn1_obj.h>
 #include <botan/pkix_enums.h>
+#include <botan/uri.h>
 #include <botan/x509_obj.h>
+#include <memory>
 #include <vector>
 
 namespace Botan {
 
 class Extensions;
+class BigInt;
 class X509_Certificate;
 class X509_DN;
 
-struct CRL_Entry_Data;
-struct CRL_Data;
+class CRL_Entry_Data;
+class CRL_Data;
+class X509_Serial_Number;
 
 /**
 * This class represents CRL entries
 */
 class BOTAN_PUBLIC_API(2, 0) CRL_Entry final : public ASN1_Object {
    public:
-      void encode_into(DER_Encoder&) const override;
-      void decode_from(BER_Decoder&) override;
+      void encode_into(DER_Encoder& to) const override;
+      void decode_from(BER_Decoder& from) override;
 
       /**
       * Get the serial number of the certificate associated with this entry.
+      *
+      * Note this is the absolute value; the (rare, non-conforming) negative
+      * serial numbers are indistinguishable from their positive counterpart.
+      * Prefer serial() which preserves the sign.
+      *
       * @return certificate's serial number
       */
-      const std::vector<uint8_t>& serial_number() const;
+      BOTAN_DEPRECATED("Prefer CRL_Entry::serial") const std::vector<uint8_t>& serial_number() const;
+
+      /**
+      * Get the serial number of the certificate associated with this entry
+      */
+      const X509_Serial_Number& serial() const;
 
       /**
       * Get the revocation date of the certificate associated with this entry
@@ -63,25 +77,25 @@ class BOTAN_PUBLIC_API(2, 0) CRL_Entry final : public ASN1_Object {
       * @param cert the certificate to revoke
       * @param reason the reason code to set in the entry
       */
-      CRL_Entry(const X509_Certificate& cert, CRL_Code reason = CRL_Code::Unspecified);
+      BOTAN_FUTURE_EXPLICIT CRL_Entry(const X509_Certificate& cert, CRL_Code reason = CRL_Code::Unspecified);
 
    private:
       friend class X509_CRL;
 
       const CRL_Entry_Data& data() const;
 
-      std::shared_ptr<CRL_Entry_Data> m_data;
+      std::shared_ptr<const CRL_Entry_Data> m_data;
 };
 
 /**
 * Test two CRL entries for equality in all fields.
 */
-BOTAN_PUBLIC_API(2, 0) bool operator==(const CRL_Entry&, const CRL_Entry&);
+BOTAN_PUBLIC_API(2, 0) bool operator==(const CRL_Entry& lhs, const CRL_Entry& rhs);
 
 /**
 * Test two CRL entries for inequality in at least one field.
 */
-BOTAN_PUBLIC_API(2, 0) bool operator!=(const CRL_Entry&, const CRL_Entry&);
+BOTAN_PUBLIC_API(2, 0) bool operator!=(const CRL_Entry& lhs, const CRL_Entry& rhs);
 
 /**
 * This class represents X.509 Certificate Revocation Lists (CRLs).
@@ -100,6 +114,12 @@ class BOTAN_PUBLIC_API(2, 0) X509_CRL final : public X509_Object {
       const std::vector<CRL_Entry>& get_revoked() const;
 
       /**
+      * Get the X509 version of this CRL object
+      * @return X509 version
+      */
+      uint32_t x509_version() const;
+
+      /**
       * Get the issuer DN of this CRL.
       * @return CRLs issuer DN
       */
@@ -111,16 +131,28 @@ class BOTAN_PUBLIC_API(2, 0) X509_CRL final : public X509_Object {
       const Extensions& extensions() const;
 
       /**
+      * Return true if either the CRL extensions or any CRL entry extensions
+      * contained a critical extension which we did not recognize.
+      */
+      bool has_unknown_critical_extension() const;
+
+      /**
       * Get the AuthorityKeyIdentifier of this CRL.
       * @return this CRLs AuthorityKeyIdentifier
       */
       const std::vector<uint8_t>& authority_key_id() const;
 
       /**
-      * Get the serial number of this CRL.
-      * @return CRLs serial number
-      */
-      uint32_t crl_number() const;
+       * Get the CRL number of this CRL.
+       * @return CRL number (or nullopt if not set in the extensions)
+       */
+      const std::optional<BigInt>& crl_number_bigint() const;
+
+      /**
+       * Get the CRL number of this CRL.
+       * @return CRL number (or zero if not set in the extensions)
+       */
+      BOTAN_DEPRECATED("Use crl_number_bigint") uint32_t crl_number() const;
 
       /**
       * Get the CRL's thisUpdate value.
@@ -130,21 +162,67 @@ class BOTAN_PUBLIC_API(2, 0) X509_CRL final : public X509_Object {
 
       /**
       * Get the CRL's nextUpdate value.
-      * @return CRLs nextdUpdate
+      *
+      * Technically nextUpdate is optional in the X.509 spec and may be omitted,
+      * despite RFC 5280 requiring it. If the nextUpdate field is not set, this
+      * will return a time object with time_is_set() returning false.
+      *
+      * TODO(Botan4) return a `const std::optional<X509_Time>&` instead
+      *
+      * @return CRLs nextUpdate
       */
       const X509_Time& next_update() const;
 
       /**
       * Get the CRL's issuing distribution point
       */
-      BOTAN_DEPRECATED("Use issuing_distribution_points") std::string crl_issuing_distribution_point() const;
+      BOTAN_DEPRECATED("Use issuing_distribution_point_uris") std::string crl_issuing_distribution_point() const;
 
       /**
       * Get the CRL's issuing distribution points
       *
       * See https://www.rfc-editor.org/rfc/rfc5280#section-5.2.5
       */
+      BOTAN_DEPRECATED("Use issuing_distribution_point_uris")
       std::vector<std::string> issuing_distribution_points() const;
+
+      /**
+      * Get the CRL's issuing distribution points
+      *
+      * See https://www.rfc-editor.org/rfc/rfc5280#section-5.2.5
+      */
+      const std::vector<URI>& issuing_distribution_point_uris() const;
+
+      /**
+      * Check whether this CRL's scope covers the given certificate per the
+      * RFC 5280 6.3.3 (b)(1) and (b)(2)(i) name-matching rules.
+      *
+      * When the certificate has a CRLDP extension (4.2.1.13), iterates each
+      * DistributionPoint and verifies:
+      *   - (b)(1): if the DP includes cRLIssuer, this CRL's issuer must
+      *     appear in that field and this CRL must carry an IDP with
+      *     indirectCRL = TRUE; otherwise this CRL's issuer must match the
+      *     certificate's issuer.
+      *   - (b)(2)(i): if this CRL's IDP names a distributionPoint, that
+      *     name must overlap with the DP's distributionPoint (fullName
+      *     GeneralNames) or, if the DP omits distributionPoint, with
+      *     the DP's cRLIssuer entries.
+      *
+      * The trailing paragraph of 6.3.3 supplies an implicit DP: this CRL
+      * is also usable if its issuer matches the certificate's issuer and,
+      * if its IDP names a distributionPoint, that name overlaps with the
+      * certificate's issuer DN or any entry in the certificate's
+      * issuerAltName extension. This implicit DP applies both when the
+      * certificate has no CRLDP and, as a fallback, when it has a CRLDP
+      * but no DistributionPoint matches: a same-issuer complete CRL not
+      * named in any DP is still usable.
+      *
+      * Returns false if none of the above match. Returns true on a name
+      * match. Reason coverage is a separate question; this predicate
+      * intentionally does not consult the DP's reasons field or the IDP's
+      * onlySomeReasons.
+      */
+      bool has_matching_distribution_point(const X509_Certificate& cert) const;
 
       /**
       * Create an uninitialized CRL object. Any attempts to access
@@ -156,21 +234,21 @@ class BOTAN_PUBLIC_API(2, 0) X509_CRL final : public X509_Object {
       * Construct a CRL from a data source.
       * @param source the data source providing the DER or PEM encoded CRL.
       */
-      X509_CRL(DataSource& source);
+      BOTAN_FUTURE_EXPLICIT X509_CRL(DataSource& source);
 
 #if defined(BOTAN_TARGET_OS_HAS_FILESYSTEM)
       /**
       * Construct a CRL from a file containing the DER or PEM encoded CRL.
       * @param filename the name of the CRL file
       */
-      X509_CRL(std::string_view filename);
+      BOTAN_FUTURE_EXPLICIT X509_CRL(std::string_view filename);
 #endif
 
       /**
       * Construct a CRL from a binary vector
       * @param vec the binary (DER) representation of the CRL
       */
-      X509_CRL(const std::vector<uint8_t>& vec);
+      BOTAN_FUTURE_EXPLICIT X509_CRL(const std::vector<uint8_t>& vec);
 
       /**
       * Construct a CRL
@@ -193,7 +271,7 @@ class BOTAN_PUBLIC_API(2, 0) X509_CRL final : public X509_Object {
 
       const CRL_Data& data() const;
 
-      std::shared_ptr<CRL_Data> m_data;
+      std::shared_ptr<const CRL_Data> m_data;
 };
 
 }  // namespace Botan

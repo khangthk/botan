@@ -8,8 +8,10 @@
 #define BOTAN_EC_APOINT_H_
 
 #include <botan/concepts.h>
+#include <botan/ec_point_format.h>
 #include <botan/secmem.h>
 #include <botan/types.h>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -21,22 +23,56 @@ class BigInt;
 class RandomNumberGenerator;
 class EC_Group;
 class EC_Scalar;
+
+#if defined(BOTAN_HAS_LEGACY_EC_POINT)
 class EC_Point;
+#endif
 
 class EC_Group_Data;
 class EC_AffinePoint_Data;
 
-class BOTAN_UNSTABLE_API EC_AffinePoint final {
+/**
+* Elliptic Curve Point in Affine Representation
+*/
+class BOTAN_PUBLIC_API(3, 6) EC_AffinePoint final {
    public:
       /// Point deserialization. Throws if wrong length or not a valid point
       ///
-      /// This accepts SEC1 compressed or uncompressed formats
+      /// This accepts SEC1 compressed or uncompressed formats. It also (for
+      /// backward compatibility) accepts the deprecated hybrid format, and
+      /// the encoding of the identity element as a single zero byte. Prefer
+      /// deserialize_compressed or deserialize_uncompressed, which accept
+      /// exactly one well-defined encoding.
       EC_AffinePoint(const EC_Group& group, std::span<const uint8_t> bytes);
 
       /// Point deserialization. Returns nullopt if wrong length or not a valid point
       ///
-      /// This accepts SEC1 compressed or uncompressed formats
+      /// This accepts SEC1 compressed or uncompressed formats. It also (for
+      /// backward compatibility) accepts the deprecated hybrid format, and
+      /// the encoding of the identity element as a single zero byte. Prefer
+      /// deserialize_compressed or deserialize_uncompressed, which accept
+      /// exactly one well-defined encoding.
       static std::optional<EC_AffinePoint> deserialize(const EC_Group& group, std::span<const uint8_t> bytes);
+
+      /// Point deserialization, accepting only the SEC1 compressed format
+      ///
+      /// The encoding must be exactly 1 + field_element_bytes long, with a
+      /// header byte of either 0x02 or 0x03. All other encodings (including
+      /// the uncompressed, hybrid, and identity encodings) are rejected.
+      ///
+      /// Returns nullopt if the encoding was rejected or not a valid point
+      static std::optional<EC_AffinePoint> deserialize_compressed(const EC_Group& group,
+                                                                  std::span<const uint8_t> bytes);
+
+      /// Point deserialization, accepting only the SEC1 uncompressed format
+      ///
+      /// The encoding must be exactly 1 + 2*field_element_bytes long, with a
+      /// header byte of 0x04. All other encodings (including the compressed,
+      /// hybrid, and identity encodings) are rejected.
+      ///
+      /// Returns nullopt if the encoding was rejected or not a valid point
+      static std::optional<EC_AffinePoint> deserialize_uncompressed(const EC_Group& group,
+                                                                    std::span<const uint8_t> bytes);
 
       /// Create a point from a pair (x,y) of integers
       ///
@@ -45,9 +81,7 @@ class BOTAN_UNSTABLE_API EC_AffinePoint final {
       static std::optional<EC_AffinePoint> from_bigint_xy(const EC_Group& group, const BigInt& x, const BigInt& y);
 
       /// Multiply by the group generator returning a complete point
-      ///
-      /// Workspace argument is transitional
-      static EC_AffinePoint g_mul(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& ws);
+      static EC_AffinePoint g_mul(const EC_Scalar& scalar, RandomNumberGenerator& rng);
 
       /// Return the identity element
       static EC_AffinePoint identity(const EC_Group& group);
@@ -63,6 +97,14 @@ class BOTAN_UNSTABLE_API EC_AffinePoint final {
                                              std::span<const uint8_t> input,
                                              std::span<const uint8_t> domain_sep);
 
+      /// Hash to curve (RFC 9380), random oracle variant
+      ///
+      /// Only supported for specific groups
+      static EC_AffinePoint hash_to_curve_ro(const EC_Group& group,
+                                             std::string_view hash_fn,
+                                             std::span<const uint8_t> input,
+                                             std::string_view domain_sep);
+
       /// Hash to curve (RFC 9380), non uniform variant
       ///
       /// Only supported for specific groups
@@ -71,10 +113,44 @@ class BOTAN_UNSTABLE_API EC_AffinePoint final {
                                              std::span<const uint8_t> input,
                                              std::span<const uint8_t> domain_sep);
 
-      /// Multiply a point by a scalar returning a complete point
+      /// Hash to curve (RFC 9380), non uniform variant
       ///
-      /// Workspace argument is transitional
-      EC_AffinePoint mul(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& ws) const;
+      /// Only supported for specific groups
+      static EC_AffinePoint hash_to_curve_nu(const EC_Group& group,
+                                             std::string_view hash_fn,
+                                             std::span<const uint8_t> input,
+                                             std::string_view domain_sep);
+
+      /// Multiply a point by a scalar returning a complete point
+      EC_AffinePoint mul(const EC_Scalar& scalar, RandomNumberGenerator& rng) const;
+
+      /// Multiply a point by a scalar, returning the byte encoding of the x coordinate only
+      secure_vector<uint8_t> mul_x_only(const EC_Scalar& scalar, RandomNumberGenerator& rng) const;
+
+      /// Compute 2-ary multiscalar multiplication - p*x + q*y
+      ///
+      /// This operation runs in constant time with respect to p, x, q, and y
+      ///
+      /// @returns p*x+q*y, or nullopt if the result was the point at infinity
+      static std::optional<EC_AffinePoint> mul_px_qy(const EC_AffinePoint& p,
+                                                     const EC_Scalar& x,
+                                                     const EC_AffinePoint& q,
+                                                     const EC_Scalar& y,
+                                                     RandomNumberGenerator& rng);
+
+      /// Point addition
+      ///
+      /// Note that this is quite slow since it converts the resulting
+      /// projective point immediately to affine coordinates, which requires a
+      /// field inversion. This can be sufficient when implementing protocols
+      /// that just need to perform a few additions.
+      ///
+      /// In the future a corresponding EC_ProjectivePoint type may be added
+      /// which would avoid the expensive affine conversions
+      EC_AffinePoint add(const EC_AffinePoint& q) const;
+
+      /// Point negation
+      EC_AffinePoint negate() const;
 
       /// Return the number of bytes of a field element
       ///
@@ -169,12 +245,50 @@ class BOTAN_UNSTABLE_API EC_AffinePoint final {
          return bytes;
       }
 
+      /**
+      * Test if two points are equal
+      * @param other the point to compare against
+      * @return true if the two points are equal
+      */
+      bool operator==(const EC_AffinePoint& other) const;
+
+      /**
+      * Test if two points are unequal
+      * @param other the point to compare against
+      * @return true if the two points are not equal
+      */
+      bool operator!=(const EC_AffinePoint& other) const { return !(*this == other); }
+
+      /// Return an encoding depending on the requested format
+      std::vector<uint8_t> serialize(EC_Point_Format format) const;
+
+      /**
+      * Copy constructor
+      * @param other the point to copy
+      */
       EC_AffinePoint(const EC_AffinePoint& other);
+
+      /**
+      * Move constructor
+      * @param other the point to move from
+      */
       EC_AffinePoint(EC_AffinePoint&& other) noexcept;
 
+      /**
+      * Copy assignment
+      * @param other the point to copy
+      * @return reference to this
+      */
       EC_AffinePoint& operator=(const EC_AffinePoint& other);
+
+      /**
+      * Move assignment
+      * @param other the point to move from
+      * @return reference to this
+      */
       EC_AffinePoint& operator=(EC_AffinePoint&& other) noexcept;
 
+#if defined(BOTAN_HAS_LEGACY_EC_POINT)
       /**
       * Deprecated conversion
       */
@@ -184,19 +298,58 @@ class BOTAN_UNSTABLE_API EC_AffinePoint final {
       * Deprecated conversion
       */
       EC_Point to_legacy_point() const;
+#endif
+
+      /**
+      * Multiply by the group generator returning a complete point
+      * @param scalar the scalar to multiply the generator by
+      * @param rng a random number generator, used for blinding
+      * @return the resulting point
+      */
+      BOTAN_DEPRECATED("Use version without workspace arg")
+      static EC_AffinePoint g_mul(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& /*ws*/) {
+         return EC_AffinePoint::g_mul(scalar, rng);
+      }
+
+      /**
+      * Multiply a point by a scalar returning a complete point
+      * @param scalar the scalar to multiply this point by
+      * @param rng a random number generator, used for blinding
+      * @return the resulting point
+      */
+      BOTAN_DEPRECATED("Use version without workspace arg")
+      EC_AffinePoint mul(const EC_Scalar& scalar, RandomNumberGenerator& rng, std::vector<BigInt>& /*ws*/) const {
+         return this->mul(scalar, rng);
+      }
+
+      /// Multiply a point by a scalar, returning the byte encoding of the x coordinate only
+      secure_vector<uint8_t> mul_x_only(const EC_Scalar& scalar,
+                                        RandomNumberGenerator& rng,
+                                        std::vector<BigInt>& /*ws*/) const {
+         return this->mul_x_only(scalar, rng);
+      }
 
       ~EC_AffinePoint();
 
+      /**
+      * For internal use only
+      */
       const EC_AffinePoint_Data& _inner() const { return inner(); }
 
+      /**
+      * For internal use only
+      */
       static EC_AffinePoint _from_inner(std::unique_ptr<EC_AffinePoint_Data> inner);
 
+      /**
+      * For internal use only
+      */
       const std::shared_ptr<const EC_Group_Data>& _group() const;
 
    private:
       friend class EC_Mul2Table;
 
-      EC_AffinePoint(std::unique_ptr<EC_AffinePoint_Data> point);
+      explicit EC_AffinePoint(std::unique_ptr<EC_AffinePoint_Data> point);
 
       const EC_AffinePoint_Data& inner() const { return *m_point; }
 

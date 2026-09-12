@@ -7,10 +7,11 @@ name -> "RSA"
 </module_info>
 
 <requires>
+blinding
 keypair
 numbertheory
-emsa_pssr
-sha2_32
+sig_padding
+enc_padding
 </requires>
 
 <header:public>

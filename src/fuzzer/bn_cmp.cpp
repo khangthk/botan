@@ -8,23 +8,23 @@
 
 #include <botan/bigint.h>
 
-void fuzz(const uint8_t in[], size_t len) {
+void fuzz(const std::span<const uint8_t> in) {
    const size_t max_bits = 512;
 
-   if(len < 3 || len > 1 + 2 * (max_bits / 8)) {
+   if(in.size() < 3 || in.size() > 1 + 2 * (max_bits / 8)) {
       return;
    }
 
    const uint8_t signs = in[0];
-   const size_t x_len = (len - 1) / 2;
+   const size_t x_len = (in.size() - 1) / 2;
 
-   Botan::BigInt x = Botan::BigInt::decode(in + 1, x_len);
-   Botan::BigInt y = Botan::BigInt::decode(in + 1 + x_len, len - x_len - 1);
+   Botan::BigInt x = Botan::BigInt::from_bytes(in.subspan(1, x_len));
+   Botan::BigInt y = Botan::BigInt::from_bytes(in.subspan(1 + x_len, in.size() - x_len - 1));
 
-   if(signs & 1) {
+   if((signs & 1) != 0) {
       x.flip_sign();
    }
-   if(signs & 2) {
+   if((signs & 2) != 0) {
       y.flip_sign();
    }
 
@@ -54,17 +54,17 @@ void fuzz(const uint8_t in[], size_t len) {
 
    if(is_lt) {
       FUZZER_ASSERT_TRUE(!is_gt);
-      FUZZER_ASSERT_TRUE(d1.is_nonzero());
-      FUZZER_ASSERT_TRUE(d2.is_nonzero());
-      FUZZER_ASSERT_TRUE(d1.is_negative());
-      FUZZER_ASSERT_TRUE(d2.is_positive());
+      FUZZER_ASSERT_TRUE(d1.signum() != 0);
+      FUZZER_ASSERT_TRUE(d2.signum() != 0);
+      FUZZER_ASSERT_TRUE(d1.signum() < 0);
+      FUZZER_ASSERT_TRUE(d2.signum() > 0);
    }
 
    if(is_gt) {
       FUZZER_ASSERT_TRUE(!is_lt);
-      FUZZER_ASSERT_TRUE(d1.is_nonzero());
-      FUZZER_ASSERT_TRUE(d2.is_nonzero());
-      FUZZER_ASSERT_TRUE(d1.is_positive());
-      FUZZER_ASSERT_TRUE(d2.is_negative());
+      FUZZER_ASSERT_TRUE(d1.signum() != 0);
+      FUZZER_ASSERT_TRUE(d2.signum() != 0);
+      FUZZER_ASSERT_TRUE(d1.signum() > 0);
+      FUZZER_ASSERT_TRUE(d2.signum() < 0);
    }
 }

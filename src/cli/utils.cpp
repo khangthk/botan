@@ -8,13 +8,16 @@
 #include "cli.h"
 
 #include <botan/version.h>
-#include <botan/internal/cpuid.h>
-#include <botan/internal/os_utils.h>
-#include <botan/internal/stl_util.h>
+#include <botan/internal/target_info.h>
 #include <iomanip>
 #include <sstream>
 
+#if defined(BOTAN_HAS_CPUID)
+   #include <botan/internal/cpuid.h>
+#endif
+
 #if defined(BOTAN_HAS_HTTP_UTIL)
+   #include <botan/uri.h>
    #include <botan/internal/http_util.h>
 #endif
 
@@ -22,7 +25,13 @@
    #include <botan/uuid.h>
 #endif
 
+#if defined(BOTAN_HAS_OS_UTILS)
+   #include <botan/internal/os_utils.h>
+#endif
+
 namespace Botan_CLI {
+
+namespace {
 
 class Print_Help final : public Command {
    public:
@@ -123,7 +132,7 @@ class Has_Command final : public Command {
             output() << "Command '" << cmd << "' is " << (exists ? "" : "not ") << "available\n";
          }
 
-         if(exists == false) {
+         if(!exists) {
             this->set_return_code(1);
          }
       }
@@ -155,7 +164,7 @@ class Config_Info final : public Command {
          } else if(arg == "cflags") {
             output() << "-I" << BOTAN_INSTALL_PREFIX << "/" << BOTAN_INSTALL_HEADER_DIR << "\n";
          } else if(arg == "ldflags") {
-            if(*BOTAN_LINK_FLAGS) {
+            if(*BOTAN_LINK_FLAGS != 0) {
                output() << BOTAN_LINK_FLAGS << ' ';
             }
             output() << "-L" << BOTAN_INSTALL_LIB_DIR << "\n";
@@ -188,6 +197,8 @@ class Version_Info final : public Command {
 
 BOTAN_REGISTER_COMMAND("version", Version_Info);
 
+#if defined(BOTAN_HAS_CPUID)
+
 class Print_Cpuid final : public Command {
    public:
       Print_Cpuid() : Command("cpuid") {}
@@ -202,6 +213,10 @@ class Print_Cpuid final : public Command {
 };
 
 BOTAN_REGISTER_COMMAND("cpuid", Print_Cpuid);
+
+#endif
+
+#if defined(BOTAN_HAS_OS_UTILS)
 
 class Cycle_Counter final : public Command {
    public:
@@ -262,6 +277,8 @@ class Cycle_Counter final : public Command {
 
 BOTAN_REGISTER_COMMAND("cpu_clock", Cycle_Counter);
 
+#endif
+
 #if defined(BOTAN_HAS_UUID)
 
 class Print_UUID final : public Command {
@@ -273,7 +290,7 @@ class Print_UUID final : public Command {
       std::string description() const override { return "Print a random UUID"; }
 
       void go() override {
-         Botan::UUID uuid(rng());
+         const Botan::UUID uuid(rng());
          output() << uuid.to_string() << "\n";
       }
 };
@@ -297,12 +314,20 @@ class HTTP_Get final : public Command {
          const std::chrono::milliseconds timeout(get_arg_sz("timeout"));
          const size_t redirects = get_arg_sz("redirects");
 
-         output() << Botan::HTTP::GET_sync(url, redirects, timeout) << "\n";
+         auto uri = Botan::URI::from_string(url);
+         if(!uri) {
+            throw CLI_Usage_Error("Could not parse URL '" + url + "'");
+         }
+
+         const auto limits = Botan::HTTP::RequestLimits().set_max_redirects(redirects).set_timeout(timeout);
+         output() << Botan::HTTP::GET_sync(*uri, limits) << "\n";
       }
 };
 
 BOTAN_REGISTER_COMMAND("http_get", HTTP_Get);
 
 #endif  // http_util
+
+}  // namespace
 
 }  // namespace Botan_CLI

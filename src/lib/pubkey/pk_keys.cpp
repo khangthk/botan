@@ -7,11 +7,13 @@
 
 #include <botan/pk_keys.h>
 
+#include <botan/assert.h>
 #include <botan/der_enc.h>
 #include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/pk_ops.h>
 #include <botan/internal/fmt.h>
+#include <botan/internal/pk_options_impl.h>
 
 namespace Botan {
 
@@ -27,19 +29,34 @@ OID Asymmetric_Key::object_identifier() const {
    }
 }
 
-std::string create_hex_fingerprint(const uint8_t bits[], size_t bits_len, std::string_view hash_name) {
+Signature_Format Asymmetric_Key::_default_x509_signature_format() const {
+   if(_signature_element_size_for_DER_encoding()) {
+      return Signature_Format::DerSequence;
+   } else {
+      return Signature_Format::Standard;
+   }
+}
+
+std::string create_hex_fingerprint(std::span<const uint8_t> bits, std::string_view hash_name) {
    auto hash_fn = HashFunction::create_or_throw(hash_name);
-   const std::string hex_hash = hex_encode(hash_fn->process(bits, bits_len));
+   hash_fn->update(bits);
+   auto digest = hash_fn->final_stdvec();
+   return format_hex_fingerprint(digest);
+}
+
+std::string format_hex_fingerprint(std::span<const uint8_t> bits) {
+   const std::string hex = hex_encode(bits);
 
    std::string fprint;
+   fprint.reserve(3 * bits.size());
 
-   for(size_t i = 0; i != hex_hash.size(); i += 2) {
+   for(size_t i = 0; i != hex.size(); i += 2) {
       if(i != 0) {
          fprint.push_back(':');
       }
 
-      fprint.push_back(hex_hash[i]);
-      fprint.push_back(hex_hash[i + 1]);
+      fprint.push_back(hex[i]);
+      fprint.push_back(hex[i + 1]);
    }
 
    return fprint;
@@ -51,7 +68,7 @@ std::vector<uint8_t> Public_Key::subject_public_key() const {
    DER_Encoder(output)
       .start_sequence()
       .encode(algorithm_identifier())
-      .encode(public_key_bits(), ASN1_Type::BitString)
+      .encode_octet_aligned_bitstring(public_key_bits())
       .end_cons();
 
    return output;
@@ -98,8 +115,8 @@ std::unique_ptr<PK_Ops::KEM_Encryption> Public_Key::create_kem_encryption_op(std
    throw Lookup_Error(fmt("{} does not support KEM encryption", algo_name()));
 }
 
-std::unique_ptr<PK_Ops::Verification> Public_Key::create_verification_op(std::string_view /*params*/,
-                                                                         std::string_view /*provider*/) const {
+std::unique_ptr<PK_Ops::Verification> Public_Key::_create_verification_op(const PK_Signature_Options& options) const {
+   BOTAN_UNUSED(options);
    throw Lookup_Error(fmt("{} does not support verification", algo_name()));
 }
 
@@ -120,9 +137,9 @@ std::unique_ptr<PK_Ops::KEM_Decryption> Private_Key::create_kem_decryption_op(Ra
    throw Lookup_Error(fmt("{} does not support KEM decryption", algo_name()));
 }
 
-std::unique_ptr<PK_Ops::Signature> Private_Key::create_signature_op(RandomNumberGenerator& /*rng*/,
-                                                                    std::string_view /*params*/,
-                                                                    std::string_view /*provider*/) const {
+std::unique_ptr<PK_Ops::Signature> Private_Key::_create_signature_op(RandomNumberGenerator& rng,
+                                                                     const PK_Signature_Options& options) const {
+   BOTAN_UNUSED(rng, options);
    throw Lookup_Error(fmt("{} does not support signatures", algo_name()));
 }
 
@@ -130,6 +147,19 @@ std::unique_ptr<PK_Ops::Key_Agreement> Private_Key::create_key_agreement_op(Rand
                                                                             std::string_view /*params*/,
                                                                             std::string_view /*provider*/) const {
    throw Lookup_Error(fmt("{} does not support key agreement", algo_name()));
+}
+
+// Forwarding functions for compat
+
+std::unique_ptr<PK_Ops::Verification> Public_Key::create_verification_op(std::string_view params,
+                                                                         std::string_view provider) const {
+   return this->_create_verification_op(parse_legacy_sig_options(*this, params).with_provider(provider));
+}
+
+std::unique_ptr<PK_Ops::Signature> Private_Key::create_signature_op(RandomNumberGenerator& rng,
+                                                                    std::string_view params,
+                                                                    std::string_view provider) const {
+   return this->_create_signature_op(rng, parse_legacy_sig_options(*this, params).with_provider(provider));
 }
 
 }  // namespace Botan

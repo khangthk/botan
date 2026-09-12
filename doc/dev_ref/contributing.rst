@@ -12,7 +12,7 @@ Under ``src`` there are directories
 * ``tests`` contain what you would expect. Input files go under ``tests/data``.
 * ``python/botan3.py`` is the Python ctypes wrapper
 * ``bogo_shim`` contains the shim binary and configuration for
-  `BoringSSL's TLS test suite <https://github.com/google/boringssl/tree/master/ssl/test>`_
+  `BoringSSL's TLS test suite <https://github.com/google/boringssl/tree/main/ssl/test>`_
 * ``fuzzer`` contains fuzz targets for various modules of the library
 * ``ct_selftest`` has some tests to validate constant time checker tools (e.g. valgrind)
 * ``build-data`` contains files read by the configure script. For
@@ -117,6 +117,15 @@ needed. If your diff is less than roughly 100 lines, it should probably be a
 single commit. Only split commits as needed to help with review/understanding of
 the change.
 
+Occasionally we apply and commit updated clang-format rules to the code base. To
+avoid cluttering the ``git blame`` output with these intrusive commits, we
+maintain a list of them in ``src/configs/git-blame-ignore-revs``. To use it,
+either manually add ``--ignore-revs-file=`` to your ``git blame`` command, or
+configure it to be used in your local checkout, like so::
+
+  git config --local blame.ignoreRevsFile src/configs/git-blame-ignore-revs
+  git config --local blame.markIgnoredLines true
+
 Python
 ----------------------------------------
 
@@ -145,6 +154,11 @@ If you don't already use it for all your C/C++ development, install ``ccache``
 (or on Windows, ``sccache``) right now, and configure a large cache on a fast
 disk. It allows for very quick rebuilds by caching the compiler output.
 
+With GCC or Clang, ``--enable-pch`` uses a precompiled header to speed up
+compilation. For ``ccache``, setting ``CCACHE_SLOPPINESS=pch_defines,time_macros``
+allows using both the compiler cache and precompiled headers, for best
+compilation speed.
+
 Use ``--enable-sanitizers=`` flag to enable various sanitizer checks.  Supported
 values including "address" and "undefined" for GCC and Clang. GCC also supports
 "iterator" (checked iterators), and Clang supports "memory" (MSan) and
@@ -156,24 +170,32 @@ run the tests, test the fuzzers against a corpus, and produce an HTML report
 of total coverage. This coverage build requires the development headers for
 zlib, bzip2, liblzma, TrouSerS (libtspi), and Sqlite3.
 
+Development Container
+----------------------------------------
+
+The repository root contains a .devcontainer configuration based on Ubuntu which
+conveniently sets up a fully-functional build and test environment. This is the
+recommended way for new contributors to start developing.
+
+Currently, the .devcontainer integrates best with Visual Studio Code, but other
+integrations would be welcome. The container should also work decently using the
+bare-metal devcontainer CLI.
+
 Editor Integrations
 ----------------------------------------
 
 The folder ``src/editors`` contains configuration files for a few editors.
 To make use of them, create symlinks of those into the root of your local
-Botan repository. For example, to enable integration with VSCode and configure
-the editor using editorconfig, you can do the following:
+Botan repository. For instance, to enable editorconfig for any editor that
+supports it, you can do the following:
 
 .. code-block:: bash
 
   cd /home/you/projects/botan
-  ln -s src/editors/vscode .vscode
   ln -s src/editors/editorconfig .editorconfig
 
-  code .
-
-With the recommended extensions installed, you should now have a good starting
-point for working with Botan in VSCode.
+If you are using VSCode with the development container, the right symlinks are
+created automatically and you should be good to go off the bat.
 
 Copyright Notice
 ----------------------------------------
@@ -189,6 +211,21 @@ license, for example::
 
 If you are making a substantial or non-trivial change to an existing file, add
 or update your own copyright statement at the top of each file.
+
+Notes On Comments
+----------------------------------------
+
+Comments are great. Comments are also in some sense a sign of failure; the code is doing
+something non-obvious, and the easiest way to make the behavior or reasoning more obvious
+it to leave a comment. If you find yourself leaving a long comment explaining how something
+works or why it behaves a particular way, consider if it's possible to restructure the code
+to make the long comment unnecessary.
+
+If the behavior of the code is dictated by an external standard (such as an IETF RFC or
+a NIST SP document), often the best possible comment is a direct verbatim quote from the
+relevant standard, referencing the document and section.
+
+For Doxygen doc-comments, prefer ``/** ... */`` over multi-line ``///`` comments.
 
 Style Conventions
 ----------------------------------------
@@ -232,12 +269,13 @@ Avoid explicit ``new`` or (especially) explicit ``delete``: use RAII,
 Use ``m_`` prefix on all member variables.
 
 ``clang-format`` is used for all C++ formatting. The configuration is
-in ``.clang-format`` in the root directory. You can rerun the
-formatter using ``make fmt``, by invoking the script
-``src/scripts/dev_tools/run_clang_format.py`` or using an appropriate editor
-configuration from ``src/editors``. If the output would be truly horrible, it is
-allowed to disable formatting for a specific area using ``// clang-format off``
-annotations.
+in ``src/configs/clang-format``. You can rerun the formatter using ``make fmt``,
+by invoking the script ``src/scripts/dev_tools/run_clang_format.py`` or symlink
+the configuration into the repo root as ``.clang-format`` and using an appropriate
+editor configuration from ``src/editors``. Note that the dev-container shipped with
+this repository sets this up properly when used with VSCode. If the output would be
+truly horrible, it is allowed to disable formatting for a specific area using
+``// clang-format off`` annotations.
 
 .. note::
 
@@ -253,6 +291,22 @@ use ``std::bind``. (But, don't use ``std::bind`` - use a lambda instead).
 
 Use ``::`` to explicitly refer to the global namespace (eg, when calling an OS
 or external library function like ``::select`` or ``::sqlite3_open``).
+
+Test Data
+----------------------------------------
+
+Botan heavily favors data-driven tests where possible. As of the current writing there
+are under 3 Mb of test code, and almost 30 Mb of fixed data (under ``src/tests/data``)
+which the tests consume.
+
+It is very much preferable that test data is created by a third party implementation
+where possible. Botan itself should be used to create test inputs only when there is no
+reasonable alternative. Especially for X.509 related test data such as certificates or
+CRLs, prefer using OpenSSL, python-cryptography, or (as a last resort) ascii2der to
+generate test inputs.
+
+Generating test inputs from a third party helps reduce the risk that we replicate a bug
+in the library into the test itself.
 
 Use of External Dependencies
 ----------------------------------------
@@ -275,6 +329,13 @@ with intrinsics is that the compiler might rewrite your clever const-time SIMD
 into something with a conditional jump, but code intended to be const-time
 should in any case be annotated (using ``CT::poison``) so it can be checked at
 runtime with tools.
+
+SIMD Intrinsics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Using intrinsics is the preferred method of invoking hardware specific instructions.
+In doing so, prefer using (and extending if required) the wrapper types included in
+``utils/simd``.
 
 Operating System Dependencies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -310,11 +371,11 @@ need this functionality, and it can be done in the library for less than that,
 then it makes sense to just write the code. Yup.
 
 Currently the (optional) external dependencies of the library are several
-compression libraries (zlib, bzip2, lzma), sqlite3 database, Trousers (TPM
-integration), plus various operating system utilities like basic filesystem
-operations. These provide major pieces of functionality which seem worth the
-trouble of maintaining an integration with.
+compression libraries (zlib, bzip2, lzma), sqlite3 database, Trousers (TPM 1.2
+integration), TSS2 (TPM 2.0 integration) plus various operating system utilities
+like basic filesystem operations. These provide major pieces of functionality
+which seem worth the trouble of maintaining an integration with.
 
 At this point the most plausible examples of an appropriate new external
 dependency are all deeper integrations with system level cryptographic
-interfaces (CommonCrypto, CryptoAPI, /dev/crypto, iOS keychain, TPM 2.0, etc)
+interfaces (CommonCrypto, CryptoAPI, /dev/crypto, iOS keychain, etc)

@@ -4,12 +4,17 @@
 * Botan is released under the Simplified BSD License (see license.txt)
 */
 
-#include "test_rng.h"
 #include "tests.h"
 
 #if defined(BOTAN_HAS_RSA)
    #include "test_pubkey.h"
+   #include "test_rng.h"
+   #include <botan/numthry.h>
+   #include <botan/pk_options.h>
+   #include <botan/pubkey.h>
    #include <botan/rsa.h>
+   #include <botan/internal/blinding.h>
+   #include <botan/internal/fmt.h>
 #endif
 
 namespace Botan_Tests {
@@ -82,7 +87,7 @@ class RSA_PSS_KAT_Tests final : public PK_Signature_Generation_Test {
       std::string default_padding(const VarMap& vars) const override {
          const std::string hash_name = vars.get_req_str("Hash");
          const size_t salt_size = vars.get_req_bin("Nonce").size();
-         return "PSSR(" + hash_name + ",MGF1," + std::to_string(salt_size) + ")";
+         return Botan::fmt("PSS({},MGF1,{})", hash_name, salt_size);
       }
 
       bool clear_between_callbacks() const override { return false; }
@@ -100,7 +105,7 @@ class RSA_PSS_Raw_KAT_Tests final : public PK_Signature_Generation_Test {
       std::string default_padding(const VarMap& vars) const override {
          const std::string hash_name = vars.get_req_str("Hash");
          const size_t salt_size = vars.get_req_bin("Nonce").size();
-         return "PSSR_Raw(" + hash_name + ",MGF1," + std::to_string(salt_size) + ")";
+         return Botan::fmt("PSS_Raw({},MGF1,{})", hash_name, salt_size);
       }
 
       bool clear_between_callbacks() const override { return false; }
@@ -166,11 +171,11 @@ class RSA_Keygen_Bad_RNG_Test final : public Test {
          Request_Counting_RNG rng;
 
          try {
-            Botan::RSA_PrivateKey rsa(rng, 1024);
+            const Botan::RSA_PrivateKey rsa(rng, 1024);
             result.test_failure("Generated a key with a bad RNG");
          } catch(Botan::Internal_Error& e) {
             result.test_success("Key generation with bad RNG failed");
-            result.test_eq("Expected message", e.what(), "Internal error: RNG failure during RSA key generation");
+            result.test_str_eq("Expected message", e.what(), "Internal error: RNG failure during RSA key generation");
          }
 
          return {result};
@@ -189,25 +194,25 @@ class RSA_Blinding_Tests final : public Test {
          }
 
    #if defined(BOTAN_HAS_EMSA_RAW) || defined(BOTAN_HAS_EME_RAW)
-         Botan::RSA_PrivateKey rsa(this->rng(), 1024);
+         const Botan::RSA_PrivateKey rsa(this->rng(), 1024);
          Botan::Null_RNG null_rng;
    #endif
 
    #if defined(BOTAN_HAS_EMSA_RAW)
 
          /*
-         * The blinder chooses a new starting point BOTAN_BLINDING_REINIT_INTERVAL
+         * The blinder chooses a new starting point Blinder::ReinitInterval
          * so sign several times that with a single key.
          *
          * Very small values (padding/hashing disabled, only low byte set on input)
          * are used as an additional test on the blinders.
          */
 
-         Botan::PK_Signer signer(
-            rsa, this->rng(), "Raw", Botan::Signature_Format::Standard, "base");  // don't try this at home
-         Botan::PK_Verifier verifier(rsa, "Raw", Botan::Signature_Format::Standard, "base");
+         // don't try this at home
+         Botan::PK_Signer signer(rsa, this->rng(), Botan::PK_Signature_Options().with_padding("Raw"));
+         Botan::PK_Verifier verifier(rsa, Botan::PK_Signature_Options().with_padding("Raw"));
 
-         for(size_t i = 1; i <= BOTAN_BLINDING_REINIT_INTERVAL * 6; ++i) {
+         for(size_t i = 1; i <= Botan::Blinder::ReinitInterval * 6; ++i) {
             std::vector<uint8_t> input(16);
             input[input.size() - 1] = static_cast<uint8_t>(i | 1);
 
@@ -216,14 +221,14 @@ class RSA_Blinding_Tests final : public Test {
             // assert RNG is not called in this situation
             std::vector<uint8_t> signature = signer.signature(null_rng);
 
-            result.test_eq("Signature verifies", verifier.verify_message(input, signature), true);
+            result.test_is_true("Signature verifies", verifier.verify_message(input, signature));
          }
    #endif
 
    #if defined(BOTAN_HAS_EME_RAW)
 
          /*
-         * The blinder chooses a new starting point BOTAN_BLINDING_REINIT_INTERVAL
+         * The blinder chooses a new starting point Blinder::ReinitInterval
          * so decrypt several times that with a single key.
          *
          * Very small values (padding/hashing disabled, only low byte set on input)
@@ -239,12 +244,12 @@ class RSA_Blinding_Tests final : public Test {
          blinder initialization plus the exponent blinding bits which
          is 2*64 bits per operation.
          */
-         const size_t rng_bytes = rsa.get_n().bytes() + (2 * 8 * BOTAN_BLINDING_REINIT_INTERVAL);
+         const size_t rng_bytes = rsa.get_n().bytes() + (2 * 8 * Botan::Blinder::ReinitInterval);
 
          Fixed_Output_RNG fixed_rng(this->rng(), rng_bytes);
          Botan::PK_Decryptor_EME decryptor(rsa, fixed_rng, "Raw", "base");
 
-         for(size_t i = 1; i <= BOTAN_BLINDING_REINIT_INTERVAL; ++i) {
+         for(size_t i = 1; i <= Botan::Blinder::ReinitInterval; ++i) {
             std::vector<uint8_t> input(16);
             input[input.size() - 1] = static_cast<uint8_t>(i);
 
@@ -253,14 +258,14 @@ class RSA_Blinding_Tests final : public Test {
             std::vector<uint8_t> plaintext = Botan::unlock(decryptor.decrypt(ciphertext));
             plaintext.insert(plaintext.begin(), input.size() - 1, 0);
 
-            result.test_eq("Successful decryption", plaintext, input);
+            result.test_bin_eq("Successful decryption", plaintext, input);
          }
 
-         result.test_eq("RNG is no longer seeded", fixed_rng.is_seeded(), false);
+         result.test_is_false("RNG is no longer seeded", fixed_rng.is_seeded());
 
          // one more decryption should trigger a blinder reinitialization
          result.test_throws("RSA blinding reinit",
-                            "Test error Fixed output RNG ran out of bytes, test bug?",
+                            "Fixed output RNG ran out of bytes, test bug?",
                             [&decryptor, &encryptor, &null_rng]() {
                                std::vector<uint8_t> ciphertext =
                                   encryptor.encrypt(std::vector<uint8_t>(16, 5), null_rng);
@@ -270,6 +275,180 @@ class RSA_Blinding_Tests final : public Test {
    #endif
 
          return std::vector<Test::Result>{result};
+      }
+};
+
+class RSA_ISO9796_Roundtrip_Tests final : public Test {
+   public:
+      std::vector<Test::Result> run() override {
+         Test::Result result("RSA ISO-9796 sign/verify roundtrip");
+
+         try {
+            const Botan::RSA_PrivateKey rsa(this->rng(), 1024);
+
+            // A leading-zero recovered representative occurs about 1/128 of the time
+            constexpr size_t iterations = 256;
+
+            for(const std::string padding : {"ISO_9796_DS2(SHA-256)", "ISO_9796_DS3(SHA-256)"}) {
+               Botan::PK_Signer signer(rsa, this->rng(), padding);
+               Botan::PK_Verifier verifier(rsa, padding);
+
+               size_t verified = 0;
+               for(size_t i = 0; i != iterations; ++i) {
+                  const auto msg = rng().random_vec<std::vector<uint8_t>>(i);
+
+                  const auto sig = signer.sign_message(msg, this->rng());
+                  if(verifier.verify_message(msg, sig)) {
+                     verified += 1;
+                  }
+               }
+
+               result.test_sz_eq(padding + " signatures all verify", verified, iterations);
+            }
+
+            // ISO-9796-2 DS2/DS3 are message-recovery schemes: the verifier
+            // must split the message at the same capacity the encoder used. A
+            // modulus whose bit-length is not a multiple of 8 and a message that
+            // fills the recoverable region exercise a capacity calculation that
+            // previously differed by one byte between the two sides. Byte-aligned
+            // moduli (e.g. 1024 above) hide it, so sweep every residue mod 8.
+            const Botan::BigInt e = Botan::BigInt::from_u64(65537);
+            const size_t p_bits = 512;
+            const Botan::BigInt p = Botan::generate_rsa_prime(this->rng(), this->rng(), p_bits, e);
+            for(size_t mod_bits = 1025; mod_bits <= 1031; ++mod_bits) {
+               const size_t q_bits = mod_bits - p_bits;
+               const Botan::BigInt q = Botan::generate_rsa_prime(this->rng(), this->rng(), q_bits, e);
+
+               const Botan::RSA_PrivateKey rsa_unaligned(p, q, e);
+               if(!result.test_sz_eq("modulus has expected bit length", rsa_unaligned.key_length(), mod_bits)) {
+                  continue;
+               }
+
+               for(const std::string padding : {"ISO_9796_DS2(SHA-256)", "ISO_9796_DS3(SHA-256)"}) {
+                  Botan::PK_Signer signer(rsa_unaligned, this->rng(), padding);
+                  Botan::PK_Verifier verifier(rsa_unaligned, padding);
+
+                  // Check inputs under, at and above the recoverable capacity
+                  for(size_t msg_len = 0; msg_len != 128; ++msg_len) {
+                     const auto msg = this->rng().random_vec<std::vector<uint8_t>>(msg_len);
+                     const auto sig = signer.sign_message(msg, this->rng());
+                     result.test_is_true(
+                        Botan::fmt(
+                           "{} verifies recovery message of length {} (modulus {} bits)", padding, msg_len, mod_bits),
+                        verifier.verify_message(msg, sig));
+                  }
+               }
+            }
+         } catch(const Botan::Lookup_Error& e) {
+            result.note_missing(e.what());
+         }
+
+         return {result};
+      }
+};
+
+class RSA_DecryptOrRandom_Tests : public Test {
+   public:
+      std::vector<Test::Result> run() override {
+         const std::vector<std::string> padding_schemes = {
+   #if defined(BOTAN_HAS_EME_PKCS1)
+            "PKCS1v15",
+   #endif
+   #if defined(BOTAN_HAS_EME_OAEP)
+            "OAEP(SHA-256)",
+   #endif
+         };
+
+         constexpr size_t bits = 1024;
+
+         auto private_key = Botan::RSA_PrivateKey(rng(), bits);
+
+         std::vector<Test::Result> results;
+         for(const auto& padding : padding_schemes) {
+            Test::Result result("RSA decrypt_or_random " + padding);
+            test_decrypt_or_random(result, padding, private_key, rng());
+            results.push_back(result);
+         }
+         return results;
+      }
+
+   private:
+      static void test_decrypt_or_random(Test::Result& result,
+                                         std::string_view padding,
+                                         Botan::Private_Key& private_key,
+                                         Botan::RandomNumberGenerator& rng) {
+         constexpr size_t trials = 100;
+         constexpr size_t pt_len = 32;
+
+         auto public_key = private_key.public_key();
+         const auto msg = rng.random_vec(pt_len);
+
+         const Botan::PK_Encryptor_EME enc(*public_key, rng, padding);
+         const auto ctext = enc.encrypt(msg, rng);
+
+         const Botan::PK_Decryptor_EME dec(private_key, rng, padding);
+
+         const BigInt modulus = public_key->get_int_field("n");
+         const size_t modulus_bytes = modulus.bytes();
+
+         for(size_t i = 0; i != trials; ++i) {
+            auto bad_ctext = (BigInt::from_bytes(mutate_vec(ctext, rng, false, 0)) % modulus).serialize(modulus_bytes);
+
+            auto rec = dec.decrypt_or_random(bad_ctext.data(), bad_ctext.size(), pt_len, rng);
+
+            result.test_sz_eq("Returns a ciphertext of expected length", rec.size(), pt_len);
+         }
+
+         // Test decrypt_or_random with content check happy path
+         for(size_t i = 1; i != pt_len; ++i) {
+            const size_t req_bytes = i;
+
+            std::vector<uint8_t> required_contents(req_bytes);
+            std::vector<uint8_t> required_offsets(req_bytes);
+
+            for(size_t j = 0; j != req_bytes; ++j) {
+               const uint8_t idx = rng.next_byte() % pt_len;
+               required_contents[j] = msg[idx];
+               required_offsets[j] = idx;
+            }
+
+            auto rec = dec.decrypt_or_random(
+               ctext.data(), ctext.size(), pt_len, rng, required_contents.data(), required_offsets.data(), req_bytes);
+
+            result.test_bin_eq("Returned the expected message", rec, msg);
+         }
+
+         // Test decrypt_or_random with content check error path
+         for(size_t i = 1; i != pt_len; ++i) {
+            const size_t req_bytes = i;
+
+            std::vector<uint8_t> required_contents(req_bytes);
+            std::vector<uint8_t> required_offsets(req_bytes);
+
+            const size_t corrupted = Test::random_index(rng, req_bytes);
+            const uint8_t corruption = rng.next_nonzero_byte();
+
+            for(size_t j = 0; j != req_bytes; ++j) {
+               const uint8_t idx = rng.next_byte() % pt_len;
+               required_offsets[j] = idx;
+
+               if(idx == corrupted) {
+                  required_contents[j] = msg[idx] ^ corruption;
+               } else {
+                  required_contents[j] = msg[idx];
+               }
+            }
+
+            auto rec = dec.decrypt_or_random(
+               ctext.data(), ctext.size(), pt_len, rng, required_contents.data(), required_offsets.data(), req_bytes);
+
+            result.test_bin_ne("Returned random message", rec, ctext);
+
+            for(size_t j = 0; j != req_bytes; ++j) {
+               result.test_is_true("Random message satisfies stated content requirements",
+                                   rec[required_offsets[j]] == required_contents[j]);
+            }
+         }
       }
 };
 
@@ -285,6 +464,8 @@ BOTAN_REGISTER_TEST("pubkey", "rsa_keygen", RSA_Keygen_Tests);
 BOTAN_REGISTER_TEST("pubkey", "rsa_keygen_stability", RSA_Keygen_Stability_Tests);
 BOTAN_REGISTER_TEST("pubkey", "rsa_keygen_badrng", RSA_Keygen_Bad_RNG_Test);
 BOTAN_REGISTER_TEST("pubkey", "rsa_blinding", RSA_Blinding_Tests);
+BOTAN_REGISTER_TEST("pubkey", "rsa_iso9796_roundtrip", RSA_ISO9796_Roundtrip_Tests);
+BOTAN_REGISTER_TEST("pubkey", "rsa_decrypt_or_random", RSA_DecryptOrRandom_Tests);
 
 #endif
 

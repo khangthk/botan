@@ -11,20 +11,17 @@
 #if defined(BOTAN_HAS_PUBLIC_KEY_CRYPTO)
 
    #include <botan/base64.h>
-   #include <botan/hex.h>
-   #include <botan/rng.h>
-
    #include <botan/data_src.h>
    #include <botan/hash.h>
+   #include <botan/hex.h>
    #include <botan/pk_algs.h>
    #include <botan/pk_keys.h>
+   #include <botan/pk_options.h>
    #include <botan/pkcs8.h>
    #include <botan/pubkey.h>
    #include <botan/x509_key.h>
    #include <botan/internal/workfactor.h>
-
    #include <fstream>
-   #include <sstream>
 
    #if defined(BOTAN_HAS_DL_GROUP)
       #include <botan/dl_group.h>
@@ -36,11 +33,13 @@
 
 namespace Botan_CLI {
 
+namespace {
+
 class PK_Keygen final : public Command {
    public:
       PK_Keygen() :
             Command(
-               "keygen --algo=RSA --params= --passphrase= --cipher= --pbkdf= --pbkdf-ms=300 --pbkdf-iter= --provider= --der-out") {
+               "keygen --algo=RSA --params= --passphrase= --cipher= --pbkdf= --pbkdf-ms=300 --pbkdf-iter= --provider= --rng-type= --drbg-seed= --der-out") {
       }
 
       std::string group() const override { return "pubkey"; }
@@ -52,7 +51,7 @@ class PK_Keygen final : public Command {
          const std::string params = get_arg("params");
          const std::string provider = get_arg("provider");
 
-         std::unique_ptr<Botan::Private_Key> key = Botan::create_private_key(algo, rng(), params, provider);
+         const std::unique_ptr<Botan::Private_Key> key = Botan::create_private_key(algo, rng(), params, provider);
 
          if(!key) {
             throw CLI_Error_Unsupported("keygen", algo);
@@ -97,29 +96,83 @@ BOTAN_REGISTER_COMMAND("keygen", PK_Keygen);
 
 namespace {
 
-std::string choose_sig_padding(const std::string& key, const std::string& padding, const std::string& hash) {
-   if(key == "RSA") {
-      std::ostringstream oss;
-      if(padding.empty()) {
-         oss << "PSS";
-      } else {
-         oss << padding;
-      }
-
-      oss << "(" << hash << ")";
-      return oss.str();
-   } else if(padding.empty()) {
-      return hash;
-   } else if(hash.empty()) {
-      return padding;
-   } else {
-      std::ostringstream oss;
-      oss << padding << "(" << hash << ")";
-      return oss.str();
-   }
+/*
+* Signature schemes for which the caller must select a hash function; the
+* other schemes either fix the hash by the key type or do not use one.
+*/
+bool signature_scheme_requires_hash(std::string_view algo_name) {
+   return algo_name == "RSA" || algo_name == "DSA" || algo_name == "ECDSA" || algo_name == "ECGDSA" ||
+          algo_name == "ECKCDSA" || algo_name.starts_with("GOST-34.10");
 }
 
 }  // namespace
+
+/*
+* Shared handling of the signature related options of the sign and verify commands
+*/
+class PK_Signature_Command : public Command {
+   protected:
+      using Command::Command;
+
+      Botan::PK_Signature_Options signature_options(const Botan::Public_Key& key) const {
+         const std::string algo_name = key.algo_name();
+
+         auto options = Botan::PK_Signature_Options();
+
+         const bool prehashed = flag_set("prehashed");
+
+         std::string hash_fn = get_arg("hash");
+         // With a prehashed input an unnamed hash means the digest is signed as is
+         if(hash_fn.empty() && !prehashed && signature_scheme_requires_hash(algo_name)) {
+            hash_fn = "SHA-256";
+         }
+         if(!hash_fn.empty() && !Botan::HashFunction::create(hash_fn)) {
+            throw CLI_Error_Unsupported("hashing", hash_fn);
+         }
+         options = options.with_hash(hash_fn);
+
+         if(prehashed) {
+            options = options.with_externally_computed_prehash();
+         }
+
+         std::string padding = get_arg("padding");
+         if(padding.empty() && algo_name == "RSA") {
+            padding = "PSS";
+         }
+         options = options.with_padding(padding);
+
+         if(const auto prehash = get_arg_maybe("prehash")) {
+            if(*prehash == "default") {
+               options = options.with_prehash();
+            } else {
+               options = options.with_prehash(prehash);
+            }
+         }
+
+         if(const auto context = get_arg_maybe("context")) {
+            options = options.with_context(*context);
+         }
+
+         if(get_arg_maybe("salt-size")) {
+            options = options.with_salt_size(get_arg_sz("salt-size"));
+         }
+
+         if(flag_set("deterministic")) {
+            options = options.with_deterministic_signature();
+         }
+
+         if(flag_set("der-format")) {
+            if(!key._signature_element_size_for_DER_encoding()) {
+               throw CLI_Usage_Error("Key type " + algo_name + " does not support DER formatting for signatures");
+            }
+            options = options.with_der_encoded_signature();
+         }
+
+         options = options.with_provider(get_arg_or("provider", ""));
+
+         return options;
+      }
+};
 
 class PK_Fingerprint final : public Command {
    public:
@@ -176,9 +229,12 @@ std::unique_ptr<Botan::Private_Key> load_private_key(const std::string& key_file
 
 }  // namespace
 
-class PK_Sign final : public Command {
+class PK_Sign final : public PK_Signature_Command {
    public:
-      PK_Sign() : Command("sign --der-format --passphrase= --hash=SHA-256 --padding= --provider= key file") {}
+      PK_Sign() :
+            PK_Signature_Command(
+               "sign --der-format --passphrase= --hash= --padding= --prehash= --prehashed --context= --salt-size= "
+               "--deterministic --provider= --rng-type= --drbg-seed= key file") {}
 
       std::string group() const override { return "pubkey"; }
 
@@ -190,27 +246,7 @@ class PK_Sign final : public Command {
 
          auto key = load_private_key(key_file, passphrase);
 
-         const std::string hash_fn = get_arg("hash");
-
-         if(!hash_fn.empty() && !Botan::HashFunction::create(hash_fn)) {
-            throw CLI_Error_Unsupported("hashing", hash_fn);
-         }
-
-         const std::string sig_padding = choose_sig_padding(key->algo_name(), get_arg("padding"), hash_fn);
-
-         auto format = Botan::Signature_Format::Standard;
-
-         if(flag_set("der-format")) {
-            if(key->message_parts() == 1) {
-               throw CLI_Usage_Error("Key type " + key->algo_name() +
-                                     " does not support DER formatting for signatures");
-            }
-            format = Botan::Signature_Format::DerSequence;
-         }
-
-         const std::string provider = get_arg("provider");
-
-         Botan::PK_Signer signer(*key, rng(), sig_padding, format, provider);
+         Botan::PK_Signer signer(*key, rng(), signature_options(*key));
 
          auto onData = [&signer](const uint8_t b[], size_t l) { signer.update(b, l); };
          Command::read_file(get_arg("file"), onData);
@@ -232,9 +268,12 @@ class PK_Sign final : public Command {
 
 BOTAN_REGISTER_COMMAND("sign", PK_Sign);
 
-class PK_Verify final : public Command {
+class PK_Verify final : public PK_Signature_Command {
    public:
-      PK_Verify() : Command("verify --der-format --hash=SHA-256 --padding= pubkey file signature") {}
+      PK_Verify() :
+            PK_Signature_Command(
+               "verify --der-format --hash= --padding= --prehash= --prehashed --context= --salt-size= pubkey file "
+               "signature") {}
 
       std::string group() const override { return "pubkey"; }
 
@@ -248,24 +287,7 @@ class PK_Verify final : public Command {
             throw CLI_Error("Unable to load public key");
          }
 
-         const std::string hash_fn = get_arg("hash");
-
-         if(!hash_fn.empty() && !Botan::HashFunction::create(hash_fn)) {
-            throw CLI_Error_Unsupported("hashing", hash_fn);
-         }
-
-         const std::string sig_padding = choose_sig_padding(key->algo_name(), get_arg("padding"), hash_fn);
-
-         auto format = Botan::Signature_Format::Standard;
-         if(flag_set("der-format")) {
-            if(key->message_parts() == 1) {
-               throw CLI_Usage_Error("Key type " + key->algo_name() +
-                                     " does not support DER formatting for signatures");
-            }
-            format = Botan::Signature_Format::DerSequence;
-         }
-
-         Botan::PK_Verifier verifier(*key, sig_padding, format);
+         Botan::PK_Verifier verifier(*key, signature_options(*key));
          auto onData = [&verifier](const uint8_t b[], size_t l) { verifier.update(b, l); };
          Command::read_file(get_arg("file"), onData);
 
@@ -284,7 +306,7 @@ class PKCS8_Tool final : public Command {
    public:
       PKCS8_Tool() :
             Command(
-               "pkcs8 --pass-in= --pub-out --der-out --pass-out= --cipher= --pbkdf= --pbkdf-ms=300 --pbkdf-iter= key") {
+               "pkcs8 --pass-in= --pub-out --der-out --pass-out= --cipher= --pbkdf= --pbkdf-ms=300 --pbkdf-iter= --rng-type= --drbg-seed= key") {
       }
 
       std::string group() const override { return "pubkey"; }
@@ -308,10 +330,11 @@ class PKCS8_Tool final : public Command {
          const bool der_out = flag_set("der-out");
 
          if(flag_set("pub-out")) {
+            auto pk = key->public_key();
             if(der_out) {
-               write_output(Botan::X509::BER_encode(*key));
+               write_output(Botan::X509::BER_encode(*pk));
             } else {
-               output() << Botan::X509::PEM_encode(*key);
+               output() << Botan::X509::PEM_encode(*pk);
             }
          } else {
             const std::string pass_out = get_passphrase_arg("Passphrase to encrypt key", "pass-out");
@@ -365,7 +388,7 @@ class EC_Group_Info final : public Command {
          const auto ec_group = Botan::EC_Group::from_name(get_arg("name"));
 
          if(flag_set("pem")) {
-            output() << ec_group.PEM_encode();
+            output() << ec_group.PEM_encode(Botan::EC_Group_Encoding::NamedCurve);
          } else {
             output() << "P = " << std::hex << ec_group.get_p() << "\n"
                      << "A = " << std::hex << ec_group.get_a() << "\n"
@@ -393,7 +416,7 @@ class DL_Group_Info final : public Command {
       }
 
       void go() override {
-         Botan::DL_Group dl_group(get_arg("name"));
+         auto dl_group = Botan::DL_Group::from_name(get_arg("name"));
 
          if(flag_set("pem")) {
             output() << dl_group.PEM_encode(Botan::DL_Group_Format::ANSI_X9_42_DH_PARAMETERS);
@@ -434,7 +457,8 @@ BOTAN_REGISTER_COMMAND("pk_workfactor", PK_Workfactor);
 
 class Gen_DL_Group final : public Command {
    public:
-      Gen_DL_Group() : Command("gen_dl_group --pbits=2048 --qbits=0 --seed= --type=subgroup") {}
+      Gen_DL_Group() :
+            Command("gen_dl_group --pbits=2048 --qbits=0 --seed= --type=subgroup --rng-type= --drbg-seed=") {}
 
       std::string group() const override { return "pubkey"; }
 
@@ -451,13 +475,13 @@ class Gen_DL_Group final : public Command {
             if(!seed_str.empty()) {
                throw CLI_Usage_Error("Seed only supported for DSA param gen");
             }
-            Botan::DL_Group grp(rng(), Botan::DL_Group::Strong, pbits);
+            const Botan::DL_Group grp(rng(), Botan::DL_Group::Strong, pbits);
             output() << grp.PEM_encode(Botan::DL_Group_Format::ANSI_X9_42);
          } else if(type == "subgroup") {
             if(!seed_str.empty()) {
                throw CLI_Usage_Error("Seed only supported for DSA param gen");
             }
-            Botan::DL_Group grp(rng(), Botan::DL_Group::Prime_Subgroup, pbits, qbits);
+            const Botan::DL_Group grp(rng(), Botan::DL_Group::Prime_Subgroup, pbits, qbits);
             output() << grp.PEM_encode(Botan::DL_Group_Format::ANSI_X9_42);
          } else if(type == "dsa") {
             size_t dsa_qbits = qbits;
@@ -472,11 +496,11 @@ class Gen_DL_Group final : public Command {
             }
 
             if(seed_str.empty()) {
-               Botan::DL_Group grp(rng(), Botan::DL_Group::DSA_Kosherizer, pbits, dsa_qbits);
+               const Botan::DL_Group grp(rng(), Botan::DL_Group::DSA_Kosherizer, pbits, dsa_qbits);
                output() << grp.PEM_encode(Botan::DL_Group_Format::ANSI_X9_57);
             } else {
                const std::vector<uint8_t> seed = Botan::hex_decode(seed_str);
-               Botan::DL_Group grp(rng(), seed, pbits, dsa_qbits);
+               const Botan::DL_Group grp(rng(), seed, pbits, dsa_qbits);
                output() << grp.PEM_encode(Botan::DL_Group_Format::ANSI_X9_57);
             }
 
@@ -489,6 +513,8 @@ class Gen_DL_Group final : public Command {
 BOTAN_REGISTER_COMMAND("gen_dl_group", Gen_DL_Group);
 
    #endif
+
+}  // namespace
 
 }  // namespace Botan_CLI
 

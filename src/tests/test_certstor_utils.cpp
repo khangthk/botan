@@ -9,8 +9,10 @@
 
 #if defined(BOTAN_HAS_X509_CERTIFICATES)
 
+   #include <botan/assert.h>
    #include <botan/ber_dec.h>
    #include <botan/hex.h>
+   #include <algorithm>
 
 namespace Botan_Tests {
 
@@ -84,6 +86,11 @@ std::vector<uint8_t> get_key_id() {
 
 std::string get_subject_cn() {
    return "ISRG Root X1";
+}
+
+std::vector<uint8_t> get_serial_number() {
+   // serial number of "ISRG Root X1"
+   return Botan::hex_decode("8210CFB0D240E3594463E0BB63828B00");
 }
 
 std::vector<uint8_t> get_pubkey_sha1_of_cert_with_different_key_id() {

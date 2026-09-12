@@ -12,7 +12,8 @@
 #ifndef BOTAN_BYTE_SWAP_H_
 #define BOTAN_BYTE_SWAP_H_
 
-#include <botan/types.h>
+#include <botan/compiler.h>
+#include <concepts>
 
 namespace Botan {
 
